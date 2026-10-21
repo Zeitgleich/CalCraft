@@ -4,18 +4,23 @@
 //! ever built from user input. A PostgreSQL backend and a storage trait
 //! follow once a second backend exists.
 
-use std::{fmt, path::Path, str::FromStr, time::Duration};
+use std::{fmt, path::Path, str::FromStr, sync::Arc};
 
 use calcraft_core::{CollectionKind, Slug, Username};
 use sqlx::{
     Row, SqlitePool,
-    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow},
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow},
 };
 
 mod accounts;
+mod backup;
 mod items;
 
 pub use accounts::{AppPassword, MAX_APP_PASSWORDS, RECOVERY_CODES, Session, TotpState};
+pub use backup::{
+    BackupInfo, RestoreInfo, StoreOptions, backup_database, latest_migration,
+    pre_migration_backups, restore_database,
+};
 pub use items::{Change, Item, ItemMeta, NewItem, Precondition, PutOutcome};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
@@ -45,6 +50,24 @@ pub enum StoreError {
     CollectionExists,
     #[error("limit reached: {0}")]
     Limit(&'static str),
+    #[error("{0}")]
+    Backup(String),
+    #[error("{0}")]
+    InUse(String),
+    #[error(
+        "the database was migrated by a newer CalCraft version (migration {version}, this \
+         version knows up to {known}). Downgrading in place is not supported: run the newer \
+         version again, or restore the pre-migration backup (calcraft.db.pre-migration-*) with \
+         this version, see docs/backup-and-upgrade.md"
+    )]
+    NewerSchema { version: i64, known: i64 },
+    #[error(
+        "migration {0} failed earlier and left the database in an unknown state: restore the \
+         pre-migration backup, see docs/backup-and-upgrade.md"
+    )]
+    DirtyMigration(i64),
+    #[error("backup before migrating failed, nothing was migrated: {0}")]
+    PreMigrationBackup(String),
 }
 
 pub type Result<T, E = StoreError> = std::result::Result<T, E>;
@@ -101,32 +124,16 @@ pub struct Collection {
 #[derive(Debug, Clone)]
 pub struct Store {
     pub(crate) pool: SqlitePool,
+    /// Shared process lock on `<database>.lock`; `None` in memory.
+    #[allow(dead_code)]
+    lock: Option<Arc<backup::DbLock>>,
 }
 
 impl Store {
-    /// Opens (and creates, if missing) the database file and applies migrations.
+    /// Opens (and creates, if missing) the database file and applies
+    /// migrations with default [`StoreOptions`], see [`Store::open_with`].
     pub async fn open(path: &Path) -> Result<Self> {
-        // SQLite keeps recent pages (including password hashes) in the
-        // -wal and -shm files and reuses existing files with their
-        // permissions, so all three are created owner-only up front.
-        for file in database_files(path) {
-            create_private(&file)?;
-        }
-        let options = SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal)
-            .foreign_keys(true)
-            .busy_timeout(Duration::from_secs(5));
-        let pool = SqlitePoolOptions::new()
-            .max_connections(8)
-            .connect_with(options)
-            .await?;
-        let store = Self::init(pool).await?;
-        for file in database_files(path) {
-            restrict_permissions(&file)?;
-        }
-        Ok(store)
+        Self::open_with(path, &StoreOptions::default()).await
     }
 
     /// Opens a private in-memory database, for tests.
@@ -142,7 +149,7 @@ impl Store {
 
     async fn init(pool: SqlitePool) -> Result<Self> {
         MIGRATOR.run(&pool).await?;
-        Ok(Self { pool })
+        Ok(Self { pool, lock: None })
     }
 
     /// Checks that the database is reachable.
@@ -336,12 +343,11 @@ pub(crate) fn collection_from_row(row: &SqliteRow) -> Result<Collection> {
 
 /// The database file and its WAL companions.
 fn database_files(path: &Path) -> [std::path::PathBuf; 3] {
-    let with_suffix = |suffix: &str| {
-        let mut name = path.as_os_str().to_owned();
-        name.push(suffix);
-        std::path::PathBuf::from(name)
-    };
-    [path.to_path_buf(), with_suffix("-wal"), with_suffix("-shm")]
+    [
+        path.to_path_buf(),
+        backup::with_suffix(path, "-wal"),
+        backup::with_suffix(path, "-shm"),
+    ]
 }
 
 /// Creates an empty file with owner-only permissions if it does not exist.

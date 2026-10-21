@@ -64,12 +64,28 @@ impl ServerConfig {
 pub struct StorageConfig {
     /// Path of the SQLite database file. Created on first start.
     pub database: PathBuf,
+    /// Back up the database next to it before applying migrations
+    /// (`<database>.pre-migration-<version>-<timestamp>`).
+    pub pre_migration_backup: bool,
+    /// Number of pre-migration backups to keep; older ones are deleted.
+    pub pre_migration_backups_keep: usize,
 }
 
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             database: PathBuf::from("calcraft.db"),
+            pre_migration_backup: true,
+            pre_migration_backups_keep: 3,
+        }
+    }
+}
+
+impl StorageConfig {
+    pub fn store_options(&self) -> calcraft_store::StoreOptions {
+        calcraft_store::StoreOptions {
+            pre_migration_backup: self.pre_migration_backup,
+            pre_migration_backups_keep: self.pre_migration_backups_keep,
         }
     }
 }
@@ -185,6 +201,11 @@ impl Config {
                 "server.request_timeout_secs must be greater than 0",
             ));
         }
+        if self.storage.pre_migration_backups_keep == 0 {
+            return Err(ConfigError::Invalid(
+                "storage.pre_migration_backups_keep must be at least 1",
+            ));
+        }
         Ok(())
     }
 }
@@ -225,6 +246,19 @@ mod tests {
     fn zero_limits_are_rejected() {
         assert!(from_toml("[server]\nmax_body_bytes = 0\n").is_err());
         assert!(from_toml("[server]\nrequest_timeout_secs = 0\n").is_err());
+        assert!(from_toml("[storage]\npre_migration_backups_keep = 0\n").is_err());
+    }
+
+    #[test]
+    fn pre_migration_backup_is_on_by_default() {
+        let config = Config::default();
+        assert!(config.storage.pre_migration_backup);
+        assert_eq!(config.storage.pre_migration_backups_keep, 3);
+        let config =
+            from_toml("[storage]\npre_migration_backup = false\npre_migration_backups_keep = 5\n")
+                .unwrap();
+        assert!(!config.storage.store_options().pre_migration_backup);
+        assert_eq!(config.storage.store_options().pre_migration_backups_keep, 5);
     }
 
     #[test]

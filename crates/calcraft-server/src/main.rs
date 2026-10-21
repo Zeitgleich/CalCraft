@@ -1,3 +1,4 @@
+mod backup_cmd;
 mod users;
 
 use std::{net::SocketAddr, path::PathBuf, process::ExitCode};
@@ -32,13 +33,17 @@ enum Command {
         #[command(subcommand)]
         command: users::UserCommand,
     },
+    /// Write a consistent backup of the database (safe while the server runs).
+    Backup(backup_cmd::BackupArgs),
+    /// Replace the database with a backup (the server must be stopped).
+    Restore(backup_cmd::RestoreArgs),
 }
 
 #[derive(Debug, Args)]
-struct ConfigArgs {
+pub(crate) struct ConfigArgs {
     /// Path to the TOML configuration file.
     #[arg(short, long, env = "CALCRAFT_CONFIG")]
-    config: Option<PathBuf>,
+    pub(crate) config: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -94,6 +99,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 users::run(&store, command).await
             })
         }
+        Command::Backup(args) => {
+            let config = Config::load(args.config.config.as_deref())?;
+            runtime()?.block_on(backup_cmd::backup(&config, &args))
+        }
+        Command::Restore(args) => {
+            let config = Config::load(args.config.config.as_deref())?;
+            runtime()?.block_on(backup_cmd::restore(&config, &args))
+        }
     }
 }
 
@@ -102,7 +115,7 @@ fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
 }
 
 async fn open_store(config: &Config) -> anyhow::Result<Store> {
-    Store::open(&config.storage.database)
+    Store::open_with(&config.storage.database, &config.storage.store_options())
         .await
         .with_context(|| {
             format!(
