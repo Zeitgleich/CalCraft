@@ -132,7 +132,13 @@ pub async fn login(
         request.code.as_deref(),
     )
     .await?;
+    let cookie = start_session(&state, &user).await?;
+    Ok(([(SET_COOKIE, cookie)], Json(me_of(&user))).into_response())
+}
 
+/// Creates a session for an authenticated user and returns the
+/// `Set-Cookie` value. Shared by password and SSO login.
+pub(super) async fn start_session(state: &AppState, user: &User) -> Result<String, ApiError> {
     let token = random_token::<32>();
     let created = now();
     state
@@ -144,8 +150,7 @@ pub async fn login(
             created + SESSION_TTL,
         )
         .await?;
-    let cookie = session_cookie(Some(&token), state.secure_cookies);
-    Ok(([(SET_COOKIE, cookie)], Json(me_of(&user))).into_response())
+    Ok(session_cookie(Some(&token), state.secure_cookies))
 }
 
 pub async fn logout(

@@ -8,17 +8,19 @@
 mod account;
 mod admin;
 mod collections;
+#[cfg(feature = "oidc")]
+mod oidc;
 
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Request},
+    extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Request, State},
     http::{HeaderMap, Method, StatusCode, header, request::Parts},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post},
 };
-use calcraft_core::api::{CSRF_HEADER, ErrorBody, VersionInfo};
+use calcraft_core::api::{AuthMethods, CSRF_HEADER, ErrorBody, VersionInfo};
 use calcraft_store::{StoreError, User};
 use serde::de::DeserializeOwned;
 
@@ -36,7 +38,10 @@ pub const OPENAPI: &str = include_str!("openapi.json");
 /// Routes as `(method, path)`, used by the OpenAPI coverage test.
 pub const ROUTES: &[(&str, &str)] = &[
     ("get", "/v1/version"),
+    ("get", "/v1/auth/methods"),
     ("post", "/v1/auth/login"),
+    ("get", "/v1/auth/oidc/login"),
+    ("get", "/v1/auth/oidc/callback"),
     ("post", "/v1/auth/logout"),
     ("get", "/v1/me"),
     ("post", "/v1/me/password"),
@@ -57,9 +62,10 @@ pub const ROUTES: &[(&str, &str)] = &[
 
 /// Builds the API router, to be nested under `/api`.
 pub fn router() -> Router<AppState> {
-    Router::new()
+    let router = Router::new()
         .route("/openapi.json", get(openapi))
         .route("/v1/version", get(version))
+        .route("/v1/auth/methods", get(auth_methods))
         .route("/v1/auth/login", post(account::login))
         .route("/v1/auth/logout", post(account::logout))
         .route("/v1/me", get(account::me))
@@ -84,7 +90,13 @@ pub fn router() -> Router<AppState> {
             patch(collections::update).delete(collections::delete),
         )
         .route("/v1/admin/users", get(admin::list).post(admin::create))
-        .route("/v1/admin/users/{username}", patch(admin::update))
+        .route("/v1/admin/users/{username}", patch(admin::update));
+    // Without the `oidc` feature these paths fall through to 404.
+    #[cfg(feature = "oidc")]
+    let router = router
+        .route("/v1/auth/oidc/login", get(oidc::login))
+        .route("/v1/auth/oidc/callback", get(oidc::callback));
+    router
         .fallback(|| async { ApiError::NotFound })
         .layer(middleware::from_fn(require_csrf_header))
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY))
@@ -99,6 +111,20 @@ async fn version() -> Json<VersionInfo> {
         name: calcraft_core::NAME.to_owned(),
         version: calcraft_core::VERSION.to_owned(),
         source: calcraft_core::SOURCE_URL.to_owned(),
+    })
+}
+
+async fn auth_methods(State(state): State<AppState>) -> Json<AuthMethods> {
+    #[cfg(feature = "oidc")]
+    let oidc = state.oidc.as_ref().map(|oidc| oidc.method());
+    #[cfg(not(feature = "oidc"))]
+    let oidc = {
+        let _ = state;
+        None
+    };
+    Json(AuthMethods {
+        password: true,
+        oidc,
     })
 }
 

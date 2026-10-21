@@ -86,6 +86,16 @@ pub async fn hash_password_async(password: String) -> Result<String, PasswordErr
         .map_err(|_| PasswordError::Hash)?
 }
 
+/// Stored as password hash of accounts created by SSO: not a PHC string,
+/// so no password ever matches. An administrator can set a real password
+/// later (`calcraft user passwd`).
+pub const UNUSABLE_PASSWORD_HASH: &str = "!sso-only";
+
+/// Whether a stored hash can match any password.
+pub fn has_usable_password(hash: &str) -> bool {
+    PasswordHash::new(hash).is_ok()
+}
+
 fn verify_password(password: &str, hash: &str) -> bool {
     PasswordHash::new(hash).ok().is_some_and(|parsed| {
         Argon2::default()
@@ -351,16 +361,22 @@ impl Authenticator {
             return AuthOutcome::Authenticated(record.user.clone());
         }
 
-        let hash = record
+        // Accounts without a usable password (SSO only) are checked against
+        // the dummy hash, so they take as long as a wrong password.
+        let usable = record
             .as_ref()
-            .map_or_else(|| self.dummy_hash.clone(), |r| r.password_hash.clone());
+            .is_some_and(|r| has_usable_password(&r.password_hash));
+        let hash = match &record {
+            Some(record) if usable => record.password_hash.clone(),
+            _ => self.dummy_hash.clone(),
+        };
         let Ok(_permit) = self.hashing.acquire().await else {
             return AuthOutcome::Error;
         };
         let password = password.to_owned();
         let valid =
             match tokio::task::spawn_blocking(move || verify_password(&password, &hash)).await {
-                Ok(valid) => valid,
+                Ok(valid) => valid && usable,
                 Err(err) => {
                     tracing::error!(%err, "password verification task failed");
                     return AuthOutcome::Error;

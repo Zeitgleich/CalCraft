@@ -6,6 +6,8 @@ pub mod app;
 pub mod auth;
 pub mod config;
 pub mod dav;
+#[cfg(feature = "oidc")]
+pub mod oidc;
 pub mod secrets;
 pub mod security;
 pub mod telemetry;
@@ -19,3 +21,6 @@ pub const WEB_UI_COMPILED: bool = cfg!(feature = "web-ui");
 
 /// Whether the REST API is compiled into this binary.
 pub const API_COMPILED: bool = cfg!(feature = "api");
+
+/// Whether single sign-on (OpenID Connect) is compiled into this binary.
+pub const OIDC_COMPILED: bool = cfg!(feature = "oidc");

@@ -41,6 +41,9 @@ pub enum UserCommand {
         #[arg(long)]
         revoke: bool,
     },
+    /// Remove the SSO (OIDC) identity bound to a user, e.g. after the IdP
+    /// account was recreated. The next SSO login binds the new identity.
+    UnbindSso { username: String },
 }
 
 /// Passwords are never accepted as command-line arguments, because those
@@ -128,6 +131,15 @@ pub async fn run(store: &Store, command: UserCommand) -> anyhow::Result<()> {
             }
             let state = if revoke { "revoked" } else { "granted" };
             println!("admin rights of {username} {state}");
+        }
+        UserCommand::UnbindSso { username } => {
+            let username = parse_username(&username)?;
+            let Some(record) = store.user_credentials(&username).await? else {
+                bail!("user {username} does not exist");
+            };
+            let removed = store.unbind_oidc_identities(record.user.id).await?;
+            store.delete_sessions_of(record.user.id).await?;
+            println!("removed {removed} SSO identities of {username}");
         }
     }
     Ok(())

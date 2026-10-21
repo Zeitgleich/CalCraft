@@ -29,6 +29,9 @@ pub struct AppState {
     pub auth: Arc<Authenticator>,
     /// Mark session cookies `Secure` (HTTPS only).
     pub secure_cookies: bool,
+    /// Single sign-on, if configured.
+    #[cfg(feature = "oidc")]
+    pub oidc: Option<Arc<crate::oidc::Oidc>>,
 }
 
 impl AppState {
@@ -37,6 +40,8 @@ impl AppState {
             auth: Authenticator::new(store.clone())?,
             store,
             secure_cookies: true,
+            #[cfg(feature = "oidc")]
+            oidc: None,
         })
     }
 }

@@ -14,9 +14,11 @@ use sqlx::{
 
 mod accounts;
 mod items;
+mod oidc;
 
 pub use accounts::{AppPassword, MAX_APP_PASSWORDS, RECOVERY_CODES, Session, TotpState};
 pub use items::{Change, Item, ItemMeta, NewItem, Precondition, PutOutcome};
+pub use oidc::OidcBinding;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
