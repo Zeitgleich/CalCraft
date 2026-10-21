@@ -15,6 +15,18 @@ pub const MAX_COLLECTIONS_PER_USER: i64 = 100;
 pub const MAX_ITEMS_PER_COLLECTION: i64 = 100_000;
 /// Storage quota per user for object content.
 pub const MAX_BYTES_PER_USER: i64 = 512 * 1024 * 1024;
+/// Tombstones kept per collection; older ones are pruned and raise the
+/// collection's sync floor, so clients with older tokens resynchronise.
+pub const MAX_TOMBSTONES: i64 = 10_000;
+
+/// One entry of the change log, joined with the current object metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Change {
+    pub name: String,
+    pub revision: i64,
+    /// `None` for a deleted object.
+    pub meta: Option<ItemMeta>,
+}
 
 /// A stored calendar object including its content.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,9 +131,9 @@ impl Store {
             return Err(StoreError::Limit("too many collections"));
         }
         let result = sqlx::query(
-            "INSERT INTO collections (owner_id, kind, slug, display_name, description, color, components) \
-             VALUES (?, ?, ?, ?, ?, ?, ?) \
-             RETURNING id, owner_id, kind, slug, display_name, description, color, sync_revision, components",
+            "INSERT INTO collections (owner_id, kind, slug, display_name, description, color, components, token_salt) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, abs(random())) \
+             RETURNING id, owner_id, kind, slug, display_name, description, color, sync_revision, components, sync_floor, token_salt",
         )
         .bind(owner_id)
         .bind(kind.as_str())
@@ -232,6 +244,7 @@ impl Store {
         component: Option<&str>,
         start: Option<i64>,
         end: Option<i64>,
+        limit: u32,
     ) -> Result<Vec<ItemMeta>> {
         let rows = sqlx::query(
             "SELECT name, etag, length(content) AS size FROM items \
@@ -239,12 +252,13 @@ impl Store {
                AND (?2 IS NULL OR component = ?2) \
                AND (?3 IS NULL OR range_end IS NULL OR range_end > ?3) \
                AND (?4 IS NULL OR range_start IS NULL OR range_start < ?4) \
-             ORDER BY name",
+             ORDER BY name LIMIT ?5",
         )
         .bind(collection_id)
         .bind(component)
         .bind(start)
         .bind(end)
+        .bind(limit)
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(meta_from_row).collect()
@@ -364,6 +378,7 @@ impl Store {
         .bind(revision)
         .execute(&mut *tx)
         .await?;
+        record_change(&mut tx, collection_id, revision, name, false).await?;
         tx.commit().await?;
         Ok(if existing.is_some() {
             PutOutcome::Updated
@@ -397,13 +412,146 @@ impl Store {
             .bind(name)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE collections SET sync_revision = sync_revision + 1 WHERE id = ?")
-            .bind(collection_id)
-            .execute(&mut *tx)
-            .await?;
+        let revision: i64 = sqlx::query(
+            "UPDATE collections SET sync_revision = sync_revision + 1 WHERE id = ? RETURNING sync_revision",
+        )
+        .bind(collection_id)
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get("sync_revision")?;
+        record_change(&mut tx, collection_id, revision, name, true).await?;
         tx.commit().await?;
         Ok(true)
     }
+
+    /// Changes after revision `since`, oldest first, at most `limit` rows.
+    /// Live objects come with their current metadata (one joined query).
+    pub async fn changes_since(
+        &self,
+        collection_id: i64,
+        since: i64,
+        limit: u32,
+    ) -> Result<Vec<Change>> {
+        let rows = sqlx::query(
+            "SELECT c.name, c.revision, c.deleted, i.etag, length(i.content) AS size \
+             FROM changes c \
+             LEFT JOIN items i ON i.collection_id = c.collection_id AND i.name = c.name \
+             WHERE c.collection_id = ?1 AND c.revision > ?2 \
+             ORDER BY c.revision LIMIT ?3",
+        )
+        .bind(collection_id)
+        .bind(since)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                let name: String = row.try_get("name")?;
+                let deleted: bool = row.try_get("deleted")?;
+                let etag: Option<String> = row.try_get("etag")?;
+                let meta = match (deleted, etag) {
+                    (false, Some(etag)) => Some(ItemMeta {
+                        name: name.clone(),
+                        etag,
+                        size: row.try_get("size")?,
+                    }),
+                    _ => None,
+                };
+                Ok(Change {
+                    name,
+                    revision: row.try_get("revision")?,
+                    meta,
+                })
+            })
+            .collect()
+    }
+
+    /// Current objects ordered by the revision of their last change, at most
+    /// `limit` rows; used for the initial sync and paging through it.
+    pub async fn items_by_revision(
+        &self,
+        collection_id: i64,
+        limit: u32,
+    ) -> Result<Vec<(i64, ItemMeta)>> {
+        let rows = sqlx::query(
+            "SELECT name, etag, length(content) AS size, revision FROM items \
+             WHERE collection_id = ? ORDER BY revision LIMIT ?",
+        )
+        .bind(collection_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| Ok((row.try_get("revision")?, meta_from_row(row)?)))
+            .collect()
+    }
+
+    /// Objects of a collection without content, at most `limit`.
+    pub async fn items_limited(&self, collection_id: i64, limit: u32) -> Result<Vec<ItemMeta>> {
+        let rows = sqlx::query(
+            "SELECT name, etag, length(content) AS size FROM items WHERE collection_id = ? ORDER BY name LIMIT ?",
+        )
+        .bind(collection_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(meta_from_row).collect()
+    }
+}
+
+async fn record_change(
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    collection_id: i64,
+    revision: i64,
+    name: &str,
+    deleted: bool,
+) -> Result<()> {
+    // One row per object: the latest change replaces earlier ones.
+    sqlx::query(
+        "INSERT INTO changes (collection_id, name, revision, deleted) VALUES (?, ?, ?, ?) \
+         ON CONFLICT (collection_id, name) DO UPDATE SET revision = excluded.revision, deleted = excluded.deleted",
+    )
+    .bind(collection_id)
+    .bind(name)
+    .bind(revision)
+    .bind(deleted)
+    .execute(&mut **tx)
+    .await?;
+    if !deleted {
+        return Ok(());
+    }
+    // Bound the number of tombstones; prune the oldest and raise the floor.
+    let tombstones: i64 =
+        sqlx::query("SELECT COUNT(*) AS n FROM changes WHERE collection_id = ? AND deleted = 1")
+            .bind(collection_id)
+            .fetch_one(&mut **tx)
+            .await?
+            .try_get("n")?;
+    if tombstones > MAX_TOMBSTONES {
+        let excess = tombstones - MAX_TOMBSTONES;
+        let floor: i64 = sqlx::query(
+            "SELECT MAX(revision) AS floor FROM (SELECT revision FROM changes \
+             WHERE collection_id = ? AND deleted = 1 ORDER BY revision LIMIT ?)",
+        )
+        .bind(collection_id)
+        .bind(excess)
+        .fetch_one(&mut **tx)
+        .await?
+        .try_get("floor")?;
+        sqlx::query(
+            "DELETE FROM changes WHERE collection_id = ? AND deleted = 1 AND revision <= ?",
+        )
+        .bind(collection_id)
+        .bind(floor)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query("UPDATE collections SET sync_floor = ? WHERE id = ?")
+            .bind(floor)
+            .bind(collection_id)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -571,6 +719,91 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn change_log_for_sync() {
+        let (store, cal, other) = setup().await;
+        let names = |changes: Vec<Change>| {
+            changes
+                .into_iter()
+                .map(|c| (c.name, c.meta.is_some()))
+                .collect::<Vec<_>>()
+        };
+        store
+            .put_item(
+                cal.id,
+                "a.ics",
+                &item("a", "\"1\"", None, None),
+                &Precondition::None,
+            )
+            .await
+            .unwrap();
+        store
+            .put_item(
+                cal.id,
+                "b.ics",
+                &item("b", "\"1\"", None, None),
+                &Precondition::None,
+            )
+            .await
+            .unwrap();
+        let mid = store
+            .changes_since(cal.id, 0, 100)
+            .await
+            .unwrap()
+            .last()
+            .unwrap()
+            .revision;
+        store
+            .put_item(
+                cal.id,
+                "a.ics",
+                &item("a", "\"2\"", None, None),
+                &Precondition::None,
+            )
+            .await
+            .unwrap();
+        store
+            .delete_item(cal.id, "b.ics", &Precondition::None)
+            .await
+            .unwrap();
+        store
+            .put_item(
+                other.id,
+                "x.ics",
+                &item("x", "\"1\"", None, None),
+                &Precondition::None,
+            )
+            .await
+            .unwrap();
+
+        // Latest change per object, ordered by revision; other collections excluded.
+        assert_eq!(
+            names(store.changes_since(cal.id, 0, 100).await.unwrap()),
+            [("a.ics".to_owned(), true), ("b.ics".to_owned(), false)]
+        );
+        assert_eq!(
+            names(store.changes_since(cal.id, mid, 100).await.unwrap()).len(),
+            2
+        );
+        assert_eq!(store.changes_since(cal.id, 0, 1).await.unwrap().len(), 1);
+        // Repeated updates do not grow the log.
+        for i in 0..20 {
+            let etag = format!("\"{i}\"");
+            store
+                .put_item(
+                    cal.id,
+                    "a.ics",
+                    &item("a", &etag, None, None),
+                    &Precondition::None,
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(store.changes_since(cal.id, 0, 1000).await.unwrap().len(), 2);
+        let by_rev = store.items_by_revision(cal.id, 10).await.unwrap();
+        assert_eq!(by_rev.len(), 1);
     }
 
     #[tokio::test]

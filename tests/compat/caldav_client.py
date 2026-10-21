@@ -67,8 +67,15 @@ def main():
     )
     check(len(missed) == 0, "time-range query excludes events outside the range")
 
+    synced = calendar.objects_by_sync_token(load_objects=False)
+    token = synced.sync_token
+    check(token and len(list(synced)) == 1, "initial sync-collection returns the event and a token")
+
     event.data = event.data.replace("Compatibility check", "Updated title")
     event.save()
+
+    delta = calendar.objects_by_sync_token(sync_token=token, load_objects=False)
+    check(len(list(delta)) == 1 and delta.sync_token != token, "incremental sync reports the change")
     fetched = calendar.event_by_url(event.url)
     fetched.load()
     check("Updated title" in fetched.data, "update via PUT with If-Match")

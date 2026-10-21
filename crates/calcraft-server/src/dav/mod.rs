@@ -10,6 +10,7 @@ mod paths;
 mod propfind;
 mod props;
 mod report;
+mod sync;
 
 use axum::{
     body::{Body, Bytes, to_bytes},
@@ -28,9 +29,9 @@ use crate::{app::AppState, auth::AuthOutcome};
 pub use paths::valid_item_name;
 
 const ALLOWED_METHODS: &str =
-    "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, REPORT, MKCALENDAR";
-/// DAV compliance classes. `addressbook` follows with CardDAV.
-const DAV_CLASSES: &str = "1, 3, calendar-access";
+    "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, REPORT, MKCALENDAR, MKCOL";
+/// DAV compliance classes.
+const DAV_CLASSES: &str = "1, 3, calendar-access, addressbook, extended-mkcol";
 const WWW_AUTHENTICATE_VALUE: &str = "Basic realm=\"CalCraft\", charset=\"UTF-8\"";
 const XML_CONTENT_TYPE: &str = "application/xml; charset=utf-8";
 
@@ -73,6 +74,7 @@ pub async fn handle(State(state): State<AppState>, request: Request) -> Response
         "PROPFIND" => propfind::handle(ctx, resource, request).await,
         "PROPPATCH" => collections::proppatch(ctx, resource, request).await,
         "MKCALENDAR" => collections::mkcalendar(ctx, resource, request).await,
+        "MKCOL" => collections::mkcol(ctx, resource, request).await,
         "REPORT" => report::handle(ctx, resource, request).await,
         "GET" => objects::get(ctx, resource, true).await,
         "HEAD" => objects::get(ctx, resource, false).await,
@@ -128,7 +130,7 @@ fn dav_error(status: StatusCode, condition: &str) -> Response {
         status,
         [(CONTENT_TYPE, XML_CONTENT_TYPE)],
         format!(
-            r#"<?xml version="1.0" encoding="utf-8"?><d:error xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">{condition}</d:error>"#
+            r#"<?xml version="1.0" encoding="utf-8"?><d:error xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:card="urn:ietf:params:xml:ns:carddav">{condition}</d:error>"#
         ),
     )
         .into_response()
