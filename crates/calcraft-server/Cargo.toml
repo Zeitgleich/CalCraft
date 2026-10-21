@@ -1,0 +1,41 @@
+[package]
+name = "calcraft-server"
+description = "Self-hosted CalDAV/CardDAV server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "calcraft"
+path = "src/main.rs"
+
+[features]
+default = ["web-ui", "api"]
+web-ui = ["dep:calcraft-web"]
+api = ["dep:calcraft-api"]
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+calcraft-api = { workspace = true, optional = true }
+calcraft-core.workspace = true
+calcraft-web = { workspace = true, optional = true }
+clap.workspace = true
+figment.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+serde_json.workspace = true
+tower.workspace = true
+
+[lints]
+workspace = true
