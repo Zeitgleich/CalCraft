@@ -1,0 +1,33 @@
+[package]
+name = "calcraft-ui"
+description = "Web interface of CalCraft (Leptos, client-side rendered WebAssembly)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[[bin]]
+name = "calcraft-ui"
+path = "src/main.rs"
+
+[dependencies]
+calcraft-core.workspace = true
+serde_json.workspace = true
+
+# The browser application. On other targets only the plain logic in the
+# library is compiled (and unit-tested), so native workspace builds do not
+# pull in Leptos.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+leptos = { version = "0.8.22", default-features = false, features = ["csr"] }
+serde.workspace = true
+# Must match the wasm-bindgen CLI used by scripts/build-ui.sh exactly.
+wasm-bindgen = "=0.2.114"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Headers", "Location", "Request", "RequestCredentials", "RequestInit", "Response", "Window"] }
+
+[lints]
+workspace = true

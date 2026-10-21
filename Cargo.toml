@@ -59,3 +59,8 @@ lto = "fat"
 codegen-units = 1
 strip = true
 overflow-checks = true
+
+# Web UI assets (scripts/build-ui.sh): optimised for size.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"

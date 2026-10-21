@@ -46,7 +46,35 @@ jobs:
       - name: Test (DAV only)
         run: cargo test -p calcraft-server --no-default-features
       - name: Build wasm-compatible crates
-        run: cargo check -p calcraft-core -p calcraft-ical --target wasm32-unknown-unknown
+        run: cargo check -p calcraft-core -p calcraft-ical -p calcraft-ui --target wasm32-unknown-unknown
+
+  web-ui:
+    name: web UI (wasm)
+    runs-on: ubuntu-latest
+    env:
+      # Must match the wasm-bindgen version pinned in crates/calcraft-ui/Cargo.toml.
+      WASM_BINDGEN_VERSION: 0.2.114
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install wasm-bindgen CLI
+        # Third-party code: do not fail on its warnings.
+        env:
+          RUSTFLAGS: ""
+        run: |
+          if [ "$(wasm-bindgen --version 2>/dev/null)" != "wasm-bindgen $WASM_BINDGEN_VERSION" ]; then
+            cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION" --locked --force
+          fi
+      - name: Clippy (wasm)
+        run: cargo clippy -p calcraft-ui --target wasm32-unknown-unknown --all-targets
+      - name: Build UI assets
+        run: scripts/build-ui.sh
+      - name: Test server with embedded UI
+        env:
+          CALCRAFT_UI_REQUIRED: "1"
+        run: cargo test -p calcraft-server --all-features
 
   deny:
     runs-on: ubuntu-latest

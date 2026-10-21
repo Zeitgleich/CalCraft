@@ -5,7 +5,13 @@ all-features = true
 
 [advisories]
 # Every ignored advisory needs a reason and an issue link.
-ignore = []
+ignore = [
+    # `paste` (compile-time proc macro, no runtime code) is archived. It is
+    # only pulled in by Leptos (either_of) for the wasm web UI (calcraft-ui);
+    # no vulnerability. Remove once Leptos switches to a maintained fork.
+    # https://rustsec.org/advisories/RUSTSEC-2024-0436
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained proc macro used by Leptos, not a vulnerability" },
+]
 
 [licenses]
 confidence-threshold = 0.93
@@ -15,6 +21,8 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    # xxhash-rust, via Leptos (server_fn); permissive, AGPL-compatible.
+    "BSL-1.0",
     "CC0-1.0",
     "ISC",
     "MIT",

@@ -2,7 +2,7 @@
 
 Self-hosted CalDAV/CardDAV server written in Rust, with an optional web interface.
 
-> **Status:** early development (milestone M3: CalDAV, CardDAV, sync). Not ready for production use.
+> **Status:** early development (milestone M4: REST API and first web UI). Not ready for production use.
 
 ## Goals
 
@@ -29,6 +29,27 @@ Cargo features of `calcraft-server`:
 | `api` | yes | REST API |
 
 CalCraft runs on Linux, macOS and Windows.
+
+### Web UI
+
+The web interface is a Leptos application (`crates/calcraft-ui`) compiled to
+WebAssembly. Its files are embedded into the server binary at build time, so
+build them first:
+
+```sh
+rustup target add wasm32-unknown-unknown                   # listed in rust-toolchain.toml
+cargo install wasm-bindgen-cli --version 0.2.114 --locked  # must match crates/calcraft-ui/Cargo.toml
+scripts/build-ui.sh                                        # Windows: scripts/build-ui.ps1
+cargo build --release
+```
+
+Without these assets the server still builds but shows a placeholder page on `/`;
+set `CALCRAFT_UI_REQUIRED=1` to make missing assets a build error. No npm or other
+JavaScript tooling is needed.
+
+The UI covers login (with two-factor codes), calendars and address books, account
+settings (password, TOTP), app passwords and user administration. Disable it at
+runtime with `web_ui.enabled = false` or `calcraft serve --no-web-ui`.
 
 Minimal DAV-only build:
 
@@ -60,8 +81,8 @@ Other user commands: `calcraft user list|passwd|disable|enable|set-admin`
 
 ### App passwords and two-factor authentication
 
-Each device should get its own app password (`ccap_…`), created via the REST API
-(`POST /api/v1/app-passwords`, soon in the web UI) and revocable individually.
+Each device should get its own app password (`ccap_…`), created
+in the web UI (or via `POST /api/v1/app-passwords`) and revocable individually.
 Once two-factor authentication (TOTP) is enabled for an account, DAV clients must
 use app passwords; the account password then only works together with a code.
 

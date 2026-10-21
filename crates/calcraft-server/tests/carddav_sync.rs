@@ -504,7 +504,8 @@ async fn sync_truncates_and_continues() {
     .await;
     assert!(second.body.contains("e2.ics"), "{}", second.body);
     assert!(
-        !second.body.contains("e0.ics") && !second.body.contains("507"),
+        // Check the status line, not "507": the random token salt may contain those digits.
+        !second.body.contains("e0.ics") && !second.body.contains("HTTP/1.1 507"),
         "{}",
         second.body
     );

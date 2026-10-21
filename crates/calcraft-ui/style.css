@@ -1,0 +1,465 @@
+/* CalCraft web UI. Served as a separate file: the Content Security Policy
+   forbids inline styles. No external fonts or frameworks. */
+
+:root {
+    --bg: #f6f7f9;
+    --surface: #ffffff;
+    --text: #1d2330;
+    --muted: #5d6676;
+    --border: #d8dce3;
+    --accent: #2f6fd0;
+    --accent-text: #ffffff;
+    --danger: #b3261e;
+    --success: #1e7a3c;
+    --warning-bg: #fff6dc;
+    --warning-border: #e0b84a;
+    --code-bg: #eef0f4;
+    --radius: 6px;
+    color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #14171c;
+        --surface: #1d2128;
+        --text: #e4e7ec;
+        --muted: #9aa3b2;
+        --border: #343a45;
+        --accent: #5b93e6;
+        --accent-text: #0d1117;
+        --danger: #f08a80;
+        --success: #6fcf8d;
+        --warning-bg: #3a3220;
+        --warning-border: #8a7230;
+        --code-bg: #262b34;
+    }
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px;
+    line-height: 1.5;
+}
+
+.layout {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+}
+
+main {
+    flex: 1;
+    width: 100%;
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 1rem 1.25rem 2rem;
+}
+
+main.narrow {
+    max-width: 420px;
+    padding-top: 3rem;
+}
+
+h1 {
+    font-size: 1.6rem;
+    margin: 0.5rem 0 1rem;
+}
+
+h2 {
+    font-size: 1.2rem;
+    margin: 1.75rem 0 0.75rem;
+}
+
+h3 {
+    font-size: 1.05rem;
+    margin: 0 0 0.5rem;
+}
+
+a {
+    color: var(--accent);
+}
+
+code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.9em;
+    background: var(--code-bg);
+    padding: 0.1em 0.35em;
+    border-radius: 4px;
+}
+
+code.wrap,
+.dav-url code {
+    word-break: break-all;
+}
+
+code.secret {
+    font-size: 1.05em;
+    user-select: all;
+}
+
+/* Header and navigation */
+
+.topbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 1.25rem;
+    padding: 0.6rem 1.25rem;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+}
+
+.brand {
+    font-weight: 700;
+    font-size: 1.1rem;
+}
+
+.topbar nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    flex: 1;
+}
+
+.topbar nav a {
+    padding: 0.3rem 0.7rem;
+    border-radius: var(--radius);
+    color: var(--text);
+    text-decoration: none;
+}
+
+.topbar nav a:hover {
+    background: var(--code-bg);
+}
+
+.topbar nav a.active {
+    background: var(--accent);
+    color: var(--accent-text);
+}
+
+.user {
+    color: var(--muted);
+}
+
+footer {
+    padding: 1rem 1.25rem;
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.875rem;
+    border-top: 1px solid var(--border);
+}
+
+/* Forms */
+
+form,
+.card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+}
+
+.card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem 1.25rem;
+}
+
+label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    font-weight: 500;
+}
+
+label.inline {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 400;
+}
+
+input[type="text"],
+input[type="password"],
+select,
+textarea {
+    font: inherit;
+    color: inherit;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.45rem 0.6rem;
+    font-weight: 400;
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+button:focus-visible,
+a:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
+input[type="color"] {
+    width: 3rem;
+    height: 2rem;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: none;
+}
+
+input[type="color"]:disabled {
+    opacity: 0.35;
+}
+
+fieldset {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin: 0;
+    padding: 0.4rem 0.75rem 0.6rem;
+}
+
+legend {
+    font-weight: 500;
+    padding: 0 0.25rem;
+}
+
+button {
+    font: inherit;
+    cursor: pointer;
+    align-self: flex-start;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius);
+    background: var(--accent);
+    color: var(--accent-text);
+    padding: 0.4rem 0.9rem;
+}
+
+button.secondary {
+    background: transparent;
+    color: var(--text);
+    border-color: var(--border);
+}
+
+button.danger {
+    background: transparent;
+    color: var(--danger);
+    border-color: var(--danger);
+}
+
+button:disabled {
+    cursor: progress;
+    opacity: 0.6;
+}
+
+.hint,
+.muted {
+    color: var(--muted);
+    font-weight: 400;
+}
+
+.hint {
+    font-size: 0.875rem;
+}
+
+.small {
+    font-size: 0.875rem;
+}
+
+.error {
+    color: var(--danger);
+    margin: 0;
+}
+
+.success {
+    color: var(--success);
+}
+
+.warning {
+    background: var(--warning-bg);
+    border: 1px solid var(--warning-border);
+    border-radius: var(--radius);
+    padding: 0.5rem 0.75rem;
+    margin: 0;
+}
+
+.secret-box {
+    border-color: var(--warning-border);
+    margin-bottom: 1rem;
+}
+
+/* Lists and tables */
+
+.items {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.item {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.75rem 1rem;
+}
+
+.item p {
+    margin: 0.35rem 0 0;
+}
+
+.item-head {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.item-title {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+}
+
+.actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+}
+
+.swatch {
+    width: 1.25rem;
+    height: 1.25rem;
+    flex: none;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+}
+
+.swatch.none {
+    border-style: dashed;
+}
+
+.description {
+    white-space: pre-wrap;
+}
+
+.edit,
+.confirm {
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border);
+}
+
+.confirm {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.confirm p {
+    flex-basis: 100%;
+    margin: 0;
+}
+
+.confirm-inline {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+th,
+td {
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+}
+
+th {
+    font-size: 0.875rem;
+    color: var(--muted);
+    font-weight: 600;
+}
+
+tr.disabled td {
+    color: var(--muted);
+}
+
+.facts {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.35rem 1rem;
+    margin: 0;
+}
+
+.facts dt {
+    color: var(--muted);
+}
+
+.facts dd {
+    margin: 0;
+    min-width: 0;
+}
+
+.codes {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
+    gap: 0.35rem;
+}
+
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
+@media (max-width: 600px) {
+    .topbar {
+        padding: 0.5rem 0.75rem;
+    }
+
+    main {
+        padding: 0.75rem;
+    }
+
+    .item-head {
+        flex-wrap: wrap;
+    }
+
+    th,
+    td {
+        padding: 0.4rem;
+    }
+}
