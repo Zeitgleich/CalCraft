@@ -1305,6 +1305,10 @@ mod api_matrix {
         let no_cal = "/api/v1/collections/calendar/zz-missing".to_owned();
         vec![
             case("get", "/v1/version", 200).public(200),
+            case("get", "/v1/auth/methods", 200).public(200),
+            // SSO is not configured in the fixture: both answer 404.
+            case("get", "/v1/auth/oidc/login", 404).public(404),
+            case("get", "/v1/auth/oidc/callback", 404).public(404),
             // Web login never accepts app passwords.
             case("post", "/v1/auth/login", 401)
                 .public(401)

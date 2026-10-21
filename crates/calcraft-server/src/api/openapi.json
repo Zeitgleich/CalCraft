@@ -51,6 +51,38 @@
         "security": []
       }
     },
+    "/v1/auth/methods": {
+      "get": {
+        "summary": "Available login methods (password, single sign-on)",
+        "description": "Lets the UI decide whether to show an SSO button.",
+        "tags": [
+          "auth"
+        ],
+        "responses": {
+          "200": {
+            "description": "Login methods",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthMethods"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
     "/v1/auth/login": {
       "post": {
         "summary": "Log in; sets the session cookie",
@@ -95,6 +127,107 @@
             "$ref": "#/components/parameters/Csrf"
           }
         ]
+      }
+    },
+    "/v1/auth/oidc/login": {
+      "get": {
+        "summary": "Start single sign-on (OpenID Connect)",
+        "description": "Browser navigation, not an XHR call. Redirects to the identity provider (Authorization Code flow with PKCE) and sets a short-lived cookie that binds the login to this browser. 404 if SSO is not configured.",
+        "tags": [
+          "auth"
+        ],
+        "responses": {
+          "303": {
+            "description": "Redirect to the identity provider, or to /?sso_error=unavailable",
+            "headers": {
+              "Location": {
+                "description": "Target URL",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/v1/auth/oidc/callback": {
+      "get": {
+        "summary": "Single sign-on callback (redirect URI)",
+        "description": "Called by the browser when the identity provider redirects back. Validates state, browser binding, code and ID token, maps the identity to a local account, sets the session cookie and redirects to /. On failure redirects to /?sso_error=CODE with CODE one of invalid_request, denied, unavailable, login_failed, no_account, account_exists (existing local account not approved for this IdP subject), local_2fa_required. 404 if SSO is not configured.",
+        "tags": [
+          "auth"
+        ],
+        "parameters": [
+          {
+            "name": "code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "iss",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "RFC 9207 issuer identifier; must match the configured issuer if present"
+          }
+        ],
+        "responses": {
+          "303": {
+            "description": "Redirect to / (logged in, Set-Cookie with the session) or to /?sso_error=CODE",
+            "headers": {
+              "Location": {
+                "description": "Target URL",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": []
       }
     },
     "/v1/auth/logout": {
@@ -1379,6 +1512,48 @@
           }
         },
         "additionalProperties": false
+      },
+      "AuthMethods": {
+        "type": "object",
+        "required": [
+          "password",
+          "oidc"
+        ],
+        "properties": {
+          "password": {
+            "type": "boolean",
+            "description": "Login with username and password (false if security.password_login is off)"
+          },
+          "oidc": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OidcMethod"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Single sign-on, null if not configured"
+          }
+        }
+      },
+      "OidcMethod": {
+        "type": "object",
+        "required": [
+          "label",
+          "login_url"
+        ],
+        "properties": {
+          "label": {
+            "type": "string",
+            "description": "Text for the login button"
+          },
+          "login_url": {
+            "type": "string",
+            "description": "Relative URL to navigate to",
+            "example": "/api/v1/auth/oidc/login"
+          }
+        }
       },
       "ImportReport": {
         "type": "object",

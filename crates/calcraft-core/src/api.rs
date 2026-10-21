@@ -170,6 +170,23 @@ pub struct UpdateUser {
     pub is_admin: Option<bool>,
 }
 
+/// Login methods offered by the server, so the UI can show an SSO button.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthMethods {
+    /// Login with username and password (`POST /api/v1/auth/login`).
+    pub password: bool,
+    /// Single sign-on via OpenID Connect; `None` if not configured.
+    pub oidc: Option<OidcMethod>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OidcMethod {
+    /// Text for the login button, e.g. "Sign in with Keycloak".
+    pub label: String,
+    /// Relative URL that starts the login (a top-level browser navigation).
+    pub login_url: String,
+}
+
 /// Result of importing a file into a collection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportReport {

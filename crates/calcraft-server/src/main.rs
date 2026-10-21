@@ -5,7 +5,7 @@ mod users;
 use std::{net::SocketAddr, path::PathBuf, process::ExitCode};
 
 use anyhow::Context;
-use calcraft_server::{API_COMPILED, AppState, Config, WEB_UI_COMPILED, telemetry};
+use calcraft_server::{API_COMPILED, AppState, Config, OIDC_COMPILED, WEB_UI_COMPILED, telemetry};
 use calcraft_store::Store;
 use clap::{Args, Parser, Subcommand};
 use tokio::net::TcpListener;
@@ -114,7 +114,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             telemetry::init_cli(&config.logging)?;
             runtime()?.block_on(async {
                 let store = open_store(&config).await?;
-                users::run(&store, command).await
+                users::run(&store, &config, command).await
             })
         }
         Command::Backup(args) => {
@@ -179,8 +179,36 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         );
     }
 
+    if config.oidc.enabled && !OIDC_COMPILED {
+        tracing::warn!("OIDC is enabled in the configuration but not compiled into this binary");
+    }
+    if config.oidc.enabled && !config.api.enabled {
+        tracing::warn!(
+            "OIDC is enabled but the REST API (which serves the SSO endpoints) is disabled"
+        );
+    }
+
+    if !config.security.password_login && !(OIDC_COMPILED && config.api.enabled) {
+        anyhow::bail!(
+            "security.password_login = false needs single sign-on, but OIDC is not compiled in or the API is disabled"
+        );
+    }
+
     let mut state = AppState::new(open_store(&config).await?)?;
     state.secure_cookies = config.security.secure_cookies;
+    state
+        .auth
+        .set_password_login(config.security.password_login);
+    #[cfg(feature = "oidc")]
+    if config.oidc.enabled {
+        let oidc =
+            calcraft_server::oidc::Oidc::new(&config.oidc).context("invalid OIDC configuration")?;
+        tokio::spawn({
+            let oidc = oidc.clone();
+            async move { oidc.warm_up().await }
+        });
+        state.oidc = Some(oidc);
+    }
     let listener = TcpListener::bind(config.server.bind)
         .await
         .with_context(|| format!("failed to bind {}", config.server.bind))?;
@@ -188,6 +216,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         address = %listener.local_addr()?,
         web_ui = config.web_ui.enabled && WEB_UI_COMPILED,
         api = config.api.enabled && API_COMPILED,
+        oidc = config.oidc.enabled && OIDC_COMPILED,
         "CalCraft {} listening",
         calcraft_core::VERSION,
     );

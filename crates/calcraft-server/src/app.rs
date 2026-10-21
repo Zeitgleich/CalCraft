@@ -29,6 +29,9 @@ pub struct AppState {
     pub auth: Arc<Authenticator>,
     /// Mark session cookies `Secure` (HTTPS only).
     pub secure_cookies: bool,
+    /// Single sign-on, if configured.
+    #[cfg(feature = "oidc")]
+    pub oidc: Option<Arc<crate::oidc::Oidc>>,
 }
 
 impl AppState {
@@ -37,6 +40,8 @@ impl AppState {
             auth: Authenticator::new(store.clone())?,
             store,
             secure_cookies: true,
+            #[cfg(feature = "oidc")]
+            oidc: None,
         })
     }
 }
@@ -82,7 +87,13 @@ pub fn router(config: &Config, state: AppState) -> Router {
             config.server.request_timeout(),
         ))
         .layer(CatchPanicLayer::new())
-        .layer(TraceLayer::new_for_http())
+        // Spans record the path only: query strings can carry secrets
+        // (OIDC code and state).
+        .layer(TraceLayer::new_for_http().make_span_with(
+            |request: &axum::http::Request<axum::body::Body>| {
+                tracing::debug_span!("request", method = %request.method(), path = %request.uri().path())
+            },
+        ))
         .layer(middleware::from_fn_with_state(
             config.security.hsts,
             security::headers,

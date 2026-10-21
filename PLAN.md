@@ -72,7 +72,7 @@ Grundsätze:
 
 | Ebene | Schalter |
 |---|---|
-| Compile-Zeit (Cargo) | `web-ui`, `api`, `swagger-ui`, `postgres` |
+| Compile-Zeit (Cargo) | `web-ui`, `api`, `oidc`, `swagger-ui`, `postgres` |
 | Laufzeit (Config/ENV/CLI) | `web_ui.enabled`, `api.enabled`, `api.swagger_ui` |
 
 Ohne Feature ist der Code nicht im Binary (kleinere Angriffsfläche).
@@ -232,7 +232,7 @@ Der Client-Track startet nach M4 (wenn Web-UI-Komponenten existieren).
 | **M2** ✅ | CalDAV: MKCALENDAR, PUT/GET/DELETE mit Preconditions, calendar-query, calendar-multiget; Parser-Limits + Fuzzing |
 | **M3** ✅ | sync-collection, CardDAV |
 | **M4** | **M4a** ✅ REST-API + OpenAPI, Sessions, 2FA (TOTP + Wiederherstellungscodes), App-Passwörter, Admin · **M4b** ✅ Web-UI Stufe 1 · **M4c** Web-UI Stufe 2 |
-| **M5** | OIDC/Keycloak, Freigaben, Gruppen, Erinnerungen (SMTP), Web-UI Stufe 3–4 |
+| **M5** | **M5a** ✅ OIDC/SSO (Keycloak & Co.) · Freigaben, Gruppen, Erinnerungen (SMTP), Web-UI Stufe 3–4 |
 | **M6** | **M6a** ✅ Import/Export aller Formate (REST + CLI) · **M6b** Webcal mit SSRF-Schutz · Backup/Restore, Migration aus Radicale/Baïkal |
 | **M7** | Externes Security-Review, Doku, Paketierung, Release v1.0 |
 
@@ -252,7 +252,51 @@ Der Client-Track startet nach M4 (wenn Web-UI-Komponenten existieren).
 - Aufgezeichnete Client-Requests als Golden-File-Regressionstests.
 - Fuzzing in der CI.
 
-## 12. Bekannte Einschränkungen (Stand M2)
+## 12. OIDC / SSO (M5a)
+
+Umsetzung in `crates/calcraft-server/src/oidc/` (Cargo-Feature `oidc`, Default an) und
+`api/oidc.rs`. Konfiguration im Abschnitt `[oidc]` (siehe README und `calcraft.example.toml`),
+standardmäßig aus; wird beim Start validiert.
+
+- **Ablauf:** `GET /api/v1/auth/oidc/login` → IdP (Authorization Code + PKCE S256, `state`,
+  `nonce`) → `GET /api/v1/auth/oidc/callback` → gleiche Session wie Passwort-Login → `/`.
+  Fehler: Redirect auf `/?sso_error=<code>` (feste Codes, keine Reflexion, kein `return_to`).
+  `GET /api/v1/auth/methods` sagt der UI, ob SSO verfügbar ist.
+- **state/nonce/PKCE:** je 256 Bit Zufall, serverseitig im Speicher (max. 10 000, 10 min),
+  einmalig (auch bei Fehlern verbraucht), gebunden an ein zufälliges Browser-Cookie
+  (`calcraft_oidc`, `HttpOnly`, `SameSite=Lax`, Pfad `/api/v1/auth/oidc`), Vergleich in
+  konstanter Zeit. Ausstehende Logins gehen bei einem Neustart verloren (kein Clustering).
+- **Discovery/JWKS:** nur `<issuer>/.well-known/openid-configuration`; dessen `issuer` muss
+  exakt passen; Endpunkte nur https auf dem Issuer-Host/-Port (oder `extra_endpoint_hosts`).
+  JWKS-Cache 1 h, bei unbekannter `kid` Neuladen (höchstens 1×/min). Ausgehend: Timeout 10 s,
+  Antwort ≤ 256 KiB, keine Redirects, System-Truststore (+ `ca_file`), rustls mit ring.
+- **ID-Token:** RS256/384/512, PS256/384/512, ES256/384 (konfigurierbare Allowlist, Default
+  RS256+ES256); `none`/`HS*` nie; `crit` abgelehnt; `iss`, `aud` (+`azp` bei mehreren),
+  `exp`/`iat`/`nbf` mit ≤ 60 s Toleranz, `nonce`, `sub`. RFC-9207-`iss` im Callback geprüft.
+- **Konten:** Benutzername aus Claim (Default `preferred_username`), nur gültig nach
+  `Username`-Regeln, nie umgeschrieben; kein E-Mail-Linking. Per SSO angelegte Konten
+  werden bei der Anlage an `iss`+`sub` gebunden (Tabelle `oidc_identities`, Migration
+  0005). Bestehende lokale Konten nie allein über den Namen: nur nach einmaliger,
+  ablaufender Freigabe für genau eine IdP-Identität `calcraft user allow-sso-link <user>
+  --subject <sub>` (Default 1 h, max. 24 h; Verbrauch und Bindung in einer Transaktion;
+  andere Subjects → `account_exists`, Freigabe bleibt). Der IdP darf keine frei
+  wählbaren Benutzernamen erlauben, sonst `required_claim` nutzen. Danach
+  muss `sub` passen; `calcraft user unbind-sso` setzt zurück. Auto-Anlage nur mit `auto_create_users`
+  (Passwort-Hash unbrauchbar). Deaktivierte Konten abgelehnt. Admin-Recht aus Claim nur,
+  wenn `admin_claim` gesetzt ist (dann in beide Richtungen synchronisiert).
+- **Optionen (Default aus):** `oidc.require_local_totp` – Konten mit lokaler 2FA können
+  nicht per SSO; sonst verlässt sich SSO auf die MFA des IdP. `security.password_login =
+  false` – nur SSO: Passwort-Login-API und DAV-Basic mit Kontopasswort abgelehnt,
+  App-Passwörter gehen weiter; Passwortwechsel und lokale 2FA-Einrichtung ebenfalls
+  gesperrt (`password_login_disabled`); Start ohne `[oidc]` wird verweigert.
+- Ausstehende Logins: begrenzte Tabelle mit Verdrängung des ältesten Eintrags, kein
+  globales Rate-Limit (ein anonymer Client könnte sonst alle SSO-Logins blockieren).
+  Rate-Limiting pro Client kommt mit der Trusted-Proxy-/Client-IP-Konfiguration.
+  TraceLayer-Spans enthalten nur den Pfad, nie die Query.
+- **Später:** Backchannel-Logout und RP-initiated Logout, Admin-API zum Lösen von
+  SSO-Bindungen und -Freigaben, Rate-Limit pro Client.
+
+## 13. Bekannte Einschränkungen (Stand M2)
 
 - `calendar-query` filtert nach Komponententyp und Zeitraum. Der Zeitraum wird konservativ bestimmt:
   Wiederholungen ohne `UNTIL` gelten als offen, lokale Zeiten werden um ±14 h erweitert. Es können also
@@ -269,7 +313,7 @@ Der Client-Track startet nach M4 (wenn Web-UI-Komponenten existieren).
 - `calendar-query` / `addressbook-query` liefern höchstens 5 000 Objekte bzw. 32 MiB Daten, danach
   eine abgeschnittene Antwort mit 507-Eintrag.
 
-## 13. Offene Entscheidungen
+## 14. Offene Entscheidungen
 
 - CardDAV bereits in v1? (aktuell geplant: ja, M3)
 - Lizenz der wiederverwendbaren Bibliotheken (`calcraft-ical`, ggf. `leptos-calendar`):
