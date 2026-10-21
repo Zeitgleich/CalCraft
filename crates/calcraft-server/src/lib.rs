@@ -6,12 +6,16 @@ pub mod app;
 pub mod auth;
 pub mod config;
 pub mod dav;
+#[cfg(feature = "https-client")]
+pub mod https;
 #[cfg(feature = "oidc")]
 pub mod oidc;
 pub mod secrets;
 pub mod security;
 pub mod telemetry;
 pub mod transfer;
+#[cfg(feature = "update-check")]
+pub mod updates;
 pub mod validate;
 
 pub use app::{AppState, router};
@@ -25,3 +29,6 @@ pub const API_COMPILED: bool = cfg!(feature = "api");
 
 /// Whether single sign-on (OpenID Connect) is compiled into this binary.
 pub const OIDC_COMPILED: bool = cfg!(feature = "oidc");
+
+/// Whether the optional update check is compiled into this binary.
+pub const UPDATE_CHECK_COMPILED: bool = cfg!(feature = "update-check");

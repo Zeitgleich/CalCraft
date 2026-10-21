@@ -5,7 +5,10 @@ mod users;
 use std::{net::SocketAddr, path::PathBuf, process::ExitCode};
 
 use anyhow::Context;
-use calcraft_server::{API_COMPILED, AppState, Config, OIDC_COMPILED, WEB_UI_COMPILED, telemetry};
+use calcraft_server::{
+    API_COMPILED, AppState, Config, OIDC_COMPILED, UPDATE_CHECK_COMPILED, WEB_UI_COMPILED,
+    telemetry,
+};
 use calcraft_store::Store;
 use clap::{Args, Parser, Subcommand};
 use tokio::net::TcpListener;
@@ -188,6 +191,17 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         );
     }
 
+    if config.updates.check && !UPDATE_CHECK_COMPILED {
+        tracing::warn!(
+            "the update check is enabled in the configuration but not compiled into this binary"
+        );
+    }
+    if config.updates.check && !config.api.enabled {
+        tracing::warn!(
+            "the update check is enabled but the REST API (which shows its result) is disabled; not checking"
+        );
+    }
+
     if !config.security.password_login && !(OIDC_COMPILED && config.api.enabled) {
         anyhow::bail!(
             "security.password_login = false needs single sign-on, but OIDC is not compiled in or the API is disabled"
@@ -209,6 +223,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         });
         state.oidc = Some(oidc);
     }
+    #[cfg(feature = "update-check")]
+    if config.updates.check && config.api.enabled {
+        state.updates = Some(calcraft_server::updates::spawn(&config.updates));
+    }
     let listener = TcpListener::bind(config.server.bind)
         .await
         .with_context(|| format!("failed to bind {}", config.server.bind))?;
@@ -217,6 +235,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         web_ui = config.web_ui.enabled && WEB_UI_COMPILED,
         api = config.api.enabled && API_COMPILED,
         oidc = config.oidc.enabled && OIDC_COMPILED,
+        update_check = config.updates.check && config.api.enabled && UPDATE_CHECK_COMPILED,
         "CalCraft {} listening",
         calcraft_core::VERSION,
     );

@@ -137,6 +137,14 @@ pub fn user_created(username: &str) -> String {
     format!("User “{username}” created.")
 }
 
+// Update notice
+pub const RELEASE_NOTES: &str = "Release notes";
+pub const UPDATE_CHECK_OFF: &str = "Update notices are off. To be told about new releases, set check = true in the [updates] section of the configuration (the server then asks GitHub regularly; GitHub sees its IP address).";
+
+pub fn update_available(version: &str) -> String {
+    format!("New version {version} available.")
+}
+
 // Errors
 pub const ERR_INVALID_CREDENTIALS: &str =
     "Wrong username, password or code, or too many attempts. Please wait a moment and try again.";

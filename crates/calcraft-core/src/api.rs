@@ -170,6 +170,23 @@ pub struct UpdateUser {
     pub is_admin: Option<bool>,
 }
 
+/// Result of the optional update check (`GET /api/v1/admin/update`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateInfo {
+    /// Whether `[updates] check` is on (and compiled in).
+    pub enabled: bool,
+    /// Version of the running server.
+    pub current: String,
+    /// Latest stable release, once a check has succeeded.
+    pub latest: Option<String>,
+    /// `latest` is newer than `current`.
+    pub newer: bool,
+    /// Release page on github.com.
+    pub url: Option<String>,
+    /// Time of the last successful check (Unix seconds).
+    pub checked_at: Option<i64>,
+}
+
 /// Login methods offered by the server, so the UI can show an SSO button.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthMethods {

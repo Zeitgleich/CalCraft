@@ -858,6 +858,37 @@
         ]
       }
     },
+    "/v1/admin/update": {
+      "get": {
+        "summary": "Result of the optional update check (admins only)",
+        "description": "With [updates] check = true the server asks api.github.com for the latest release at startup and every interval_hours (GitHub sees the server's IP address and User-Agent; nothing else is sent). Drafts and pre-releases are ignored. enabled is false when the check is off or not compiled in.",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "Update status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateInfo"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/collections/{kind}/{slug}/export": {
       "get": {
         "summary": "Download a calendar or address book as one file",
@@ -1512,6 +1543,48 @@
           }
         },
         "additionalProperties": false
+      },
+      "UpdateInfo": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "current": {
+            "type": "string",
+            "description": "Version of the running server"
+          },
+          "latest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Latest stable release (X.Y.Z), once a check succeeded"
+          },
+          "newer": {
+            "type": "boolean",
+            "description": "latest is newer than current"
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Release page below https://github.com/Zeitgleich/CalCraft/releases/"
+          },
+          "checked_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Last successful check (Unix seconds)"
+          }
+        },
+        "required": [
+          "enabled",
+          "current",
+          "newer"
+        ]
       },
       "AuthMethods": {
         "type": "object",

@@ -93,7 +93,7 @@ laufen parallel, weil sie für den Pilotbetrieb gebraucht werden.
 ### Phase 4 – Pilotbetrieb und Release (≈ Woche 5–6)
 
 - [ ] Release-Pipeline: signierte Binaries (Linux/macOS/Windows), Prüfsummen, Build-Provenance, signiertes Docker-Image
-- [ ] Optionaler Update-Hinweis im Admin-Bereich (standardmäßig aus)
+- [x] Optionaler Update-Hinweis im Admin-Bereich (standardmäßig aus): `[updates] check`, fester GitHub-Endpunkt, `GET /api/v1/admin/update` (`crates/calcraft-server/src/updates.rs`, PLAN.md §12)
 - [ ] `/metrics` (Prometheus) und Beispiel-Alarmregeln
 - [ ] Installation auf frischem System nach `docs/installation.md` reproduzieren
 - [ ] Update inkl. Migration von Vorversion testen

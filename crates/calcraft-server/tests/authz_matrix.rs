@@ -1353,6 +1353,7 @@ mod api_matrix {
                     "/api/v1/admin/users/nobody-zz".to_owned(),
                 )
                 .body(json!({"disabled": true})),
+            case("get", "/v1/admin/update", 403),
             case("post", "/v1/auth/logout", 204),
         ]
     }
@@ -1540,6 +1541,16 @@ mod api_matrix {
             &fx,
             "get",
             "/api/v1/admin/users",
+            Some(&admin_session),
+            true,
+            None,
+        )
+        .await;
+        assert_eq!(reply.status, 200);
+        let (_, reply) = call(
+            &fx,
+            "get",
+            "/api/v1/admin/update",
             Some(&admin_session),
             true,
             None,

@@ -32,6 +32,9 @@ pub struct AppState {
     /// Single sign-on, if configured.
     #[cfg(feature = "oidc")]
     pub oidc: Option<Arc<crate::oidc::Oidc>>,
+    /// Update check, if enabled (`[updates] check`).
+    #[cfg(feature = "update-check")]
+    pub updates: Option<Arc<crate::updates::UpdateCheck>>,
 }
 
 impl AppState {
@@ -42,6 +45,8 @@ impl AppState {
             secure_cookies: true,
             #[cfg(feature = "oidc")]
             oidc: None,
+            #[cfg(feature = "update-check")]
+            updates: None,
         })
     }
 }
