@@ -18,6 +18,9 @@ database = "calcraft.db"
 hsts = false
 # Mark session cookies Secure (HTTPS only). Browsers accept them on http://localhost too.
 secure_cookies = true
+# Allow login with the account password (REST login and DAV Basic auth). false = SSO
+# only (requires [oidc]); app passwords keep working.
+password_login = true
 
 [web_ui]
 enabled = true
@@ -47,6 +50,9 @@ enabled = false
 # required_claim = "groups"
 # required_value = "/calcraft-users"
 # auto_create_users = false
+# Existing local accounts are only linked after `calcraft user allow-sso-link <user>`.
+# Refuse SSO for accounts with local 2FA (default: rely on the IdP's MFA).
+# require_local_totp = false
 # signing_algs = ["RS256", "ES256"]
 # clock_skew_secs = 30
 # extra_endpoint_hosts = []

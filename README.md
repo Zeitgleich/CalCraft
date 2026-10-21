@@ -56,7 +56,7 @@ Point your client at `https://your-host/` – discovery via `/.well-known/caldav
 `/.well-known/carddav` leads to `/dav/`. Always run CalCraft behind TLS: DAV clients
 use HTTP Basic authentication.
 
-Other user commands: `calcraft user list|passwd|disable|enable|set-admin|unbind-sso`
+Other user commands: `calcraft user list|passwd|disable|enable|set-admin|allow-sso-link|unbind-sso`
 (`calcraft user add alice --admin` creates an administrator).
 
 ### App passwords and two-factor authentication
@@ -103,15 +103,23 @@ How accounts are matched:
 - The configured claim (default `preferred_username`) must be a valid CalCraft
   username after lowercasing (and optionally removing `username_strip_suffix`, e.g.
   `@example.com` for UPNs); it is never rewritten. E-mail addresses are never used.
-- The first SSO login binds the IdP identity (issuer + subject) to the account; later
-  logins must present the same subject, so a different IdP account with the same
-  username cannot take over. `calcraft user unbind-sso <user>` resets the binding.
-- Only use providers where users cannot choose their username freely (no open
-  self-registration), or restrict SSO with `required_claim`/`required_value`: on the
-  first login an existing local account with that name is bound to the IdP account.
+- Accounts created via SSO (`auto_create_users`) are bound to the IdP identity
+  (issuer + subject) at creation. An **existing** local account is never linked just
+  because the name matches: an operator approves it once with
+  `calcraft user allow-sso-link <user> [--hours 24]`; the next SSO login binds it and
+  consumes the approval. Without approval the login fails with `account_exists`.
+- Once bound, logins must present the same subject, so a different IdP account with
+  the same username cannot take over. `calcraft user unbind-sso <user>` resets it.
+- `required_claim`/`required_value` restrict SSO to e.g. one group.
 - Disabled accounts cannot log in. Accounts created via SSO have no usable password
   until an administrator sets one (`calcraft user passwd`).
-- SSO logins do not ask for the local TOTP code; enforce MFA at the IdP.
+- By default SSO logins do not ask for the local TOTP code: MFA is the IdP's job.
+  With `require_local_totp = true`, accounts with local 2FA cannot use SSO
+  (`local_2fa_required`).
+- `[security] password_login = false` makes SSO the only interactive login: the
+  password login API and DAV Basic auth with the account password are refused, app
+  passwords keep working. CalCraft refuses to start this way without `[oidc]`.
+- Starting logins is rate-limited globally (10/s, burst 50; `rate_limited`).
 
 The UI learns whether SSO is available from `GET /api/v1/auth/methods`. Errors are
 reported by redirecting to `/?sso_error=<code>`. Discovery, JWKS and token endpoints

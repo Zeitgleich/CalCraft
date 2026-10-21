@@ -13,7 +13,10 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -163,9 +166,21 @@ pub struct Authenticator {
     hashing: Semaphore,
     cache: Mutex<HashMap<Username, CacheEntry>>,
     failures: Mutex<HashMap<Username, Failures>>,
+    /// Account passwords accepted (`security.password_login`).
+    password_login: AtomicBool,
 }
 
 impl Authenticator {
+    /// Enables or disables login with account passwords (REST login and
+    /// DAV Basic auth); app passwords are unaffected.
+    pub fn set_password_login(&self, enabled: bool) {
+        self.password_login.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn password_login(&self) -> bool {
+        self.password_login.load(Ordering::Relaxed)
+    }
+
     pub fn new(store: Store) -> anyhow::Result<Arc<Self>> {
         let mut cache_key = [0u8; 32];
         getrandom::fill(&mut cache_key)
@@ -183,6 +198,7 @@ impl Authenticator {
             hashing: Semaphore::new(MAX_CONCURRENT_HASHES),
             cache: Mutex::new(HashMap::new()),
             failures: Mutex::new(HashMap::new()),
+            password_login: AtomicBool::new(true),
         }))
     }
 
@@ -200,6 +216,9 @@ impl Authenticator {
         };
         if let Some((id, secret)) = parse_app_password(&credentials.password) {
             return self.check_app_password(&attempt, id, secret).await;
+        }
+        if !self.password_login() {
+            return AuthOutcome::Denied;
         }
         match self
             .check_first_factor_reserved(&attempt, &credentials.password)

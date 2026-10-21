@@ -139,8 +139,17 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         );
     }
 
+    if !config.security.password_login && !(OIDC_COMPILED && config.api.enabled) {
+        anyhow::bail!(
+            "security.password_login = false needs single sign-on, but OIDC is not compiled in or the API is disabled"
+        );
+    }
+
     let mut state = AppState::new(open_store(&config).await?)?;
     state.secure_cookies = config.security.secure_cookies;
+    state
+        .auth
+        .set_password_login(config.security.password_login);
     #[cfg(feature = "oidc")]
     if config.oidc.enabled {
         let oidc =

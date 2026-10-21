@@ -215,14 +215,19 @@ standardmäßig aus; wird beim Start validiert.
   RS256+ES256); `none`/`HS*` nie; `crit` abgelehnt; `iss`, `aud` (+`azp` bei mehreren),
   `exp`/`iat`/`nbf` mit ≤ 60 s Toleranz, `nonce`, `sub`. RFC-9207-`iss` im Callback geprüft.
 - **Konten:** Benutzername aus Claim (Default `preferred_username`), nur gültig nach
-  `Username`-Regeln, nie umgeschrieben; kein E-Mail-Linking. Erstes SSO-Login bindet
-  `iss`+`sub` (Tabelle `oidc_identities`, Migration 0005), danach muss `sub` passen;
-  `calcraft user unbind-sso` setzt zurück. Auto-Anlage nur mit `auto_create_users`
+  `Username`-Regeln, nie umgeschrieben; kein E-Mail-Linking. Per SSO angelegte Konten
+  werden bei der Anlage an `iss`+`sub` gebunden (Tabelle `oidc_identities`, Migration
+  0005). Bestehende lokale Konten nie allein über den Namen: nur nach einmaliger,
+  ablaufender Freigabe `calcraft user allow-sso-link` (sonst `account_exists`). Danach
+  muss `sub` passen; `calcraft user unbind-sso` setzt zurück. Auto-Anlage nur mit `auto_create_users`
   (Passwort-Hash unbrauchbar). Deaktivierte Konten abgelehnt. Admin-Recht aus Claim nur,
   wenn `admin_claim` gesetzt ist (dann in beide Richtungen synchronisiert).
-- **Bewusst so:** SSO-Login verlangt keine lokale TOTP (MFA ist Sache des IdP). Ein
-  bestehendes lokales Konto wird beim ersten SSO-Login über den Benutzernamen gebunden –
-  der IdP darf daher keine frei wählbaren Benutzernamen erlauben (sonst `required_claim`).
+- **Optionen (Default aus):** `oidc.require_local_totp` – Konten mit lokaler 2FA können
+  nicht per SSO; sonst verlässt sich SSO auf die MFA des IdP. `security.password_login =
+  false` – nur SSO: Passwort-Login-API und DAV-Basic mit Kontopasswort abgelehnt,
+  App-Passwörter gehen weiter; Start ohne `[oidc]` wird verweigert.
+- Login-Starts global rate-limitiert (Token-Bucket 10/s, Burst 50), zusätzlich zur
+  begrenzten Tabelle. TraceLayer-Spans enthalten nur den Pfad, nie die Query.
 - **Später:** Backchannel-Logout und RP-initiated Logout, Admin-API zum Lösen von
   SSO-Bindungen, optional Pflicht-SSO (Passwort-Login abschaltbar).
 

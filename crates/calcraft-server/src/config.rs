@@ -83,6 +83,10 @@ pub struct SecurityConfig {
     /// Mark session cookies `Secure`. Browsers also accept them on
     /// `http://localhost`; disable only for plain-HTTP tests on other hosts.
     pub secure_cookies: bool,
+    /// Allow logging in with the account password (REST API login and DAV
+    /// Basic auth). `false` means SSO only; app passwords keep working.
+    /// Requires `[oidc]` to be enabled.
+    pub password_login: bool,
 }
 
 impl Default for SecurityConfig {
@@ -90,6 +94,7 @@ impl Default for SecurityConfig {
         Self {
             hsts: false,
             secure_cookies: true,
+            password_login: true,
         }
     }
 }
@@ -201,6 +206,10 @@ pub struct OidcConfig {
     /// Create unknown users on their first SSO login. Without this, an
     /// administrator has to create the account first.
     pub auto_create_users: bool,
+    /// Refuse SSO logins of accounts that have local two-factor
+    /// authentication enabled. Default: SSO relies on the IdP's MFA and does
+    /// not ask for the local TOTP code.
+    pub require_local_totp: bool,
     /// Accepted ID token signature algorithms.
     pub signing_algs: Vec<String>,
     /// Allowed clock skew for `exp`, `iat` and `nbf` (at most 60 s).
@@ -236,6 +245,7 @@ impl Default for OidcConfig {
             required_claim: None,
             required_value: None,
             auto_create_users: false,
+            require_local_totp: false,
             signing_algs: vec!["RS256".to_owned(), "ES256".to_owned()],
             clock_skew_secs: 30,
             extra_endpoint_hosts: Vec::new(),
@@ -444,6 +454,11 @@ impl Config {
                 "server.request_timeout_secs must be greater than 0",
             ));
         }
+        if !self.security.password_login && !self.oidc.enabled {
+            return Err(ConfigError::Invalid(
+                "security.password_login = false requires [oidc] enabled = true",
+            ));
+        }
         self.oidc.validate()
     }
 }
@@ -557,6 +572,12 @@ redirect_uri = "https://cal.example/api/v1/auth/oidc/callback"
             "{insecure}allow_insecure_issuer_for_testing = true\n"
         ))
         .unwrap();
+
+        // SSO-only mode needs SSO.
+        assert!(from_toml("[security]\npassword_login = false\n").is_err());
+        let sso_only = from_toml(&format!("{OIDC}[security]\npassword_login = false\n")).unwrap();
+        assert!(!sso_only.security.password_login);
+        assert!(!sso_only.oidc.require_local_totp);
     }
 
     #[test]

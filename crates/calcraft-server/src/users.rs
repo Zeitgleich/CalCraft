@@ -44,6 +44,15 @@ pub enum UserCommand {
     /// Remove the SSO (OIDC) identity bound to a user, e.g. after the IdP
     /// account was recreated. The next SSO login binds the new identity.
     UnbindSso { username: String },
+    /// Allow the next SSO login with this username to bind the existing
+    /// account (single use). Without this, existing accounts are never
+    /// linked to an IdP account by name.
+    AllowSsoLink {
+        username: String,
+        /// Validity of the approval in hours (1-168).
+        #[arg(long, default_value_t = 24, value_parser = clap::value_parser!(u16).range(1..=168))]
+        hours: u16,
+    },
 }
 
 /// Passwords are never accepted as command-line arguments, because those
@@ -140,6 +149,17 @@ pub async fn run(store: &Store, command: UserCommand) -> anyhow::Result<()> {
             let removed = store.unbind_oidc_identities(record.user.id).await?;
             store.delete_sessions_of(record.user.id).await?;
             println!("removed {removed} SSO identities of {username}");
+        }
+        UserCommand::AllowSsoLink { username, hours } => {
+            let username = parse_username(&username)?;
+            let Some(record) = store.user_credentials(&username).await? else {
+                bail!("user {username} does not exist");
+            };
+            let expires = calcraft_server::auth::now() + i64::from(hours) * 3600;
+            store.approve_oidc_link(record.user.id, expires).await?;
+            println!(
+                "the next SSO login as {username} within {hours} h binds the IdP account to this user"
+            );
         }
     }
     Ok(())

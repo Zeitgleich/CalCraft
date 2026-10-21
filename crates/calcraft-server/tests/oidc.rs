@@ -265,11 +265,14 @@ impl Idp {
     }
 }
 
-async fn app_with(
-    idp: &Idp,
-    config: impl FnOnce(&mut OidcConfig),
-    jwks_refresh: Duration,
-) -> Router {
+struct Setup {
+    app: Router,
+    store: Store,
+    auth: Arc<calcraft_server::auth::Authenticator>,
+}
+
+/// Local users `alice` and `admin` (admin), no SSO link approvals.
+async fn build(idp: &Idp, config: impl FnOnce(&mut OidcConfig), jwks_refresh: Duration) -> Setup {
     let store = Store::in_memory().await.unwrap();
     let hash = hash_password("alice password 123").unwrap();
     store
@@ -286,9 +289,44 @@ async fn app_with(
         .unwrap();
     let mut oidc = idp.config();
     config(&mut oidc);
-    let mut state = AppState::new(store).unwrap();
+    let mut state = AppState::new(store.clone()).unwrap();
     state.oidc = Some(Oidc::with_jwks_min_refresh(&oidc, jwks_refresh).unwrap());
-    router(&Config::default(), state)
+    let auth = state.auth.clone();
+    Setup {
+        app: router(&Config::default(), state),
+        store,
+        auth,
+    }
+}
+
+async fn user_id(store: &Store, name: &str) -> i64 {
+    store
+        .user_credentials(&name.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap()
+        .user
+        .id
+}
+
+/// Operator approval (`calcraft user allow-sso-link`) valid for `secs`.
+async fn approve(store: &Store, name: &str, secs: i64) {
+    let id = user_id(store, name).await;
+    store
+        .approve_oidc_link(id, calcraft_server::auth::now() + secs)
+        .await
+        .unwrap();
+}
+
+/// Like [`build`], with `alice` approved for SSO linking.
+async fn app_with(
+    idp: &Idp,
+    config: impl FnOnce(&mut OidcConfig),
+    jwks_refresh: Duration,
+) -> Router {
+    let setup = build(idp, config, jwks_refresh).await;
+    approve(&setup.store, "alice", 3600).await;
+    setup.app
 }
 
 async fn app(idp: &Idp) -> Router {
@@ -704,4 +742,151 @@ async fn unreachable_idp_fails_cleanly() {
     let app = router(&Config::default(), state);
     let reply = call(&app, Method::GET, "/api/v1/auth/oidc/login", None, None).await;
     assert_failed(&reply, "unavailable");
+}
+
+#[tokio::test]
+async fn existing_accounts_need_operator_approval() {
+    let idp = Idp::start().await;
+    let Setup { app, store, .. } = build(&idp, |_| {}, Duration::from_secs(60)).await;
+
+    // Matching username alone never links an existing account.
+    assert_failed(&login(&app, &idp, "alice", "sub-a").await, "account_exists");
+    assert_failed(&login(&app, &idp, "admin", "sub-x").await, "account_exists");
+
+    // Expired approval.
+    approve(&store, "admin", -1).await;
+    assert_failed(&login(&app, &idp, "admin", "sub-x").await, "account_exists");
+
+    // Approved: bound once, the approval is consumed.
+    approve(&store, "admin", 3600).await;
+    let reply = login(&app, &idp, "admin", "sub-admin").await;
+    assert_eq!(reply.location(), "/");
+    let session = reply.cookie("calcraft_session").unwrap();
+    let me = call(&app, Method::GET, "/api/v1/me", Some(&session), None).await;
+    assert_eq!(me.json["username"], "admin");
+    assert_eq!(me.json["is_admin"], true);
+    assert!(
+        !store
+            .consume_oidc_link_approval(
+                user_id(&store, "admin").await,
+                calcraft_server::auth::now()
+            )
+            .await
+            .unwrap()
+    );
+    // The bound subject keeps working; another IdP account does not, even
+    // with a fresh approval.
+    assert_eq!(
+        login(&app, &idp, "admin", "sub-admin").await.location(),
+        "/"
+    );
+    approve(&store, "admin", 3600).await;
+    assert_failed(
+        &login(&app, &idp, "admin", "sub-evil").await,
+        "login_failed",
+    );
+
+    // An approval for alice cannot be used by an IdP account bound elsewhere.
+    approve(&store, "alice", 3600).await;
+    assert_failed(
+        &login(&app, &idp, "alice", "sub-admin").await,
+        "login_failed",
+    );
+    assert_eq!(login(&app, &idp, "alice", "sub-a").await.location(), "/");
+}
+
+#[tokio::test]
+async fn local_totp_can_be_required() {
+    let idp = Idp::start().await;
+    for required in [true, false] {
+        let Setup { app, store, .. } = build(
+            &idp,
+            |c| c.require_local_totp = required,
+            Duration::from_secs(60),
+        )
+        .await;
+        let alice = user_id(&store, "alice").await;
+        store
+            .set_pending_totp(alice, b"0123456789abcdefghij")
+            .await
+            .unwrap();
+        store.enable_totp(alice, &[]).await.unwrap();
+        approve(&store, "alice", 3600).await;
+        let reply = login(&app, &idp, "alice", "sub-a").await;
+        if required {
+            assert_failed(&reply, "local_2fa_required");
+        } else {
+            assert_eq!(reply.location(), "/");
+        }
+    }
+}
+
+#[tokio::test]
+async fn password_login_can_be_disabled() {
+    let idp = Idp::start().await;
+    let Setup { app, store, auth } = build(&idp, |_| {}, Duration::from_secs(60)).await;
+    auth.set_password_login(false);
+    approve(&store, "alice", 3600).await;
+
+    let methods = call(&app, Method::GET, "/api/v1/auth/methods", None, None).await;
+    assert_eq!(methods.json["password"], false);
+    let reply = call(
+        &app,
+        Method::POST,
+        "/api/v1/auth/login",
+        None,
+        Some(json!({"username": "alice", "password": "alice password 123"})),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    assert_eq!(reply.json["error"], "password_login_disabled");
+
+    // SSO works; app passwords still work for DAV, the account password not.
+    let session = login(&app, &idp, "alice", "sub-a")
+        .await
+        .cookie("calcraft_session")
+        .unwrap();
+    let created = call(
+        &app,
+        Method::POST,
+        "/api/v1/app-passwords",
+        Some(&session),
+        Some(json!({"name": "phone"})),
+    )
+    .await;
+    let app_password = created.json["password"].as_str().unwrap().to_owned();
+    let dav = |password: String| {
+        let app = app.clone();
+        async move {
+            let basic = STANDARD.encode(format!("alice:{password}"));
+            let request = Request::builder()
+                .method("PROPFIND")
+                .uri("/dav/")
+                .header(header::AUTHORIZATION, format!("Basic {basic}"))
+                .header("depth", "0")
+                .body(Body::empty())
+                .unwrap();
+            app.oneshot(request).await.unwrap().status()
+        }
+    };
+    assert_eq!(
+        dav("alice password 123".to_owned()).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(dav(app_password).await.as_u16(), 207);
+}
+
+#[tokio::test]
+async fn starting_logins_is_rate_limited() {
+    let idp = Idp::start().await;
+    let app = app(&idp).await;
+    let mut limited = 0;
+    for _ in 0..80 {
+        let reply = call(&app, Method::GET, "/api/v1/auth/oidc/login", None, None).await;
+        assert_eq!(reply.status, StatusCode::SEE_OTHER);
+        if reply.location() == "/?sso_error=rate_limited" {
+            limited += 1;
+        }
+    }
+    assert!(limited >= 10, "{limited}");
 }

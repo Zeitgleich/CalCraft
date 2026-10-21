@@ -6,9 +6,11 @@
 //! request is reflected, so there is no open redirect.
 //!
 //! Account mapping: the configured claim names the local user (never the
-//! e-mail address). The first SSO login binds issuer + subject to the
-//! account; later logins must present the same subject. Unknown users are
-//! only created with `oidc.auto_create_users`; disabled users are rejected.
+//! e-mail address). Accounts created by SSO are bound to issuer + subject
+//! at creation; an existing local account is only bound after a one-time
+//! operator approval (`calcraft user allow-sso-link`), never by name alone.
+//! Later logins must present the bound subject. Unknown users are only
+//! created with `oidc.auto_create_users`; disabled users are rejected.
 
 use axum::{
     extract::{Query, State, rejection::QueryRejection},
@@ -68,6 +70,13 @@ enum Failure {
     LoginFailed,
     /// Valid IdP login, but no local account and auto-creation is off.
     NoAccount,
+    /// A local account with this name exists but was never bound, and an
+    /// operator has not approved linking (`calcraft user allow-sso-link`).
+    AccountExists,
+    /// The account has local 2FA and `oidc.require_local_totp` is set.
+    LocalTotpRequired,
+    /// Too many logins started.
+    RateLimited,
 }
 
 impl Failure {
@@ -78,6 +87,9 @@ impl Failure {
             Self::Unavailable => "unavailable",
             Self::LoginFailed => "login_failed",
             Self::NoAccount => "no_account",
+            Self::AccountExists => "account_exists",
+            Self::LocalTotpRequired => "local_2fa_required",
+            Self::RateLimited => "rate_limited",
         }
     }
 }
@@ -115,6 +127,10 @@ pub async fn login(State(state): State<AppState>) -> Response {
             &start.location,
             &[binding_cookie(Some(&start.binding), state.secure_cookies)],
         ),
+        Err(OidcError::RateLimited) => {
+            tracing::warn!("SSO login start rate-limited");
+            failure(Failure::RateLimited, state.secure_cookies)
+        }
         Err(err) => {
             tracing::warn!(%err, "cannot start SSO login");
             failure(Failure::Unavailable, state.secure_cookies)
@@ -142,6 +158,7 @@ pub async fn callback(
                 OidcError::IdpError => Failure::Denied,
                 OidcError::Unavailable(_) => Failure::Unavailable,
                 OidcError::Exchange(_) | OidcError::Token(_) => Failure::LoginFailed,
+                OidcError::RateLimited => Failure::RateLimited,
             };
             tracing::warn!(%err, "SSO login rejected");
             return failure(reason, secure);
@@ -190,8 +207,8 @@ async fn map_user(state: &AppState, oidc: &Oidc, token: &IdToken) -> Result<User
         .await
         .map_err(store_failure)?
         .map(|c| c.user);
-    let mut user = match existing {
-        Some(user) => user,
+    let (mut user, created) = match existing {
+        Some(user) => (user, false),
         None if oidc.auto_create_users() => {
             if bound_to.is_some() {
                 // The IdP account is bound to another local user (renamed?).
@@ -209,7 +226,7 @@ async fn map_user(state: &AppState, oidc: &Oidc, token: &IdToken) -> Result<User
                 .await
                 .map_err(store_failure)?;
             tracing::info!(user = %username, admin = user.is_admin, "created user on first SSO login");
-            user
+            (user, true)
         }
         None => {
             tracing::info!(user = %username, "SSO login rejected: no such local user");
@@ -223,6 +240,35 @@ async fn map_user(state: &AppState, oidc: &Oidc, token: &IdToken) -> Result<User
     if bound_to.is_some_and(|id| id != user.id) {
         tracing::warn!(user = %username, "SSO login rejected: identity bound to another account");
         return Err(Failure::LoginFailed);
+    }
+    if oidc.require_local_totp() && user.totp_enabled {
+        tracing::info!(user = %username, "SSO login rejected: account uses local 2FA");
+        return Err(Failure::LocalTotpRequired);
+    }
+    // Never link a pre-existing account just because the name matches
+    // (IdPs may let users pick names): it needs a one-time operator
+    // approval. Accounts created by SSO above are bound right away.
+    if !created
+        && bound_to.is_none()
+        && !state
+            .store
+            .has_oidc_identity(user.id, issuer)
+            .await
+            .map_err(store_failure)?
+    {
+        let approved = state
+            .store
+            .consume_oidc_link_approval(user.id, now())
+            .await
+            .map_err(store_failure)?;
+        if !approved {
+            tracing::warn!(
+                user = %username,
+                "SSO login rejected: existing account not approved for linking (calcraft user allow-sso-link)"
+            );
+            return Err(Failure::AccountExists);
+        }
+        tracing::info!(user = %username, "linking existing account to SSO (operator approval)");
     }
     match state
         .store

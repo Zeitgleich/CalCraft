@@ -138,7 +138,7 @@
         ],
         "responses": {
           "303": {
-            "description": "Redirect to the identity provider, or to /?sso_error=unavailable",
+            "description": "Redirect to the identity provider, or to /?sso_error=unavailable or rate_limited",
             "headers": {
               "Location": {
                 "description": "Target URL",
@@ -165,7 +165,7 @@
     "/v1/auth/oidc/callback": {
       "get": {
         "summary": "Single sign-on callback (redirect URI)",
-        "description": "Called by the browser when the identity provider redirects back. Validates state, browser binding, code and ID token, maps the identity to a local account, sets the session cookie and redirects to /. On failure redirects to /?sso_error=CODE with CODE one of invalid_request, denied, unavailable, login_failed, no_account. 404 if SSO is not configured.",
+        "description": "Called by the browser when the identity provider redirects back. Validates state, browser binding, code and ID token, maps the identity to a local account, sets the session cookie and redirects to /. On failure redirects to /?sso_error=CODE with CODE one of invalid_request, denied, unavailable, login_failed, no_account, account_exists (existing local account not approved for SSO linking), local_2fa_required, rate_limited. 404 if SSO is not configured.",
         "tags": [
           "auth"
         ],
@@ -1291,7 +1291,7 @@
         "properties": {
           "password": {
             "type": "boolean",
-            "description": "Login with username and password"
+            "description": "Login with username and password (false if security.password_login is off)"
           },
           "oidc": {
             "oneOf": [

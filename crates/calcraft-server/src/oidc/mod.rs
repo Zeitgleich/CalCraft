@@ -72,16 +72,62 @@ pub enum OidcError {
     Exchange(String),
     #[error("ID token rejected: {0}")]
     Token(#[from] TokenError),
+    #[error("too many logins started, try again shortly")]
+    RateLimited,
 }
 
 /// Query parameters of the redirect back from the IdP.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 pub struct CallbackParams {
     pub code: Option<String>,
     pub state: Option<String>,
     pub error: Option<String>,
     /// RFC 9207 issuer identification.
     pub iss: Option<String>,
+}
+
+impl std::fmt::Debug for CallbackParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redact = |v: &Option<String>| v.as_ref().map(|_| "<redacted>");
+        f.debug_struct("CallbackParams")
+            .field("code", &redact(&self.code))
+            .field("state", &redact(&self.state))
+            .field("error", &self.error.as_deref().map(log_safe))
+            .field("iss", &self.iss)
+            .finish()
+    }
+}
+
+/// Global token bucket for starting logins: every start allocates a
+/// pending entry, and anyone can trigger it.
+struct RateLimit {
+    tokens: f64,
+    last: Instant,
+}
+
+/// Sustained rate and burst of new logins (all clients together).
+const LOGIN_RATE_PER_SEC: f64 = 10.0;
+const LOGIN_BURST: f64 = 50.0;
+
+impl RateLimit {
+    fn new() -> Self {
+        Self {
+            tokens: LOGIN_BURST,
+            last: Instant::now(),
+        }
+    }
+
+    fn try_take(&mut self, now: Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.last).as_secs_f64();
+        self.last = now;
+        self.tokens = (self.tokens + elapsed * LOGIN_RATE_PER_SEC).min(LOGIN_BURST);
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Start of a login: where to send the browser and the binding cookie value.
@@ -130,6 +176,7 @@ pub struct Oidc {
     admin: Option<(String, String)>,
     required: Option<(String, String)>,
     auto_create_users: bool,
+    require_local_totp: bool,
     algs: Vec<Alg>,
     leeway: i64,
     label: String,
@@ -140,6 +187,7 @@ pub struct Oidc {
     jwks: tokio::sync::Mutex<JwksCache>,
     pending: Mutex<HashMap<[u8; 32], Pending>>,
     jwks_min_refresh: Duration,
+    rate_limit: Mutex<RateLimit>,
 }
 
 impl std::fmt::Debug for Oidc {
@@ -293,6 +341,7 @@ impl Oidc {
                 .clone()
                 .zip(config.required_value.clone()),
             auto_create_users: config.auto_create_users,
+            require_local_totp: config.require_local_totp,
             algs,
             leeway: i64::try_from(config.clock_skew_secs.min(60)).unwrap_or(60),
             label: config.button_label.clone(),
@@ -303,6 +352,7 @@ impl Oidc {
             jwks: tokio::sync::Mutex::default(),
             pending: Mutex::default(),
             jwks_min_refresh,
+            rate_limit: Mutex::new(RateLimit::new()),
         }))
     }
 
@@ -312,6 +362,10 @@ impl Oidc {
 
     pub fn auto_create_users(&self) -> bool {
         self.auto_create_users
+    }
+
+    pub fn require_local_totp(&self) -> bool {
+        self.require_local_totp
     }
 
     /// Login button data for `GET /api/v1/auth/methods`.
@@ -431,6 +485,14 @@ impl Oidc {
     /// Starts a login: returns the authorization URL and the value of the
     /// browser binding cookie.
     pub async fn begin(&self) -> Result<LoginStart, OidcError> {
+        let allowed = self
+            .rate_limit
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .try_take(Instant::now());
+        if !allowed {
+            return Err(OidcError::RateLimited);
+        }
         let provider = self.provider().await?;
         let state = random_b64::<32>();
         let nonce = random_b64::<32>();
@@ -716,6 +778,31 @@ mod tests {
             pkce_challenge("dBjftJeZ4CVP-mJ92K9yLhaWhakdbzR9ScVpaEAdR3c"),
             "xJ-76oyO0oUJKpdl-o0BKrwm_N_u3uUoQRAOOcQf6bQ"
         );
+    }
+
+    #[test]
+    fn login_rate_limit() {
+        let start = Instant::now();
+        let mut limit = RateLimit::new();
+        limit.last = start;
+        let taken = (0..60).filter(|_| limit.try_take(start)).count();
+        assert_eq!(taken, 50);
+        assert!(!limit.try_take(start + Duration::from_millis(50)));
+        assert!(limit.try_take(start + Duration::from_millis(150)));
+        // Refills up to the burst only.
+        let later = start + Duration::from_secs(3600);
+        assert_eq!((0..60).filter(|_| limit.try_take(later)).count(), 50);
+    }
+
+    #[test]
+    fn callback_debug_hides_code_and_state() {
+        let params = CallbackParams {
+            code: Some("secret-code".to_owned()),
+            state: Some("secret-state".to_owned()),
+            ..CallbackParams::default()
+        };
+        let debug = format!("{params:?}");
+        assert!(!debug.contains("secret") && debug.contains("<redacted>"));
     }
 
     #[test]

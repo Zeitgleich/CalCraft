@@ -124,6 +124,9 @@ pub async fn login(
     State(state): State<AppState>,
     ApiJson(request): ApiJson<LoginRequest>,
 ) -> Result<Response, ApiError> {
+    if !state.auth.password_login() {
+        return Err(ApiError::PasswordLoginDisabled);
+    }
     let username = parse_username(&request.username)?;
     let user = authenticate(
         &state,

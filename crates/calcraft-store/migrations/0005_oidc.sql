@@ -11,3 +11,11 @@ CREATE TABLE oidc_identities (
     PRIMARY KEY (user_id, issuer),
     UNIQUE (issuer, subject)
 ) STRICT;
+
+-- Operator approval (`calcraft user allow-sso-link`) to bind an existing,
+-- not yet bound local account on its next SSO login. Single use, expires.
+-- Without it, existing accounts are never linked by username.
+CREATE TABLE oidc_link_approvals (
+    user_id    INTEGER PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+    expires_at INTEGER NOT NULL
+) STRICT;

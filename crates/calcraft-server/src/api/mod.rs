@@ -118,12 +118,9 @@ async fn auth_methods(State(state): State<AppState>) -> Json<AuthMethods> {
     #[cfg(feature = "oidc")]
     let oidc = state.oidc.as_ref().map(|oidc| oidc.method());
     #[cfg(not(feature = "oidc"))]
-    let oidc = {
-        let _ = state;
-        None
-    };
+    let oidc = None;
     Json(AuthMethods {
-        password: true,
+        password: state.auth.password_login(),
         oidc,
     })
 }
@@ -148,6 +145,7 @@ pub enum ApiError {
     Unauthorized,
     InvalidCredentials,
     TotpRequired,
+    PasswordLoginDisabled,
     Forbidden,
     Csrf,
     NotFound,
@@ -177,6 +175,11 @@ impl IntoResponse for ApiError {
                 StatusCode::UNAUTHORIZED,
                 "totp_required",
                 "a two-factor code is required".to_owned(),
+            ),
+            Self::PasswordLoginDisabled => (
+                StatusCode::FORBIDDEN,
+                "password_login_disabled",
+                "password login is disabled; use single sign-on".to_owned(),
             ),
             Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden", "not allowed".to_owned()),
             Self::Csrf => (
