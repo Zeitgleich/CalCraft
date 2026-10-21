@@ -44,15 +44,15 @@ crates/
 ├── calcraft-ical    # iCal/vCard-Parsing, Limits, RRULE-Expansion (wasm-kompatibel)
 ├── calcraft-dav     # WebDAV/CalDAV/CardDAV-Protokoll, XML
 ├── calcraft-store   # Storage-Trait, SQLite (Default) + PostgreSQL
-├── calcraft-web     # Leptos-App (SSR + Hydration), Feature `web-ui`
-├── calcraft-ui      # Wiederverwendbare Leptos-Komponenten (Kalenderansichten), für Web-UI und Client
+├── calcraft-web     # Bettet die UI-Assets ein und liefert sie aus, Feature `web-ui`
+├── calcraft-ui      # Leptos-App (CSR, wasm32); Komponenten später auch für den Client
 ├── calcraft-client  # CalDAV/CardDAV-Client-Bibliothek (Sync, Offline-Cache)
 └── calcraft-server  # Binary: Config, CLI, Routing, Middleware, DAV und REST-API (Modul `api`)
 apps/
 └── calcraft-desktop # Tauri-2-App (Linux, macOS, Windows; später iOS/Android)
 ```
 
-`calcraft-ui`, `calcraft-client` und `apps/` entstehen erst mit dem Client-Track.
+`calcraft-client` und `apps/` entstehen erst mit dem Client-Track.
 
 Grundsätze:
 
@@ -133,7 +133,26 @@ vCalendar 1.0 (Import, best effort), Webcal-Abos (eingehend und veröffentlichen
 | UI-4 | Drag & Drop, Resize, Touch, Tastatur, ARIA |
 | UI-5 | Kontakte, Freigaben, i18n (de/en), Dark Mode |
 
-Build mit `cargo-leptos`, `wasm-opt -Oz`; Ziel < 500 KB gzip. Kein npm.
+Ziel < 500 KB gzip (Stand UI-1: ca. 430 KB wasm, 165 KB gzip). Kein npm, kein CSS-Framework.
+
+**Architektur (ab M4b):**
+
+- Client-seitig gerenderte Leptos-App (CSR) in `crates/calcraft-ui`, kompiliert nach `wasm32-unknown-unknown`.
+  Sie spricht nur die REST-API (`credentials: same-origin`, CSRF-Header bei jeder Änderung) und nutzt die
+  JSON-Typen aus `calcraft-core::api`. Kein SSR, keine Server Functions.
+- Die reine Logik (Validierung, Fehlertexte, Formatierung, alle Texte in `text.rs` für spätere i18n) liegt in der
+  Bibliothek des Crates und wird nativ getestet; Leptos wird nur für `wasm32` gebaut.
+- Navigation über das URL-Fragment (`#/settings`), damit der Server nur `/` und `/assets/…` kennt.
+- Läuft unter der unveränderten CSP: keine Inline-Skripte/-Styles, keine `style`-Attribute (Farben als SVG-`fill`),
+  Nutzerdaten nur als Text, nie `inner_html`.
+
+**Build:** `scripts/build-ui.sh` (Windows: `scripts/build-ui.ps1`) baut mit dem Profil `wasm-release`
+(`opt-level = "z"`) und ruft die `wasm-bindgen`-CLI auf, deren Version exakt der gepinnten Crate-Version entsprechen
+muss. Ergebnis: `crates/calcraft-ui/dist/` (nicht im Git). Das `build.rs` von `calcraft-web` bettet die Dateien mit
+Inhalts-Hash im Namen per `include_bytes!` ein und erzeugt ein Bootstrap-Modul; fehlen sie, wird eine Platzhalterseite
+ausgeliefert (`CALCRAFT_UI_REQUIRED=1` macht das zum Build-Fehler, z. B. im Docker-Image).
+Auslieferung: `/` mit `Cache-Control: no-cache`, `/assets/<name>-<hash>.<ext>` ein Jahr `immutable`.
+Noch offen: `wasm-opt` und vorkomprimierte Assets (gzip/brotli).
 
 ## 7. Plattformen
 
@@ -172,7 +191,7 @@ Der Client-Track startet nach M4 (wenn Web-UI-Komponenten existieren).
 | **M1** ✅ | WebDAV-Kern: OPTIONS, PROPFIND (Depth 0/1), Principal Discovery, Basic Auth, Storage (SQLite) |
 | **M2** ✅ | CalDAV: MKCALENDAR, PUT/GET/DELETE mit Preconditions, calendar-query, calendar-multiget; Parser-Limits + Fuzzing |
 | **M3** ✅ | sync-collection, CardDAV |
-| **M4** | **M4a** ✅ REST-API + OpenAPI, Sessions, 2FA (TOTP + Wiederherstellungscodes), App-Passwörter, Admin · **M4b** Web-UI Stufe 1 · **M4c** Web-UI Stufe 2 |
+| **M4** | **M4a** ✅ REST-API + OpenAPI, Sessions, 2FA (TOTP + Wiederherstellungscodes), App-Passwörter, Admin · **M4b** ✅ Web-UI Stufe 1 · **M4c** Web-UI Stufe 2 |
 | **M5** | OIDC/Keycloak, Freigaben, Gruppen, Erinnerungen (SMTP), Web-UI Stufe 3–4 |
 | **M6** | Import/Export aller Formate, Webcal mit SSRF-Schutz, Backup/Restore, Migration aus Radicale/Baïkal |
 | **M7** | Externes Security-Review, Doku, Paketierung, Release v1.0 |
