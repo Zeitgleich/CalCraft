@@ -361,6 +361,9 @@ dependencies = [
 name = "calcraft-ical"
 version = "0.1.0"
 dependencies = [
+ "quick-xml",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 
@@ -381,6 +384,7 @@ dependencies = [
  "calcraft-web",
  "clap",
  "figment",
+ "futures-core",
  "getrandom",
  "hmac",
  "http-body-util",

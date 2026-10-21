@@ -724,6 +724,237 @@
           }
         ]
       }
+    },
+    "/v1/collections/{kind}/{slug}/export": {
+      "get": {
+        "summary": "Download a calendar or address book as one file",
+        "description": "Streams all objects of the collection. The response has Content-Disposition: attachment. CSV cells starting with =, +, -, @, TAB or CR are prefixed with ' (formula neutralisation).",
+        "tags": [
+          "collections"
+        ],
+        "responses": {
+          "200": {
+            "description": "The file",
+            "headers": {
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "attachment; filename=\"<slug>.<extension>\""
+              }
+            },
+            "content": {
+              "text/calendar": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/calendar+json": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/calendar+xml": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "text/vcard": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/vcard+json": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "calendar",
+                "addressbook"
+              ]
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "required": false,
+            "description": "File format. Calendars: ics (default), jcal, xcal, csv. Address books: vcf (default), jcard, csv.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "ics",
+                "jcal",
+                "xcal",
+                "vcf",
+                "jcard",
+                "csv"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "/v1/collections/{kind}/{slug}/import": {
+      "post": {
+        "summary": "Import a file into a calendar or address book",
+        "description": "The body is the file (at most 20 MiB and server.max_body_bytes, at most 10000 objects). Every object is validated like a DAV PUT; storage quota and object limits apply. Events, to-dos and journals are grouped by UID with their recurrence overrides.",
+        "tags": [
+          "collections"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "text/calendar": {
+              "schema": {
+                "type": "string"
+              }
+            },
+            "application/calendar+json": {
+              "schema": {
+                "type": "string"
+              }
+            },
+            "application/calendar+xml": {
+              "schema": {
+                "type": "string"
+              }
+            },
+            "text/vcard": {
+              "schema": {
+                "type": "string"
+              }
+            },
+            "application/vcard+json": {
+              "schema": {
+                "type": "string"
+              }
+            },
+            "text/csv": {
+              "schema": {
+                "type": "string"
+              }
+            },
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Import report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportReport"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "calendar",
+                "addressbook"
+              ]
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "required": false,
+            "description": "File format. Calendars: ics (default), jcal, xcal, csv. Address books: vcf (default), jcard, csv.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "ics",
+                "jcal",
+                "xcal",
+                "vcf",
+                "jcard",
+                "csv"
+              ]
+            }
+          },
+          {
+            "name": "on_conflict",
+            "in": "query",
+            "required": false,
+            "description": "What to do when an object with the same UID already exists in the collection.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "skip",
+                "replace"
+              ],
+              "default": "skip"
+            }
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -1148,6 +1379,54 @@
           }
         },
         "additionalProperties": false
+      },
+      "ImportReport": {
+        "type": "object",
+        "required": [
+          "created",
+          "replaced",
+          "skipped",
+          "rejected",
+          "errors"
+        ],
+        "properties": {
+          "created": {
+            "type": "integer"
+          },
+          "replaced": {
+            "type": "integer"
+          },
+          "skipped": {
+            "type": "integer"
+          },
+          "rejected": {
+            "type": "integer"
+          },
+          "errors": {
+            "type": "array",
+            "description": "Reasons for the first 20 rejected objects",
+            "items": {
+              "$ref": "#/components/schemas/ImportRejection"
+            }
+          }
+        }
+      },
+      "ImportRejection": {
+        "type": "object",
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "uid": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
       }
     }
   }

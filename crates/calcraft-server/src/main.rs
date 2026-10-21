@@ -1,4 +1,5 @@
 mod backup_cmd;
+mod transfer_cmd;
 mod users;
 
 use std::{net::SocketAddr, path::PathBuf, process::ExitCode};
@@ -37,6 +38,22 @@ enum Command {
     Backup(backup_cmd::BackupArgs),
     /// Replace the database with a backup (the server must be stopped).
     Restore(backup_cmd::RestoreArgs),
+    /// Write a calendar or address book to a file (ics, jcal, xcal, vcf,
+    /// jcard, csv).
+    Export {
+        #[command(flatten)]
+        config: ConfigArgs,
+        #[command(flatten)]
+        args: transfer_cmd::ExportArgs,
+    },
+    /// Import a file into a calendar or address book. Every object is
+    /// validated like a DAV upload.
+    Import {
+        #[command(flatten)]
+        config: ConfigArgs,
+        #[command(flatten)]
+        args: transfer_cmd::ImportArgs,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -109,6 +126,22 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             let config = Config::load(args.config.config.as_deref())?;
             telemetry::init_cli(&config.logging)?;
             runtime()?.block_on(backup_cmd::restore(&config, &args))
+        }
+        Command::Export { config, args } => {
+            let config = Config::load(config.config.as_deref())?;
+            telemetry::init_cli(&config.logging)?;
+            runtime()?.block_on(async {
+                let store = open_store(&config).await?;
+                transfer_cmd::export(&store, args).await
+            })
+        }
+        Command::Import { config, args } => {
+            let config = Config::load(config.config.as_deref())?;
+            telemetry::init_cli(&config.logging)?;
+            runtime()?.block_on(async {
+                let store = open_store(&config).await?;
+                transfer_cmd::import(&store, args).await
+            })
         }
     }
 }

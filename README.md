@@ -57,6 +57,12 @@ Minimal DAV-only build:
 cargo build --release -p calcraft-server --no-default-features
 ```
 
+## Installation
+
+A step-by-step guide for production setups — DNS records, build or Docker,
+systemd service, TLS with Let's Encrypt and ready-to-use **nginx** and
+**Apache** configurations — is in [docs/installation.md](docs/installation.md).
+
 ## Running
 
 Create a user (the password is prompted for, or read from stdin with `--password-stdin`;
@@ -100,6 +106,40 @@ Once two-factor authentication (TOTP) is enabled for an account, DAV clients mus
 use app passwords; the account password then only works together with a code.
 
 The REST API is described in `/api/openapi.json`.
+
+### Import and export
+
+Calendars can be exported and imported as iCalendar (`ics`), jCal (`jcal`), xCal
+(`xcal`) and CSV (`csv`); address books as vCard 3.0/4.0 (`vcf`), jCard (`jcard`) and
+CSV. On the command line:
+
+```sh
+calcraft export --user alice --collection calendar/default --format ics > alice.ics
+calcraft import --user alice --collection calendar/default --format ics alice.ics
+calcraft import --user alice --collection addressbook/default --format csv \
+    --on-conflict replace contacts.csv     # `-` reads standard input
+```
+
+Via the REST API (session cookie; `import` needs the `X-CalCraft-Request` header):
+`GET /api/v1/collections/{kind}/{slug}/export?format=…` and
+`POST /api/v1/collections/{kind}/{slug}/import?format=…&on_conflict=skip|replace`
+with the file as body. The import answers with counts of created, replaced, skipped
+and rejected objects and the reasons for the first 20 rejections.
+
+Every imported object is validated exactly like a CalDAV/CardDAV upload, and the
+storage quota and object limits apply. Files may have at most 20 MiB and 10 000
+objects; via HTTP the global `server.max_body_bytes` (10 MiB by default) applies
+as well, so import larger files with the CLI. The converted objects may take at most
+four times the file size (64 MiB at most), which bounds the copies of time zones.
+Events are grouped by UID together with their recurrence overrides, and
+the referenced time zones are copied into each object. Objects whose UID already
+exists in the collection are skipped unless `on_conflict=replace` is given.
+
+CSV columns are `summary,start,end,all_day,location,description,uid` for events and
+`name,emails,phones,org,uid` for contacts (several values separated by `;`). CSV
+exports hold events only (the master of a recurring event, without its rule), and
+cells starting with `=`, `+`, `-`, `@`, TAB or CR are prefixed with `'` so that
+spreadsheets do not evaluate them; the import removes this prefix again.
 
 See [`calcraft.example.toml`](calcraft.example.toml). Every setting can be overridden via
 environment variables with the prefix `CALCRAFT_` and `__` as separator,

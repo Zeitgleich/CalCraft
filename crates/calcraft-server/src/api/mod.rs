@@ -8,6 +8,7 @@
 mod account;
 mod admin;
 mod collections;
+mod transfer;
 
 use axum::{
     Json, Router,
@@ -50,6 +51,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("post", "/v1/collections"),
     ("patch", "/v1/collections/{kind}/{slug}"),
     ("delete", "/v1/collections/{kind}/{slug}"),
+    ("get", "/v1/collections/{kind}/{slug}/export"),
+    ("post", "/v1/collections/{kind}/{slug}/import"),
     ("get", "/v1/admin/users"),
     ("post", "/v1/admin/users"),
     ("patch", "/v1/admin/users/{username}"),
@@ -82,6 +85,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/v1/collections/{kind}/{slug}",
             patch(collections::update).delete(collections::delete),
+        )
+        .route(
+            "/v1/collections/{kind}/{slug}/export",
+            get(transfer::export),
+        )
+        .route(
+            "/v1/collections/{kind}/{slug}/import",
+            post(transfer::import),
         )
         .route("/v1/admin/users", get(admin::list).post(admin::create))
         .route("/v1/admin/users/{username}", patch(admin::update))
@@ -127,6 +138,9 @@ pub enum ApiError {
     NotFound,
     Conflict(&'static str),
     Limit(&'static str),
+    TooLarge,
+    /// An uploaded file that cannot be used, with the reason.
+    InvalidData(String),
     Internal,
 }
 
@@ -165,6 +179,12 @@ impl IntoResponse for ApiError {
                 "limit",
                 message.to_owned(),
             ),
+            Self::TooLarge => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "too_large",
+                "request body too large".to_owned(),
+            ),
+            Self::InvalidData(message) => (StatusCode::BAD_REQUEST, "invalid_data", message),
             Self::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal",
