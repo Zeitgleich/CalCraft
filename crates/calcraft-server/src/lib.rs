@@ -11,6 +11,7 @@ pub mod oidc;
 pub mod secrets;
 pub mod security;
 pub mod telemetry;
+pub mod transfer;
 pub mod validate;
 
 pub use app::{AppState, router};

@@ -15,7 +15,7 @@ path = "src/main.rs"
 [features]
 default = ["web-ui", "api", "oidc"]
 web-ui = ["dep:calcraft-web"]
-api = []
+api = ["dep:futures-core"]
 # Single sign-on via OpenID Connect (outbound HTTPS client and JWT verification).
 oidc = [
     "api",
@@ -41,6 +41,7 @@ calcraft-store.workspace = true
 calcraft-web = { workspace = true, optional = true }
 clap.workspace = true
 figment.workspace = true
+futures-core = { workspace = true, optional = true }
 getrandom.workspace = true
 hmac.workspace = true
 http-body-util = { workspace = true, optional = true }

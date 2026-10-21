@@ -113,8 +113,9 @@ pub async fn create(
     Ok((StatusCode::CREATED, Json(info(collection, user))))
 }
 
-/// Resolves a collection of the logged-in user from path segments.
-async fn own_collection(
+/// Resolves a collection of the logged-in user from path segments. Unknown
+/// and foreign collections are both "not found".
+pub(super) async fn own_collection(
     state: &AppState,
     user: &User,
     kind: &str,

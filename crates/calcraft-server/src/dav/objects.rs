@@ -21,7 +21,7 @@ use super::{
 };
 
 /// Strong entity tag derived from the stored bytes.
-fn etag(content: &[u8]) -> String {
+pub(crate) fn etag(content: &[u8]) -> String {
     format!("\"{}\"", &blake3::hash(content).to_hex()[..32])
 }
 
@@ -105,11 +105,31 @@ pub async fn get(ctx: Ctx<'_>, resource: Resource, with_body: bool) -> Response 
 }
 
 /// What a PUT body was validated as, with the data needed for storage.
-struct Validated {
-    uid: String,
-    component: &'static str,
-    range_start: Option<i64>,
-    range_end: Option<i64>,
+pub(crate) struct Validated {
+    pub uid: String,
+    pub component: &'static str,
+    pub range_start: Option<i64>,
+    pub range_end: Option<i64>,
+}
+
+/// Why an object was not accepted by [`check_object`].
+#[derive(Debug)]
+pub(crate) enum Rejection {
+    TooLarge,
+    Invalid(IcalError),
+    UnsupportedComponent,
+}
+
+impl std::fmt::Display for Rejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooLarge => f.write_str("object too large"),
+            Self::Invalid(err) => err.fmt(f),
+            Self::UnsupportedComponent => {
+                f.write_str("component type not supported by this calendar")
+            }
+        }
+    }
 }
 
 /// XML prefix of the precondition namespace for a collection kind.
@@ -120,20 +140,18 @@ fn ns(kind: CollectionKind) -> &'static str {
     }
 }
 
-/// Validates the body for the target collection. On failure returns the
-/// precondition element to report (RFC 4791 §5.3.2.1, RFC 6352 §6.3.2.1).
-fn validate(collection: &Collection, body: &[u8]) -> Result<Validated, &'static str> {
+/// Validates an object for the target collection. This is the one check
+/// for stored objects: DAV PUT and imports both use it.
+pub(crate) fn check_object(collection: &Collection, body: &[u8]) -> Result<Validated, Rejection> {
+    let invalid = |err| match err {
+        IcalError::TooLarge => Rejection::TooLarge,
+        err => Rejection::Invalid(err),
+    };
     match collection.kind {
         CollectionKind::Calendar => {
-            let object = CalendarObject::parse(body).map_err(|err| match err {
-                IcalError::TooLarge => "<c:max-resource-size/>",
-                err => {
-                    tracing::debug!(%err, "rejected calendar object");
-                    "<c:valid-calendar-data/>"
-                }
-            })?;
+            let object = CalendarObject::parse(body).map_err(invalid)?;
             if !components(collection).contains(&object.kind.as_str()) {
-                return Err("<c:supported-calendar-component/>");
+                return Err(Rejection::UnsupportedComponent);
             }
             Ok(Validated {
                 uid: object.uid,
@@ -143,13 +161,7 @@ fn validate(collection: &Collection, body: &[u8]) -> Result<Validated, &'static 
             })
         }
         CollectionKind::Addressbook => {
-            let card = VCard::parse(body).map_err(|err| match err {
-                IcalError::TooLarge => "<card:max-resource-size/>",
-                err => {
-                    tracing::debug!(%err, "rejected vCard");
-                    "<card:valid-address-data/>"
-                }
-            })?;
+            let card = VCard::parse(body).map_err(invalid)?;
             Ok(Validated {
                 uid: card.uid,
                 component: "VCARD",
@@ -158,6 +170,25 @@ fn validate(collection: &Collection, body: &[u8]) -> Result<Validated, &'static 
             })
         }
     }
+}
+
+/// Validates the body for the target collection. On failure returns the
+/// precondition element to report (RFC 4791 §5.3.2.1, RFC 6352 §6.3.2.1).
+fn validate(collection: &Collection, body: &[u8]) -> Result<Validated, &'static str> {
+    let calendar = collection.kind == CollectionKind::Calendar;
+    check_object(collection, body).map_err(|rejection| match rejection {
+        Rejection::TooLarge if calendar => "<c:max-resource-size/>",
+        Rejection::TooLarge => "<card:max-resource-size/>",
+        Rejection::UnsupportedComponent => "<c:supported-calendar-component/>",
+        Rejection::Invalid(err) => {
+            tracing::debug!(%err, "rejected object");
+            if calendar {
+                "<c:valid-calendar-data/>"
+            } else {
+                "<card:valid-address-data/>"
+            }
+        }
+    })
 }
 
 pub async fn put(ctx: Ctx<'_>, resource: Resource, request: Request) -> Response {
