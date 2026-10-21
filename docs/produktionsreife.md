@@ -11,8 +11,8 @@ Legende: ✅ erledigt · 🟡 teilweise · ❌ offen · 👤 braucht reale Gerä
 
 | Anforderung | Stand | Nachweis / Lücke |
 |---|---|---|
-| Rechteprüfung für jede DAV-Methode und jeden Ressourcenpfad | 🟡 | Zentrale Auflösung in `dav/paths.rs`: fremde Pfade → 404. Tests für viele Methoden (`caldav.rs` `users_cannot_touch_each_others_objects`, `carddav_sync.rs`). **Lücke:** keine vollständige, systematische Matrix *Methode × Ressourcentyp × Benutzer* (inkl. MKCOL, MKCALENDAR, PROPPATCH auf Home/Principal, REPORT-Varianten, REST-API-Endpunkte). |
-| Tests gegen unberechtigten Zugriff auf fremde Kalender/Kontakte | 🟡 | Isolationstests für DAV, multiget-hrefs, Sync-Tokens, REST-API. **Lücke:** wie oben – Matrix-Test, der neue Methoden/Endpunkte automatisch erfasst. |
+| Rechteprüfung für jede DAV-Methode und jeden Ressourcenpfad | ✅ | Zentrale Auflösung in `dav/paths.rs`: fremde Pfade → 404. Systematische Matrix in `crates/calcraft-server/tests/authz_matrix.rs`: jede Methode aus `ALLOWED_METHODS` (alle REPORT-Varianten, MKCOL, MKCALENDAR, PROPPATCH …) plus nicht implementierte Methoden × jeder Ressourcentyp (Root, Principal, Homes, Collections, Objekte, ungemappte/fehlende Pfade, Traversal- und Percent-Encoding-Varianten) × eigener/fremder/nicht existierender Benutzer × alle Credential-Arten; exakte Statuscodes, fremd = nicht existent (byte-identisch). |
+| Tests gegen unberechtigten Zugriff auf fremde Kalender/Kontakte | ✅ | Isolationstests für DAV, multiget-hrefs, Sync-Tokens, REST-API, dazu `tests/authz_matrix.rs`: Marker-Strings in fremden Daten dürfen in keiner Antwort auftauchen, fremde Daten (ETag/Inhalt/CTag) bleiben nach jedem schreibenden Versuch unverändert, jede REST-Route aus `api::ROUTES` ohne Session, mit fremder Session und ohne CSRF-Header. Der Test schlägt fehl, wenn `ALLOWED_METHODS` oder `ROUTES` einen Eintrag ohne Matrix-Abdeckung enthält. |
 | Schutz gegen Brute-Force | 🟡 | Sperre pro Konto (5 Fehlversuche/15 min) inkl. paralleler Anfragen und 2. Faktor; gleiche Antwort für gesperrt/falsch. **Lücke:** keine Begrenzung pro Client-IP (braucht Trusted-Proxy-Konfiguration), Kontosperre ist durch Dritte auslösbar (dokumentierter Kompromiss). |
 | Schutz gegen Missbrauch und übergroße XML-/HTTP-Anfragen | 🟡 | Body-Limit, Timeout, XML-Limits (Tiefe, Elemente, keine DTD), iCal/vCard-Limits, REPORT-Budgets, Quota 512 MiB, Import-Budgets, Fuzzing. **Lücke:** keine Begrenzung gleichzeitiger Verbindungen/Anfragen insgesamt und pro Client, kein Header-Größen-Test. |
 | Sichere Passwortspeicherung | ✅ | Argon2id, Dummy-Hash gegen Timing, App-Passwörter nur als Hash, Wiederherstellungscodes gehasht. |
@@ -70,7 +70,7 @@ laufen parallel, weil sie für den Pilotbetrieb gebraucht werden.
 
 ### Phase 2 – Sicherheit und Datenintegrität (≈ Woche 2–3)
 
-- [ ] **Autorisierungs-Matrix-Test:** jede DAV-Methode × Ressourcentyp × fremder/eigener Benutzer, plus jeder REST-Endpunkt; der Test schlägt fehl, wenn eine neue Route nicht in der Matrix steht
+- [x] **Autorisierungs-Matrix-Test:** jede DAV-Methode × Ressourcentyp × fremder/eigener Benutzer, plus jeder REST-Endpunkt; der Test schlägt fehl, wenn eine neue Route nicht in der Matrix steht (`crates/calcraft-server/tests/authz_matrix.rs`)
 - [ ] Begrenzung gleichzeitiger Anfragen (global und pro Client-IP, mit Trusted-Proxy-Konfiguration für `X-Forwarded-For`)
 - [ ] Stresstest paralleler Schreiber (keine verlorenen Änderungen, kein 500 bei `SQLITE_BUSY`)
 - [ ] `calcraft backup` / `calcraft restore` mit Integritätsprüfung; Restore-Test in der CI
