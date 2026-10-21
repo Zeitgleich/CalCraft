@@ -1,8 +1,10 @@
 //! HTTP routing and middleware stack.
 
+use std::sync::Arc;
+
 use axum::{
     Router,
-    extract::DefaultBodyLimit,
+    extract::{DefaultBodyLimit, State},
     http::{StatusCode, header::LOCATION},
     middleware,
     response::IntoResponse,
@@ -13,21 +15,40 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::{config::Config, security};
+use calcraft_store::Store;
+
+use crate::{auth::Authenticator, config::Config, dav, security};
 
 /// Root path of the DAV tree. `.well-known` discovery points here.
 pub const DAV_ROOT: &str = "/dav/";
 
+/// Shared state of all handlers.
+#[derive(Clone)]
+pub struct AppState {
+    pub store: Store,
+    pub auth: Arc<Authenticator>,
+}
+
+impl AppState {
+    pub fn new(store: Store) -> anyhow::Result<Self> {
+        Ok(Self {
+            auth: Authenticator::new(store.clone())?,
+            store,
+        })
+    }
+}
+
 /// Builds the complete application router for the given configuration.
-pub fn router(config: &Config) -> Router {
+pub fn router(config: &Config, state: AppState) -> Router {
     let app = Router::new()
         .route("/healthz", get(health))
-        .route("/readyz", get(health))
+        .route("/readyz", get(ready))
         .route("/.well-known/caldav", any(well_known))
         .route("/.well-known/carddav", any(well_known))
-        .route("/dav", any(dav))
-        .route("/dav/", any(dav))
-        .route("/dav/{*path}", any(dav));
+        .route("/dav", any(dav::handle))
+        .route("/dav/", any(dav::handle))
+        .route("/dav/{*path}", any(dav::handle))
+        .with_state(state);
 
     #[cfg(feature = "api")]
     let app = if config.api.enabled {
@@ -69,11 +90,14 @@ async fn well_known() -> impl IntoResponse {
     (StatusCode::MOVED_PERMANENTLY, [(LOCATION, DAV_ROOT)])
 }
 
-async fn dav() -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        "DAV support is not implemented yet (milestone M1)",
-    )
+async fn ready(State(state): State<AppState>) -> impl IntoResponse {
+    match state.store.ping().await {
+        Ok(()) => (StatusCode::OK, "ok"),
+        Err(err) => {
+            tracing::error!(%err, "readiness check failed");
+            (StatusCode::SERVICE_UNAVAILABLE, "database unavailable")
+        }
+    }
 }
 
 async fn not_found() -> impl IntoResponse {

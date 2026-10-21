@@ -2,7 +2,7 @@
 
 Self-hosted CalDAV/CardDAV server written in Rust, with an optional web interface.
 
-> **Status:** early development (milestone M0). Not ready for production use.
+> **Status:** early development (milestone M1: WebDAV discovery). Not ready for production use.
 
 ## Goals
 
@@ -38,9 +38,24 @@ cargo build --release -p calcraft-server --no-default-features
 
 ## Running
 
+Create a user (the password is prompted for, or read from stdin with `--password-stdin`;
+it is never accepted as an argument):
+
+```sh
+calcraft user add alice --display-name "Alice"
+```
+
+Start the server:
+
 ```sh
 calcraft serve --config calcraft.toml
 ```
+
+Point your client at `https://your-host/` – discovery via `/.well-known/caldav` and
+`/.well-known/carddav` leads to `/dav/`. Always run CalCraft behind TLS: DAV clients
+use HTTP Basic authentication.
+
+Other user commands: `calcraft user list|passwd|disable|enable`.
 
 See [`calcraft.example.toml`](calcraft.example.toml). Every setting can be overridden via
 environment variables with the prefix `CALCRAFT_` and `__` as separator,

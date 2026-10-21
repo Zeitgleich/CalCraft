@@ -5,7 +5,11 @@
 //! Unknown keys are rejected so that typos in security-relevant settings do
 //! not go unnoticed.
 
-use std::{net::SocketAddr, path::Path, time::Duration};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use figment::{
     Figment,
@@ -21,6 +25,7 @@ pub const ENV_PREFIX: &str = "CALCRAFT_";
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub server: ServerConfig,
+    pub storage: StorageConfig,
     pub security: SecurityConfig,
     pub web_ui: WebUiConfig,
     pub api: ApiConfig,
@@ -51,6 +56,21 @@ impl Default for ServerConfig {
 impl ServerConfig {
     pub fn request_timeout(&self) -> Duration {
         Duration::from_secs(self.request_timeout_secs)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StorageConfig {
+    /// Path of the SQLite database file. Created on first start.
+    pub database: PathBuf,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            database: PathBuf::from("calcraft.db"),
+        }
     }
 }
 

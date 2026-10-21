@@ -9,7 +9,8 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-
+quick-xml.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true
