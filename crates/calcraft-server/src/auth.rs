@@ -233,19 +233,6 @@ impl Authenticator {
         }
     }
 
-    /// Verifies the account password and resets the failure counter on
-    /// success. Only for accounts without 2FA or after the second factor.
-    pub async fn check_password(&self, username: &Username, password: &str) -> AuthOutcome {
-        let Some(attempt) = self.reserve(username) else {
-            return self.locked_out().await;
-        };
-        let outcome = self.check_first_factor_reserved(&attempt, password).await;
-        if matches!(outcome, AuthOutcome::Authenticated(_)) {
-            self.clear_failures(username);
-        }
-        outcome
-    }
-
     /// Reserves a login attempt for `username`. Attempts in progress count
     /// towards the limit together with recorded failures, so concurrent
     /// requests cannot bypass the lockout. Returns `None` when locked.
