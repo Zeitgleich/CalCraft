@@ -29,7 +29,10 @@ use crate::{app::AppState, auth::AuthOutcome};
 pub(crate) use objects::{Rejection, Validated, check_object, etag};
 pub use paths::valid_item_name;
 
-const ALLOWED_METHODS: &str =
+/// Methods the DAV handler routes, as advertised in `Allow`. The
+/// authorization matrix test (`tests/authz_matrix.rs`) fails for any method
+/// listed here that it does not cover.
+pub const ALLOWED_METHODS: &str =
     "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, REPORT, MKCALENDAR, MKCOL";
 /// DAV compliance classes.
 const DAV_CLASSES: &str = "1, 3, calendar-access, addressbook, extended-mkcol";
