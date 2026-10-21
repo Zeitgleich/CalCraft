@@ -91,7 +91,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             let config = Config::load(config.config.as_deref())?;
             runtime()?.block_on(async {
                 let store = open_store(&config).await?;
-                users::run(&store, command).await
+                users::run(&store, &config, command).await
             })
         }
     }

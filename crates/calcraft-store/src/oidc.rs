@@ -19,6 +19,16 @@ pub enum OidcBinding {
     Mismatch,
 }
 
+/// Result of [`Store::bind_approved_oidc_identity`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovedBinding {
+    Bound,
+    /// No unexpired approval for this issuer + subject.
+    NotApproved,
+    /// The user or the subject is already bound otherwise.
+    Mismatch,
+}
+
 impl Store {
     /// The local user bound to an identity, if any.
     pub async fn user_id_by_oidc_identity(
@@ -91,30 +101,75 @@ impl Store {
         Ok(row.is_some())
     }
 
-    /// Allows the next SSO login to bind this existing account (operator
-    /// approval). Replaces an earlier approval.
-    pub async fn approve_oidc_link(&self, user_id: i64, expires_at: i64) -> Result<()> {
+    /// Allows the next SSO login of exactly this IdP identity to bind the
+    /// existing account (operator approval). Replaces an earlier approval.
+    pub async fn approve_oidc_link(
+        &self,
+        user_id: i64,
+        issuer: &str,
+        subject: &str,
+        expires_at: i64,
+    ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO oidc_link_approvals (user_id, expires_at) VALUES (?, ?) \
-             ON CONFLICT (user_id) DO UPDATE SET expires_at = excluded.expires_at",
+            "INSERT INTO oidc_link_approvals (user_id, issuer, subject, expires_at) VALUES (?, ?, ?, ?) \
+             ON CONFLICT (user_id) DO UPDATE SET issuer = excluded.issuer, \
+             subject = excluded.subject, expires_at = excluded.expires_at",
         )
         .bind(user_id)
+        .bind(issuer)
+        .bind(subject)
         .bind(expires_at)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// Consumes a valid approval; `false` if there is none or it expired.
-    /// Expired approvals are removed as well.
-    pub async fn consume_oidc_link_approval(&self, user_id: i64, now: i64) -> Result<bool> {
-        let row =
-            sqlx::query("DELETE FROM oidc_link_approvals WHERE user_id = ? RETURNING expires_at")
-                .bind(user_id)
-                .fetch_optional(&self.pool)
-                .await?;
-        let expires_at: Option<i64> = row.map(|row| row.try_get("expires_at")).transpose()?;
-        Ok(expires_at.is_some_and(|at| at > now))
+    /// Binds an existing, not yet bound account if an unexpired approval
+    /// for exactly this issuer + subject exists. Consuming the approval and
+    /// creating the binding happen in one transaction: an approval for
+    /// another subject is left untouched, and a failed binding keeps it.
+    pub async fn bind_approved_oidc_identity(
+        &self,
+        user_id: i64,
+        issuer: &str,
+        subject: &str,
+        now: i64,
+    ) -> Result<ApprovedBinding> {
+        let mut tx = self.pool.begin().await?;
+        let consumed = sqlx::query(
+            "DELETE FROM oidc_link_approvals \
+             WHERE user_id = ? AND issuer = ? AND subject = ? AND expires_at > ?",
+        )
+        .bind(user_id)
+        .bind(issuer)
+        .bind(subject)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            == 1;
+        if !consumed {
+            return Ok(ApprovedBinding::NotApproved);
+        }
+        let inserted = sqlx::query(
+            "INSERT INTO oidc_identities (user_id, issuer, subject, created_at, last_login_at) \
+             VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+        )
+        .bind(user_id)
+        .bind(issuer)
+        .bind(subject)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            == 1;
+        if !inserted {
+            // Rolled back on drop: the approval stays.
+            return Ok(ApprovedBinding::Mismatch);
+        }
+        tx.commit().await?;
+        Ok(ApprovedBinding::Bound)
     }
 
     /// Removes all SSO bindings of a user (e.g. after the IdP account was
@@ -193,13 +248,44 @@ mod tests {
                 .unwrap()
         );
 
-        // Approvals are single use and expire.
-        assert!(!store.consume_oidc_link_approval(bob.id, 10).await.unwrap());
-        store.approve_oidc_link(bob.id, 100).await.unwrap();
-        assert!(store.consume_oidc_link_approval(bob.id, 10).await.unwrap());
-        assert!(!store.consume_oidc_link_approval(bob.id, 10).await.unwrap());
-        store.approve_oidc_link(bob.id, 100).await.unwrap();
-        assert!(!store.consume_oidc_link_approval(bob.id, 100).await.unwrap());
+        // Approvals are bound to issuer + subject, single use and expire.
+        let carol = store
+            .create_user(&"carol".parse().unwrap(), "h", None)
+            .await
+            .unwrap();
+        let bind = |sub: &'static str, now: i64| {
+            let store = store.clone();
+            async move {
+                store
+                    .bind_approved_oidc_identity(carol.id, iss, sub, now)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert_eq!(bind("c1", 10).await, ApprovedBinding::NotApproved);
+        store
+            .approve_oidc_link(carol.id, iss, "c1", 100)
+            .await
+            .unwrap();
+        assert_eq!(bind("other", 10).await, ApprovedBinding::NotApproved);
+        // Subject already bound to alice: refused, approval kept.
+        store
+            .approve_oidc_link(carol.id, iss, "s1", 100)
+            .await
+            .unwrap();
+        assert_eq!(bind("s1", 10).await, ApprovedBinding::Mismatch);
+        assert_eq!(bind("s1", 10).await, ApprovedBinding::Mismatch);
+        assert_eq!(bind("s1", 100).await, ApprovedBinding::NotApproved);
+        store
+            .approve_oidc_link(carol.id, iss, "c1", 100)
+            .await
+            .unwrap();
+        assert_eq!(bind("c1", 10).await, ApprovedBinding::Bound);
+        assert_eq!(bind("c1", 10).await, ApprovedBinding::NotApproved);
+        assert_eq!(
+            store.user_id_by_oidc_identity(iss, "c1").await.unwrap(),
+            Some(carol.id)
+        );
 
         assert_eq!(store.unbind_oidc_identities(alice.id).await.unwrap(), 1);
         assert_eq!(

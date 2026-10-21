@@ -126,12 +126,17 @@ How accounts are matched:
   `@example.com` for UPNs); it is never rewritten. E-mail addresses are never used.
 - Accounts created via SSO (`auto_create_users`) are bound to the IdP identity
   (issuer + subject) at creation. An **existing** local account is never linked just
-  because the name matches: an operator approves it once with
-  `calcraft user allow-sso-link <user> [--hours 24]`; the next SSO login binds it and
-  consumes the approval. Without approval the login fails with `account_exists`.
+  because the name matches: an operator approves exactly one IdP account with
+  `calcraft user allow-sso-link <user> --subject <sub> [--hours 1]` (the subject is the
+  user's ID in the IdP admin console, e.g. Keycloak's user ID; valid 1 h by default, at
+  most 24 h). Only the next SSO login with that issuer + subject binds the account and
+  consumes the approval; any other IdP account with the same name fails with
+  `account_exists` and leaves the approval in place.
 - Once bound, logins must present the same subject, so a different IdP account with
   the same username cannot take over. `calcraft user unbind-sso <user>` resets it.
-- `required_claim`/`required_value` restrict SSO to e.g. one group.
+- The IdP should not let users choose their username freely (open self-registration),
+  otherwise someone can claim a name before its owner does. If it does, restrict SSO
+  with `required_claim`/`required_value` (e.g. a group only admins assign).
 - Disabled accounts cannot log in. Accounts created via SSO have no usable password
   until an administrator sets one (`calcraft user passwd`).
 - By default SSO logins do not ask for the local TOTP code: MFA is the IdP's job.
@@ -139,8 +144,10 @@ How accounts are matched:
   (`local_2fa_required`).
 - `[security] password_login = false` makes SSO the only interactive login: the
   password login API and DAV Basic auth with the account password are refused, app
-  passwords keep working. CalCraft refuses to start this way without `[oidc]`.
-- Starting logins is rate-limited globally (10/s, burst 50; `rate_limited`).
+  passwords keep working; changing the password and local 2FA setup are refused too
+  (`password_login_disabled`). CalCraft refuses to start this way without `[oidc]`.
+- Pending logins are kept in a bounded table (oldest evicted); per-client rate limits
+  follow with the trusted-proxy configuration.
 
 The UI learns whether SSO is available from `GET /api/v1/auth/methods`. Errors are
 reported by redirecting to `/?sso_error=<code>`. Discovery, JWKS and token endpoints

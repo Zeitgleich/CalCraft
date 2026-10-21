@@ -309,23 +309,32 @@ async fn user_id(store: &Store, name: &str) -> i64 {
         .id
 }
 
-/// Operator approval (`calcraft user allow-sso-link`) valid for `secs`.
-async fn approve(store: &Store, name: &str, secs: i64) {
+/// Subject of alice's IdP account in most tests.
+const ALICE_SUB: &str = "sub-alice";
+
+/// Operator approval (`calcraft user allow-sso-link --subject`) for the
+/// IdP account `subject`, valid for `secs`.
+async fn approve(store: &Store, idp: &Idp, name: &str, subject: &str, secs: i64) {
     let id = user_id(store, name).await;
     store
-        .approve_oidc_link(id, calcraft_server::auth::now() + secs)
+        .approve_oidc_link(
+            id,
+            &idp.issuer,
+            subject,
+            calcraft_server::auth::now() + secs,
+        )
         .await
         .unwrap();
 }
 
-/// Like [`build`], with `alice` approved for SSO linking.
+/// Like [`build`], with `alice` approved for linking to [`ALICE_SUB`].
 async fn app_with(
     idp: &Idp,
     config: impl FnOnce(&mut OidcConfig),
     jwks_refresh: Duration,
 ) -> Router {
     let setup = build(idp, config, jwks_refresh).await;
-    approve(&setup.store, "alice", 3600).await;
+    approve(&setup.store, idp, "alice", ALICE_SUB, 3600).await;
     setup.app
 }
 
@@ -480,7 +489,7 @@ async fn state_must_belong_to_this_browser() {
 
     // Without the binding cookie (e.g. a link sent to the victim).
     let (request, _) = start(&app, &idp).await;
-    let code = idp.authorize(&request, idp.claims(&request, "alice", "s"));
+    let code = idp.authorize(&request, idp.claims(&request, "alice", ALICE_SUB));
     assert_failed(
         &callback(&app, &request["state"], &code, None).await,
         "invalid_request",
@@ -489,7 +498,7 @@ async fn state_must_belong_to_this_browser() {
     // With another browser's binding cookie.
     let (request, _) = start(&app, &idp).await;
     let (_, other_binding) = start(&app, &idp).await;
-    let code = idp.authorize(&request, idp.claims(&request, "alice", "s"));
+    let code = idp.authorize(&request, idp.claims(&request, "alice", ALICE_SUB));
     let reply = callback(&app, &request["state"], &code, Some(&other_binding)).await;
     assert_failed(&reply, "invalid_request");
 
@@ -520,7 +529,7 @@ async fn token_problems_are_rejected() {
 
     // Nonce of another login.
     let (request, binding) = start(&app, &idp).await;
-    let mut claims = idp.claims(&request, "alice", "s");
+    let mut claims = idp.claims(&request, "alice", ALICE_SUB);
     claims["nonce"] = json!("not-the-nonce");
     let code = idp.authorize(&request, claims);
     assert_failed(
@@ -535,7 +544,7 @@ async fn token_problems_are_rejected() {
         json!({"exp": calcraft_server::auth::now() - 120}),
     ] {
         let (request, binding) = start(&app, &idp).await;
-        let mut claims = idp.claims(&request, "alice", "s");
+        let mut claims = idp.claims(&request, "alice", ALICE_SUB);
         for (key, value) in change.as_object().unwrap() {
             claims[key] = value.clone();
         }
@@ -564,7 +573,7 @@ async fn token_problems_are_rejected() {
 
     // RFC 9207 iss parameter of another issuer (mix-up).
     let (request, binding) = start(&app, &idp).await;
-    let code = idp.authorize(&request, idp.claims(&request, "alice", "s"));
+    let code = idp.authorize(&request, idp.claims(&request, "alice", ALICE_SUB));
     let uri = format!(
         "/api/v1/auth/oidc/callback?code={code}&state={}&iss=http%3A%2F%2Fevil.example",
         request["state"]
@@ -585,11 +594,11 @@ async fn account_mapping_rules() {
 
     // The first login binds the subject; another IdP account with the same
     // username is rejected afterwards.
-    assert_eq!(login(&app, &idp, "alice", "sub-1").await.location(), "/");
+    assert_eq!(login(&app, &idp, "alice", ALICE_SUB).await.location(), "/");
     assert_failed(&login(&app, &idp, "alice", "sub-2").await, "login_failed");
-    assert_eq!(login(&app, &idp, "alice", "sub-1").await.location(), "/");
+    assert_eq!(login(&app, &idp, "alice", ALICE_SUB).await.location(), "/");
     // The bound subject cannot be used for another account either.
-    assert_failed(&login(&app, &idp, "admin", "sub-1").await, "login_failed");
+    assert_failed(&login(&app, &idp, "admin", ALICE_SUB).await, "login_failed");
 
     // Usernames that violate the local rules are rejected, not rewritten.
     assert_failed(
@@ -617,7 +626,7 @@ async fn account_mapping_rules() {
     )
     .await;
     assert_eq!(disable.status, StatusCode::NO_CONTENT);
-    assert_failed(&login(&app, &idp, "alice", "sub-1").await, "login_failed");
+    assert_failed(&login(&app, &idp, "alice", ALICE_SUB).await, "login_failed");
 }
 
 #[tokio::test]
@@ -691,18 +700,18 @@ async fn jwks_rotation_is_refetched_with_rate_limit() {
     // Unknown kid triggers a refetch.
     let idp = Idp::start().await;
     let fast = app_with(&idp, |_| {}, Duration::ZERO).await;
-    assert_eq!(login(&fast, &idp, "alice", "s").await.location(), "/");
+    assert_eq!(login(&fast, &idp, "alice", ALICE_SUB).await.location(), "/");
     idp.state.lock().unwrap().keys.push(Key::new("k2"));
-    assert_eq!(login(&fast, &idp, "alice", "s").await.location(), "/");
+    assert_eq!(login(&fast, &idp, "alice", ALICE_SUB).await.location(), "/");
     assert_eq!(idp.state.lock().unwrap().jwks_fetches, 2);
 
     // With the default limit, an unknown kid shortly after a fetch does not
     // cause another request.
     let idp = Idp::start().await;
     let app = app(&idp).await;
-    assert_eq!(login(&app, &idp, "alice", "s").await.location(), "/");
+    assert_eq!(login(&app, &idp, "alice", ALICE_SUB).await.location(), "/");
     idp.state.lock().unwrap().keys = vec![Key::new("k3")];
-    assert_failed(&login(&app, &idp, "alice", "s").await, "login_failed");
+    assert_failed(&login(&app, &idp, "alice", ALICE_SUB).await, "login_failed");
     assert_eq!(idp.state.lock().unwrap().jwks_fetches, 1);
 }
 
@@ -754,45 +763,39 @@ async fn existing_accounts_need_operator_approval() {
     assert_failed(&login(&app, &idp, "admin", "sub-x").await, "account_exists");
 
     // Expired approval.
-    approve(&store, "admin", -1).await;
-    assert_failed(&login(&app, &idp, "admin", "sub-x").await, "account_exists");
+    approve(&store, &idp, "admin", "sub-admin", -1).await;
+    assert_failed(
+        &login(&app, &idp, "admin", "sub-admin").await,
+        "account_exists",
+    );
 
-    // Approved: bound once, the approval is consumed.
-    approve(&store, "admin", 3600).await;
+    // Approval for subject A; an attacker's IdP account named alice with
+    // subject B is refused and does not consume the approval.
+    approve(&store, &idp, "alice", "sub-a", 3600).await;
+    assert_failed(&login(&app, &idp, "alice", "sub-b").await, "account_exists");
+    assert_eq!(login(&app, &idp, "alice", "sub-a").await.location(), "/");
+    // Bound now: the same subject keeps working, the other one never.
+    assert_eq!(login(&app, &idp, "alice", "sub-a").await.location(), "/");
+    assert_failed(&login(&app, &idp, "alice", "sub-b").await, "login_failed");
+
+    // Admins behave the same way, and the approval is single use.
+    approve(&store, &idp, "admin", "sub-admin", 3600).await;
     let reply = login(&app, &idp, "admin", "sub-admin").await;
     assert_eq!(reply.location(), "/");
     let session = reply.cookie("calcraft_session").unwrap();
     let me = call(&app, Method::GET, "/api/v1/me", Some(&session), None).await;
     assert_eq!(me.json["username"], "admin");
     assert_eq!(me.json["is_admin"], true);
-    assert!(
-        !store
-            .consume_oidc_link_approval(
-                user_id(&store, "admin").await,
-                calcraft_server::auth::now()
-            )
-            .await
-            .unwrap()
-    );
-    // The bound subject keeps working; another IdP account does not, even
-    // with a fresh approval.
-    assert_eq!(
-        login(&app, &idp, "admin", "sub-admin").await.location(),
-        "/"
-    );
-    approve(&store, "admin", 3600).await;
+    let admin = user_id(&store, "admin").await;
+    store.unbind_oidc_identities(admin).await.unwrap();
     assert_failed(
-        &login(&app, &idp, "admin", "sub-evil").await,
-        "login_failed",
+        &login(&app, &idp, "admin", "sub-admin").await,
+        "account_exists",
     );
 
-    // An approval for alice cannot be used by an IdP account bound elsewhere.
-    approve(&store, "alice", 3600).await;
-    assert_failed(
-        &login(&app, &idp, "alice", "sub-admin").await,
-        "login_failed",
-    );
-    assert_eq!(login(&app, &idp, "alice", "sub-a").await.location(), "/");
+    // An approval naming a subject bound to another account fails.
+    approve(&store, &idp, "admin", "sub-a", 3600).await;
+    assert_failed(&login(&app, &idp, "admin", "sub-a").await, "login_failed");
 }
 
 #[tokio::test]
@@ -811,7 +814,7 @@ async fn local_totp_can_be_required() {
             .await
             .unwrap();
         store.enable_totp(alice, &[]).await.unwrap();
-        approve(&store, "alice", 3600).await;
+        approve(&store, &idp, "alice", "sub-a", 3600).await;
         let reply = login(&app, &idp, "alice", "sub-a").await;
         if required {
             assert_failed(&reply, "local_2fa_required");
@@ -826,7 +829,7 @@ async fn password_login_can_be_disabled() {
     let idp = Idp::start().await;
     let Setup { app, store, auth } = build(&idp, |_| {}, Duration::from_secs(60)).await;
     auth.set_password_login(false);
-    approve(&store, "alice", 3600).await;
+    approve(&store, &idp, "alice", "sub-a", 3600).await;
 
     let methods = call(&app, Method::GET, "/api/v1/auth/methods", None, None).await;
     assert_eq!(methods.json["password"], false);
@@ -855,6 +858,25 @@ async fn password_login_can_be_disabled() {
     )
     .await;
     let app_password = created.json["password"].as_str().unwrap().to_owned();
+
+    // Every other password path is closed too (local 2FA only protects
+    // password logins).
+    for (uri, body) in [
+        (
+            "/api/v1/me/password",
+            json!({"current": "alice password 123", "new": "another password 123"}),
+        ),
+        ("/api/v1/me/totp/setup", json!({})),
+        ("/api/v1/me/totp/enable", json!({"code": "123456"})),
+        (
+            "/api/v1/me/totp/disable",
+            json!({"password": "alice password 123", "code": "123456"}),
+        ),
+    ] {
+        let reply = call(&app, Method::POST, uri, Some(&session), Some(body)).await;
+        assert_eq!(reply.status, StatusCode::FORBIDDEN, "{uri}");
+        assert_eq!(reply.json["error"], "password_login_disabled", "{uri}");
+    }
     let dav = |password: String| {
         let app = app.clone();
         async move {
@@ -874,19 +896,4 @@ async fn password_login_can_be_disabled() {
         StatusCode::UNAUTHORIZED
     );
     assert_eq!(dav(app_password).await.as_u16(), 207);
-}
-
-#[tokio::test]
-async fn starting_logins_is_rate_limited() {
-    let idp = Idp::start().await;
-    let app = app(&idp).await;
-    let mut limited = 0;
-    for _ in 0..80 {
-        let reply = call(&app, Method::GET, "/api/v1/auth/oidc/login", None, None).await;
-        assert_eq!(reply.status, StatusCode::SEE_OTHER);
-        if reply.location() == "/?sso_error=rate_limited" {
-            limited += 1;
-        }
-    }
-    assert!(limited >= 10, "{limited}");
 }

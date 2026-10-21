@@ -50,7 +50,8 @@ enabled = false
 # required_claim = "groups"
 # required_value = "/calcraft-users"
 # auto_create_users = false
-# Existing local accounts are only linked after `calcraft user allow-sso-link <user>`.
+# Existing local accounts are only linked after
+# `calcraft user allow-sso-link <user> --subject <IdP user ID>` (single use, 1 h default).
 # Refuse SSO for accounts with local 2FA (default: rely on the IdP's MFA).
 # require_local_totp = false
 # signing_algs = ["RS256", "ES256"]

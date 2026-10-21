@@ -72,8 +72,6 @@ pub enum OidcError {
     Exchange(String),
     #[error("ID token rejected: {0}")]
     Token(#[from] TokenError),
-    #[error("too many logins started, try again shortly")]
-    RateLimited,
 }
 
 /// Query parameters of the redirect back from the IdP.
@@ -95,38 +93,6 @@ impl std::fmt::Debug for CallbackParams {
             .field("error", &self.error.as_deref().map(log_safe))
             .field("iss", &self.iss)
             .finish()
-    }
-}
-
-/// Global token bucket for starting logins: every start allocates a
-/// pending entry, and anyone can trigger it.
-struct RateLimit {
-    tokens: f64,
-    last: Instant,
-}
-
-/// Sustained rate and burst of new logins (all clients together).
-const LOGIN_RATE_PER_SEC: f64 = 10.0;
-const LOGIN_BURST: f64 = 50.0;
-
-impl RateLimit {
-    fn new() -> Self {
-        Self {
-            tokens: LOGIN_BURST,
-            last: Instant::now(),
-        }
-    }
-
-    fn try_take(&mut self, now: Instant) -> bool {
-        let elapsed = now.saturating_duration_since(self.last).as_secs_f64();
-        self.last = now;
-        self.tokens = (self.tokens + elapsed * LOGIN_RATE_PER_SEC).min(LOGIN_BURST);
-        if self.tokens >= 1.0 {
-            self.tokens -= 1.0;
-            true
-        } else {
-            false
-        }
     }
 }
 
@@ -187,7 +153,6 @@ pub struct Oidc {
     jwks: tokio::sync::Mutex<JwksCache>,
     pending: Mutex<HashMap<[u8; 32], Pending>>,
     jwks_min_refresh: Duration,
-    rate_limit: Mutex<RateLimit>,
 }
 
 impl std::fmt::Debug for Oidc {
@@ -352,7 +317,6 @@ impl Oidc {
             jwks: tokio::sync::Mutex::default(),
             pending: Mutex::default(),
             jwks_min_refresh,
-            rate_limit: Mutex::new(RateLimit::new()),
         }))
     }
 
@@ -485,14 +449,6 @@ impl Oidc {
     /// Starts a login: returns the authorization URL and the value of the
     /// browser binding cookie.
     pub async fn begin(&self) -> Result<LoginStart, OidcError> {
-        let allowed = self
-            .rate_limit
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .try_take(Instant::now());
-        if !allowed {
-            return Err(OidcError::RateLimited);
-        }
         let provider = self.provider().await?;
         let state = random_b64::<32>();
         let nonce = random_b64::<32>();
@@ -778,20 +734,6 @@ mod tests {
             pkce_challenge("dBjftJeZ4CVP-mJ92K9yLhaWhakdbzR9ScVpaEAdR3c"),
             "xJ-76oyO0oUJKpdl-o0BKrwm_N_u3uUoQRAOOcQf6bQ"
         );
-    }
-
-    #[test]
-    fn login_rate_limit() {
-        let start = Instant::now();
-        let mut limit = RateLimit::new();
-        limit.last = start;
-        let taken = (0..60).filter(|_| limit.try_take(start)).count();
-        assert_eq!(taken, 50);
-        assert!(!limit.try_take(start + Duration::from_millis(50)));
-        assert!(limit.try_take(start + Duration::from_millis(150)));
-        // Refills up to the burst only.
-        let later = start + Duration::from_secs(3600);
-        assert_eq!((0..60).filter(|_| limit.try_take(later)).count(), 50);
     }
 
     #[test]

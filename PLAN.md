@@ -237,18 +237,24 @@ standardmäßig aus; wird beim Start validiert.
   `Username`-Regeln, nie umgeschrieben; kein E-Mail-Linking. Per SSO angelegte Konten
   werden bei der Anlage an `iss`+`sub` gebunden (Tabelle `oidc_identities`, Migration
   0005). Bestehende lokale Konten nie allein über den Namen: nur nach einmaliger,
-  ablaufender Freigabe `calcraft user allow-sso-link` (sonst `account_exists`). Danach
+  ablaufender Freigabe für genau eine IdP-Identität `calcraft user allow-sso-link <user>
+  --subject <sub>` (Default 1 h, max. 24 h; Verbrauch und Bindung in einer Transaktion;
+  andere Subjects → `account_exists`, Freigabe bleibt). Der IdP darf keine frei
+  wählbaren Benutzernamen erlauben, sonst `required_claim` nutzen. Danach
   muss `sub` passen; `calcraft user unbind-sso` setzt zurück. Auto-Anlage nur mit `auto_create_users`
   (Passwort-Hash unbrauchbar). Deaktivierte Konten abgelehnt. Admin-Recht aus Claim nur,
   wenn `admin_claim` gesetzt ist (dann in beide Richtungen synchronisiert).
 - **Optionen (Default aus):** `oidc.require_local_totp` – Konten mit lokaler 2FA können
   nicht per SSO; sonst verlässt sich SSO auf die MFA des IdP. `security.password_login =
   false` – nur SSO: Passwort-Login-API und DAV-Basic mit Kontopasswort abgelehnt,
-  App-Passwörter gehen weiter; Start ohne `[oidc]` wird verweigert.
-- Login-Starts global rate-limitiert (Token-Bucket 10/s, Burst 50), zusätzlich zur
-  begrenzten Tabelle. TraceLayer-Spans enthalten nur den Pfad, nie die Query.
+  App-Passwörter gehen weiter; Passwortwechsel und lokale 2FA-Einrichtung ebenfalls
+  gesperrt (`password_login_disabled`); Start ohne `[oidc]` wird verweigert.
+- Ausstehende Logins: begrenzte Tabelle mit Verdrängung des ältesten Eintrags, kein
+  globales Rate-Limit (ein anonymer Client könnte sonst alle SSO-Logins blockieren).
+  Rate-Limiting pro Client kommt mit der Trusted-Proxy-/Client-IP-Konfiguration.
+  TraceLayer-Spans enthalten nur den Pfad, nie die Query.
 - **Später:** Backchannel-Logout und RP-initiated Logout, Admin-API zum Lösen von
-  SSO-Bindungen, optional Pflicht-SSO (Passwort-Login abschaltbar).
+  SSO-Bindungen und -Freigaben, Rate-Limit pro Client.
 
 ## 13. Bekannte Einschränkungen (Stand M2)
 
