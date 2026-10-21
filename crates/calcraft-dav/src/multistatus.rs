@@ -98,6 +98,8 @@ fn status_line(code: u16) -> String {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Multistatus {
     pub responses: Vec<Response>,
+    /// New sync token for sync-collection responses (RFC 6578 §6.2).
+    pub sync_token: Option<String>,
 }
 
 impl Multistatus {
@@ -141,6 +143,9 @@ impl Multistatus {
                 );
             }
             out.push_str("</d:response>");
+        }
+        if let Some(token) = &self.sync_token {
+            let _ = write!(out, "<d:sync-token>{}</d:sync-token>", escape_text(token));
         }
         out.push_str("</d:multistatus>");
         out
@@ -230,6 +235,7 @@ mod tests {
             .push(PropName::new("http://example.com/\"ns", "foo"));
         let xml = Multistatus {
             responses: vec![response],
+            sync_token: None,
         }
         .to_xml();
 
@@ -248,6 +254,7 @@ mod tests {
             .push((PropName::new(NS_DAV, "displayname"), 424));
         let xml = Multistatus {
             responses: vec![Response::with_status("/missing.ics", 404), failed],
+            sync_token: Some("urn:t:1".into()),
         }
         .to_xml();
         assert!(xml.contains(
@@ -268,6 +275,7 @@ mod tests {
         ));
         let xml = Multistatus {
             responses: vec![response],
+            sync_token: None,
         }
         .to_xml();
         let mut reader = quick_xml::Reader::from_str(&xml);

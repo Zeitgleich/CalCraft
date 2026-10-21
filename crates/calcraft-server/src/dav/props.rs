@@ -11,6 +11,35 @@ use calcraft_store::{Collection, User};
 use super::paths::{Resource, home_href, principal_href};
 
 pub const CALENDAR_CONTENT_TYPE: &str = "text/calendar; charset=utf-8";
+pub const VCARD_CONTENT_TYPE: &str = "text/vcard; charset=utf-8";
+
+/// Content type of objects in a collection of this kind.
+pub fn content_type(kind: CollectionKind) -> &'static str {
+    match kind {
+        CollectionKind::Calendar => CALENDAR_CONTENT_TYPE,
+        CollectionKind::Addressbook => VCARD_CONTENT_TYPE,
+    }
+}
+
+/// The property carrying object content in REPORT responses.
+pub fn data_property(kind: CollectionKind) -> (&'static str, &'static str) {
+    match kind {
+        CollectionKind::Calendar => (NS_CALDAV, "calendar-data"),
+        CollectionKind::Addressbook => (NS_CARDDAV, "address-data"),
+    }
+}
+
+fn supported_reports(reports: &[(&'static str, &'static str)]) -> PropValue {
+    PropValue::Elements(
+        reports
+            .iter()
+            .map(|(ns, report)| {
+                Element::new(NS_DAV, "supported-report")
+                    .child(Element::new(NS_DAV, "report").child(Element::new(ns, report)))
+            })
+            .collect(),
+    )
+}
 
 /// Properties that clients can change with PROPPATCH (and set via MKCALENDAR).
 pub const WRITABLE: [(&str, &str); 4] = [
@@ -163,6 +192,11 @@ fn collection_properties(collection: &Collection, principal: String) -> Vec<(Pro
             "getctag",
             PropValue::Text(collection.sync_revision.to_string()),
         ),
+        prop(
+            NS_DAV,
+            "sync-token",
+            PropValue::Text(super::sync::token(collection)),
+        ),
     ];
     if let Some(name) = &collection.display_name {
         props.push(prop(NS_DAV, "displayname", PropValue::Text(name.clone())));
@@ -189,17 +223,11 @@ fn collection_properties(collection: &Collection, principal: String) -> Vec<(Pro
             prop(
                 NS_DAV,
                 "supported-report-set",
-                PropValue::Elements(
-                    ["calendar-multiget", "calendar-query"]
-                        .into_iter()
-                        .map(|report| {
-                            Element::new(NS_DAV, "supported-report").child(
-                                Element::new(NS_DAV, "report")
-                                    .child(Element::new(NS_CALDAV, report)),
-                            )
-                        })
-                        .collect(),
-                ),
+                supported_reports(&[
+                    (NS_CALDAV, "calendar-multiget"),
+                    (NS_CALDAV, "calendar-query"),
+                    (NS_DAV, "sync-collection"),
+                ]),
             ),
             prop(
                 NS_CALDAV,
@@ -215,12 +243,46 @@ fn collection_properties(collection: &Collection, principal: String) -> Vec<(Pro
             ));
         }
     }
+    if collection.kind == CollectionKind::Addressbook {
+        props.extend([
+            prop(
+                NS_DAV,
+                "supported-report-set",
+                supported_reports(&[
+                    (NS_CARDDAV, "addressbook-multiget"),
+                    (NS_CARDDAV, "addressbook-query"),
+                    (NS_DAV, "sync-collection"),
+                ]),
+            ),
+            prop(
+                NS_CARDDAV,
+                "max-resource-size",
+                PropValue::Text(MAX_OBJECT_SIZE.to_string()),
+            ),
+            prop(
+                NS_CARDDAV,
+                "supported-address-data",
+                PropValue::Elements(
+                    ["3.0", "4.0"]
+                        .into_iter()
+                        .map(|version| {
+                            Element::new(NS_CARDDAV, "address-data-type")
+                                .attr("content-type", "text/vcard")
+                                .attr("version", version)
+                        })
+                        .collect(),
+                ),
+            ),
+        ]);
+    }
     props
 }
 
-/// Properties of a calendar object. `content` adds `calendar-data`.
+/// Properties of a calendar or address object. `content` adds
+/// `calendar-data` / `address-data`.
 pub fn item_properties(
     user: &User,
+    kind: CollectionKind,
     etag: &str,
     size: usize,
     content: Option<&[u8]>,
@@ -232,7 +294,7 @@ pub fn item_properties(
         prop(
             NS_DAV,
             "getcontenttype",
-            PropValue::Text(CALENDAR_CONTENT_TYPE.to_owned()),
+            PropValue::Text(content_type(kind).to_owned()),
         ),
         prop(
             NS_DAV,
@@ -241,10 +303,11 @@ pub fn item_properties(
         ),
     ]);
     if let Some(content) = content {
-        // Stored objects passed the UTF-8 check of the iCalendar parser.
+        let (ns, name) = data_property(kind);
+        // Stored objects passed the UTF-8 check of the parser.
         props.push(prop(
-            NS_CALDAV,
-            "calendar-data",
+            ns,
+            name,
             PropValue::Text(String::from_utf8_lossy(content).into_owned()),
         ));
     }

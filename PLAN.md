@@ -169,7 +169,7 @@ Der Client-Track startet nach M4 (wenn Web-UI-Komponenten existieren).
 | **M0** ✅ | Workspace, Lizenz, Doku, CI auf Linux/macOS/Windows (fmt, clippy, test, deny), Dockerfile, Server-Grundgerüst mit Config, Feature-Flags, Security-Headern, Health-Endpunkten, `.well-known` |
 | **M1** ✅ | WebDAV-Kern: OPTIONS, PROPFIND (Depth 0/1), Principal Discovery, Basic Auth, Storage (SQLite) |
 | **M2** ✅ | CalDAV: MKCALENDAR, PUT/GET/DELETE mit Preconditions, calendar-query, calendar-multiget; Parser-Limits + Fuzzing |
-| **M3** | sync-collection, CardDAV |
+| **M3** ✅ | sync-collection, CardDAV |
 | **M4** | REST-API + OpenAPI, lokale Auth mit 2FA, App-Passwörter, Web-UI Stufe 1–2 |
 | **M5** | OIDC/Keycloak, Freigaben, Gruppen, Erinnerungen (SMTP), Web-UI Stufe 3–4 |
 | **M6** | Import/Export aller Formate, Webcal mit SSRF-Schutz, Backup/Restore, Migration aus Radicale/Baïkal |
@@ -200,6 +200,10 @@ Der Client-Track startet nach M4 (wenn Web-UI-Komponenten existieren).
   statt stillschweigend ignoriert.
 - `calendar-data` liefert immer das ganze Objekt (keine Teilabfrage, kein `expand`).
 - Unbekannte Properties bei MKCALENDAR (z. B. `calendar-order`) werden nicht gespeichert.
+- `addressbook-query` unterstützt nur einen leeren Filter (alle Kontakte); Filter werden mit
+  `CARDDAV:supported-filter` abgelehnt.
+- `sync-collection` nur mit `sync-level` 1; bei Überschreitung von `nresults` oder der Server-Grenze
+  kommt 507 statt einer abgeschnittenen Antwort. Tombstones werden derzeit unbegrenzt aufbewahrt.
 
 ## 13. Offene Entscheidungen
 

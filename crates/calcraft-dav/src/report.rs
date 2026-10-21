@@ -1,11 +1,12 @@
-//! CalDAV REPORT bodies (RFC 4791 §7.8, §7.9).
+//! REPORT bodies: CalDAV (RFC 4791 §7.8, §7.9), CardDAV (RFC 6352 §8.6,
+//! §8.7) and sync-collection (RFC 6578 §3.2).
 
 use calcraft_ical::{ComponentKind, parse_utc_datetime};
 
 use crate::{
     DavError, Propfind,
     tree::{self, Node},
-    xml::{NS_CALDAV, NS_DAV},
+    xml::{NS_CALDAV, NS_CARDDAV, NS_DAV},
 };
 
 /// Largest accepted REPORT body; a multiget for 2000 objects fits easily.
@@ -30,6 +31,21 @@ pub enum Report {
         props: Propfind,
         hrefs: Vec<String>,
     },
+    AddressbookMultiget {
+        props: Propfind,
+        hrefs: Vec<String>,
+    },
+    /// Only an empty filter (all address objects) is supported.
+    AddressbookQuery {
+        props: Propfind,
+    },
+    SyncCollection {
+        /// Empty for the initial synchronisation.
+        token: String,
+        props: Propfind,
+        /// Client-requested maximum number of results.
+        limit: Option<usize>,
+    },
     CalendarQuery {
         props: Propfind,
         filter: CalendarFilter,
@@ -41,17 +57,25 @@ impl Report {
         let root = tree::parse(body, MAX_REPORT_BODY)?;
         let props = Propfind::from_parent(&root)?.unwrap_or(Propfind::AllProp);
         if root.is(NS_CALDAV, "calendar-multiget") {
-            let hrefs: Vec<String> = root
-                .children_named(NS_DAV, "href")
-                .map(|href| href.text.trim().to_owned())
-                .collect();
-            if hrefs.len() > MAX_HREFS {
-                return Err(DavError::BadRequest("too many hrefs"));
+            Ok(Self::CalendarMultiget {
+                props,
+                hrefs: hrefs(&root)?,
+            })
+        } else if root.is(NS_CARDDAV, "addressbook-multiget") {
+            Ok(Self::AddressbookMultiget {
+                props,
+                hrefs: hrefs(&root)?,
+            })
+        } else if root.is(NS_CARDDAV, "addressbook-query") {
+            if root
+                .child(NS_CARDDAV, "filter")
+                .is_some_and(|filter| !filter.children.is_empty())
+            {
+                return Err(DavError::Unsupported("address book filter"));
             }
-            if hrefs.iter().any(|h| h.is_empty() || h.len() > MAX_HREF_LEN) {
-                return Err(DavError::BadRequest("invalid href"));
-            }
-            Ok(Self::CalendarMultiget { props, hrefs })
+            Ok(Self::AddressbookQuery { props })
+        } else if root.is(NS_DAV, "sync-collection") {
+            parse_sync(&root, props)
         } else if root.is(NS_CALDAV, "calendar-query") {
             let filter = root
                 .child(NS_CALDAV, "filter")
@@ -64,6 +88,52 @@ impl Report {
             Err(DavError::Unsupported("report"))
         }
     }
+}
+
+fn hrefs(root: &Node) -> Result<Vec<String>, DavError> {
+    let hrefs: Vec<String> = root
+        .children_named(NS_DAV, "href")
+        .map(|href| href.text.trim().to_owned())
+        .collect();
+    if hrefs.len() > MAX_HREFS {
+        return Err(DavError::BadRequest("too many hrefs"));
+    }
+    if hrefs.iter().any(|h| h.is_empty() || h.len() > MAX_HREF_LEN) {
+        return Err(DavError::BadRequest("invalid href"));
+    }
+    Ok(hrefs)
+}
+
+fn parse_sync(root: &Node, props: Propfind) -> Result<Report, DavError> {
+    let token = root
+        .child(NS_DAV, "sync-token")
+        .map(|t| t.text.trim().to_owned())
+        .unwrap_or_default();
+    if token.len() > MAX_HREF_LEN {
+        return Err(DavError::BadRequest("sync-token too long"));
+    }
+    match root.child(NS_DAV, "sync-level").map(|l| l.text.trim()) {
+        Some("1") => {}
+        Some("infinite") => return Err(DavError::Unsupported("sync-level infinite")),
+        _ => return Err(DavError::BadRequest("sync-level is required")),
+    }
+    let limit = root
+        .child(NS_DAV, "limit")
+        .and_then(|l| l.child(NS_DAV, "nresults"))
+        .map(|n| {
+            n.text
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or(DavError::BadRequest("invalid nresults"))
+        })
+        .transpose()?;
+    Ok(Report::SyncCollection {
+        token,
+        props,
+        limit,
+    })
 }
 
 fn single_comp_filter(node: &Node) -> Result<Option<&Node>, DavError> {
@@ -165,6 +235,52 @@ mod tests {
     }
 
     #[test]
+    fn parses_sync_collection() {
+        let body = br#"<d:sync-collection xmlns:d="DAV:"><d:sync-token>urn:calcraft:sync:1:5</d:sync-token>
+            <d:sync-level>1</d:sync-level><d:limit><d:nresults>10</d:nresults></d:limit><d:prop><d:getetag/></d:prop></d:sync-collection>"#;
+        let Report::SyncCollection {
+            token,
+            limit,
+            props,
+        } = Report::parse(body).unwrap()
+        else {
+            panic!("expected sync-collection");
+        };
+        assert_eq!(token, "urn:calcraft:sync:1:5");
+        assert_eq!(limit, Some(10));
+        assert_eq!(
+            props,
+            Propfind::Prop(vec![PropName::new(NS_DAV, "getetag")])
+        );
+
+        let initial = br#"<d:sync-collection xmlns:d="DAV:"><d:sync-token/><d:sync-level>1</d:sync-level><d:prop/></d:sync-collection>"#;
+        assert!(
+            matches!(Report::parse(initial), Ok(Report::SyncCollection { token, .. }) if token.is_empty())
+        );
+        let infinite = br#"<d:sync-collection xmlns:d="DAV:"><d:sync-token/><d:sync-level>infinite</d:sync-level></d:sync-collection>"#;
+        assert!(matches!(
+            Report::parse(infinite),
+            Err(DavError::Unsupported(_))
+        ));
+        let no_level = br#"<d:sync-collection xmlns:d="DAV:"><d:sync-token/></d:sync-collection>"#;
+        assert!(Report::parse(no_level).is_err());
+    }
+
+    #[test]
+    fn parses_addressbook_reports() {
+        let body = br#"<card:addressbook-multiget xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+            <d:prop><d:getetag/><card:address-data/></d:prop><d:href>/dav/addressbooks/alice/default/a.vcf</d:href></card:addressbook-multiget>"#;
+        assert!(
+            matches!(Report::parse(body), Ok(Report::AddressbookMultiget { hrefs, .. }) if hrefs.len() == 1)
+        );
+        let query = br#"<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav"><d:prop><d:getetag/></d:prop><card:filter/></card:addressbook-query>"#;
+        assert!(matches!(
+            Report::parse(query),
+            Ok(Report::AddressbookQuery { .. })
+        ));
+    }
+
+    #[test]
     fn parses_time_range_query() {
         let body = br#"<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
             <d:prop><d:getetag/></d:prop>
@@ -200,9 +316,14 @@ mod tests {
             Report::parse(prop_filter),
             Err(DavError::Unsupported(_))
         ));
-        let other = br#"<d:sync-collection xmlns:d="DAV:"/>"#;
+        let other = br#"<d:expand-property xmlns:d="DAV:"/>"#;
         assert!(matches!(
             Report::parse(other),
+            Err(DavError::Unsupported(_))
+        ));
+        let filtered = br#"<card:addressbook-query xmlns:card="urn:ietf:params:xml:ns:carddav"><card:filter><card:prop-filter name="FN"/></card:filter></card:addressbook-query>"#;
+        assert!(matches!(
+            Report::parse(filtered),
             Err(DavError::Unsupported(_))
         ));
     }

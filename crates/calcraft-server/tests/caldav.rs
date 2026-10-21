@@ -425,7 +425,7 @@ async fn unsupported_reports_and_filters() {
     assert_eq!(reply.status, StatusCode::FORBIDDEN);
     assert!(reply.body.contains("supported-filter"));
 
-    let sync = r#"<d:sync-collection xmlns:d="DAV:"><d:sync-token/><d:prop><d:getetag/></d:prop></d:sync-collection>"#;
+    let sync = r#"<d:expand-property xmlns:d="DAV:"/>"#;
     let reply = send(&app, ALICE, "REPORT", CAL, &[], sync).await;
     assert_eq!(reply.status, StatusCode::FORBIDDEN);
     assert!(reply.body.contains("supported-report"));

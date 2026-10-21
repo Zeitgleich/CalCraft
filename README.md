@@ -2,7 +2,7 @@
 
 Self-hosted CalDAV/CardDAV server written in Rust, with an optional web interface.
 
-> **Status:** early development (milestone M2: CalDAV). Not ready for production use.
+> **Status:** early development (milestone M3: CalDAV, CardDAV, sync). Not ready for production use.
 
 ## Goals
 

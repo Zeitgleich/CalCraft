@@ -1,4 +1,5 @@
-//! PROPPATCH (RFC 4918 §9.2) and MKCALENDAR (RFC 4791 §5.3.1) bodies.
+//! PROPPATCH (RFC 4918 §9.2), MKCALENDAR (RFC 4791 §5.3.1) and extended
+//! MKCOL (RFC 5689) bodies.
 
 use crate::{
     DavError, PropName,
@@ -41,6 +42,22 @@ impl PropertyUpdate {
         let update = Self::from_instructions(&root)?;
         if update.operations.iter().any(|(_, value)| value.is_none()) {
             return Err(DavError::BadRequest("mkcalendar cannot remove properties"));
+        }
+        Ok(update)
+    }
+
+    /// Parses an optional extended `DAV:mkcol` body.
+    pub fn parse_mkcol(body: &[u8]) -> Result<Self, DavError> {
+        if body.trim_ascii().is_empty() {
+            return Ok(Self::default());
+        }
+        let root = tree::parse(body, MAX_PROPPATCH_BODY)?;
+        if !root.is(NS_DAV, "mkcol") {
+            return Err(DavError::BadRequest("root element must be DAV:mkcol"));
+        }
+        let update = Self::from_instructions(&root)?;
+        if update.operations.iter().any(|(_, value)| value.is_none()) {
+            return Err(DavError::BadRequest("mkcol cannot remove properties"));
         }
         Ok(update)
     }

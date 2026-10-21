@@ -9,7 +9,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use calcraft_core::CollectionKind;
+use calcraft_core::{CollectionKind, Slug};
 use calcraft_dav::{
     MAX_PROPPATCH_BODY, Multistatus, PropName, PropertyUpdate, Response as DavResponse,
     tree::Node,
@@ -18,7 +18,7 @@ use calcraft_dav::{
 use calcraft_ical::ComponentKind;
 
 use super::{
-    Ctx, bad_request, method_not_allowed, multistatus,
+    Ctx, bad_request, dav_error, method_not_allowed, multistatus,
     paths::{Resource, href_of},
     props::WRITABLE,
     read_body, store_error,
@@ -143,6 +143,7 @@ pub async fn proppatch(ctx: Ctx<'_>, resource: Resource, request: Request) -> Re
     }
     multistatus(&Multistatus {
         responses: vec![response],
+        sync_token: None,
     })
 }
 
@@ -164,16 +165,66 @@ pub async fn mkcalendar(ctx: Ctx<'_>, resource: Resource, request: Request) -> R
         Ok(body) => body,
         Err(err) => return err.into_response(),
     };
-    let update = match PropertyUpdate::parse_mkcalendar(&body) {
+    match PropertyUpdate::parse_mkcalendar(&body) {
+        Ok(update) => create(ctx, CollectionKind::Calendar, &slug, &update).await,
+        Err(err) => bad_request(&err),
+    }
+}
+
+/// Extended MKCOL (RFC 5689): creates an address book below the address
+/// book home or a calendar below the calendar home.
+pub async fn mkcol(ctx: Ctx<'_>, resource: Resource, request: Request) -> Response {
+    let Resource::Unmapped(kind, slug) = resource else {
+        return method_not_allowed();
+    };
+    let body = match read_body(request, MAX_PROPPATCH_BODY).await {
+        Ok(body) => body,
+        Err(err) => return err.into_response(),
+    };
+    let update = match PropertyUpdate::parse_mkcol(&body) {
         Ok(update) => update,
         Err(err) => return bad_request(&err),
     };
+    // A resourcetype, if given, must match the home the collection is created in.
+    if let Some((_, Some(resourcetype))) = update
+        .operations
+        .iter()
+        .find(|(name, _)| name.is(NS_DAV, "resourcetype"))
+    {
+        let (ns, name) = match kind {
+            CollectionKind::Calendar => (NS_CALDAV, "calendar"),
+            CollectionKind::Addressbook => (NS_CARDDAV, "addressbook"),
+        };
+        let valid = resourcetype.child(NS_DAV, "collection").is_some()
+            && resourcetype.child(ns, name).is_some()
+            && resourcetype.children.len() == 2;
+        if !valid {
+            return dav_error(StatusCode::FORBIDDEN, "<d:valid-resourcetype/>");
+        }
+    }
+    create(ctx, kind, &slug, &update).await
+}
 
+/// Creates a collection from MKCALENDAR / MKCOL properties.
+async fn create(
+    ctx: Ctx<'_>,
+    kind: CollectionKind,
+    slug: &Slug,
+    update: &PropertyUpdate,
+) -> Response {
     let mut changes = Changes::default();
-    let mut components = "VEVENT,VTODO".to_owned();
+    let mut components = match kind {
+        CollectionKind::Calendar => "VEVENT,VTODO".to_owned(),
+        CollectionKind::Addressbook => "VCARD".to_owned(),
+    };
     for (name, value) in &update.operations {
         let Some(value) = value else { continue };
-        if name.is(NS_CALDAV, "supported-calendar-component-set") {
+        if name.is(NS_DAV, "resourcetype") {
+            continue;
+        }
+        if kind == CollectionKind::Calendar
+            && name.is(NS_CALDAV, "supported-calendar-component-set")
+        {
             match requested_components(value) {
                 Some(requested) => components = requested,
                 None => {
@@ -181,7 +232,7 @@ pub async fn mkcalendar(ctx: Ctx<'_>, resource: Resource, request: Request) -> R
                         .into_response();
                 }
             }
-        } else if apply(&mut changes, name, Some(value), CollectionKind::Calendar) == 409 {
+        } else if apply(&mut changes, name, Some(value), kind) == 409 {
             return (StatusCode::FORBIDDEN, "invalid property value").into_response();
         }
         // Other properties (e.g. calendar-timezone, calendar-order) are not stored.
@@ -193,8 +244,8 @@ pub async fn mkcalendar(ctx: Ctx<'_>, resource: Resource, request: Request) -> R
         .store
         .create_collection(
             ctx.user.id,
-            CollectionKind::Calendar,
-            &slug,
+            kind,
+            slug,
             flatten(changes.display_name).as_deref(),
             flatten(changes.description).as_deref(),
             flatten(changes.color).as_deref(),

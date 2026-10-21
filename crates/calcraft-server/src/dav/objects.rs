@@ -10,13 +10,13 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use calcraft_core::CollectionKind;
-use calcraft_ical::{CalendarObject, IcalError, MAX_OBJECT_SIZE};
-use calcraft_store::{NewItem, Precondition, PutOutcome, StoreError};
+use calcraft_ical::{CalendarObject, IcalError, MAX_OBJECT_SIZE, VCard};
+use calcraft_store::{Collection, NewItem, Precondition, PutOutcome, StoreError};
 
 use super::{
     Ctx, dav_error, method_not_allowed, not_found,
     paths::{Resource, item_href},
-    props::{CALENDAR_CONTENT_TYPE, components},
+    props::{components, content_type},
     read_body, store_error,
 };
 
@@ -86,10 +86,7 @@ pub async fn get(ctx: Ctx<'_>, resource: Resource, with_body: bool) -> Response 
     };
     match ctx.state.store.item(collection.id, &name).await {
         Ok(Some(item)) => {
-            let content_type = match collection.kind {
-                CollectionKind::Calendar => CALENDAR_CONTENT_TYPE,
-                CollectionKind::Addressbook => "text/vcard; charset=utf-8",
-            };
+            let content_type = content_type(collection.kind);
             let body = if with_body {
                 Body::from(item.content)
             } else {
@@ -107,54 +104,97 @@ pub async fn get(ctx: Ctx<'_>, resource: Resource, with_body: bool) -> Response 
     }
 }
 
+/// What a PUT body was validated as, with the data needed for storage.
+struct Validated {
+    uid: String,
+    component: &'static str,
+    range_start: Option<i64>,
+    range_end: Option<i64>,
+}
+
+/// XML prefix of the precondition namespace for a collection kind.
+fn ns(kind: CollectionKind) -> &'static str {
+    match kind {
+        CollectionKind::Calendar => "c",
+        CollectionKind::Addressbook => "card",
+    }
+}
+
+/// Validates the body for the target collection. On failure returns the
+/// precondition element to report (RFC 4791 §5.3.2.1, RFC 6352 §6.3.2.1).
+fn validate(collection: &Collection, body: &[u8]) -> Result<Validated, &'static str> {
+    match collection.kind {
+        CollectionKind::Calendar => {
+            let object = CalendarObject::parse(body).map_err(|err| match err {
+                IcalError::TooLarge => "<c:max-resource-size/>",
+                err => {
+                    tracing::debug!(%err, "rejected calendar object");
+                    "<c:valid-calendar-data/>"
+                }
+            })?;
+            if !components(collection).contains(&object.kind.as_str()) {
+                return Err("<c:supported-calendar-component/>");
+            }
+            Ok(Validated {
+                uid: object.uid,
+                component: object.kind.as_str(),
+                range_start: object.range.start,
+                range_end: object.range.end,
+            })
+        }
+        CollectionKind::Addressbook => {
+            let card = VCard::parse(body).map_err(|err| match err {
+                IcalError::TooLarge => "<card:max-resource-size/>",
+                err => {
+                    tracing::debug!(%err, "rejected vCard");
+                    "<card:valid-address-data/>"
+                }
+            })?;
+            Ok(Validated {
+                uid: card.uid,
+                component: "VCARD",
+                range_start: None,
+                range_end: None,
+            })
+        }
+    }
+}
+
 pub async fn put(ctx: Ctx<'_>, resource: Resource, request: Request) -> Response {
     let Resource::Item(collection, name) = resource else {
         return method_not_allowed();
     };
-    if collection.kind != CollectionKind::Calendar {
-        return (
-            StatusCode::NOT_IMPLEMENTED,
-            "address book objects are not supported yet",
-        )
-            .into_response();
-    }
+    let kind = collection.kind;
     let headers = request.headers().clone();
+    let (expected_type, unsupported) = match kind {
+        CollectionKind::Calendar => ("text/calendar", "<c:supported-calendar-data/>"),
+        CollectionKind::Addressbook => ("text/vcard", "<card:supported-address-data/>"),
+    };
     if let Some(content_type) = header(&headers, CONTENT_TYPE)
-        && !content_type
-            .to_ascii_lowercase()
-            .starts_with("text/calendar")
+        && !content_type.to_ascii_lowercase().starts_with(expected_type)
     {
-        return dav_error(StatusCode::FORBIDDEN, "<c:supported-calendar-data/>");
+        return dav_error(StatusCode::FORBIDDEN, unsupported);
     }
     let precondition = match precondition(&headers) {
         Ok(precondition) => precondition,
         Err(err) => return err.into_response(),
     };
+    let too_large = format!("<{}:max-resource-size/>", ns(kind));
     let body = match read_body(request, MAX_OBJECT_SIZE).await {
         Ok(body) => body,
-        Err(_) => return dav_error(StatusCode::FORBIDDEN, "<c:max-resource-size/>"),
+        Err(_) => return dav_error(StatusCode::FORBIDDEN, &too_large),
     };
-
-    let object = match CalendarObject::parse(&body) {
-        Ok(object) => object,
-        Err(IcalError::TooLarge) => {
-            return dav_error(StatusCode::FORBIDDEN, "<c:max-resource-size/>");
-        }
-        Err(err) => {
-            tracing::debug!(%err, "rejected calendar object");
-            return dav_error(StatusCode::FORBIDDEN, "<c:valid-calendar-data/>");
-        }
+    let validated = match validate(&collection, &body) {
+        Ok(validated) => validated,
+        Err(condition) => return dav_error(StatusCode::FORBIDDEN, condition),
     };
-    if !components(&collection).contains(&object.kind.as_str()) {
-        return dav_error(StatusCode::FORBIDDEN, "<c:supported-calendar-component/>");
-    }
 
     let etag = etag(&body);
     let item = NewItem {
-        uid: &object.uid,
-        component: object.kind.as_str(),
-        range_start: object.range.start,
-        range_end: object.range.end,
+        uid: &validated.uid,
+        component: validated.component,
+        range_start: validated.range_start,
+        range_end: validated.range_end,
         etag: &etag,
         content: &body,
     };
@@ -173,9 +213,12 @@ pub async fn put(ctx: Ctx<'_>, resource: Resource, request: Request) -> Response
         }
         Err(StoreError::UidConflict(other)) => {
             let href = item_href(&collection, &ctx.user.username, &other);
+            let prefix = ns(kind);
             dav_error(
                 StatusCode::FORBIDDEN,
-                &format!("<c:no-uid-conflict><d:href>{href}</d:href></c:no-uid-conflict>"),
+                &format!(
+                    "<{prefix}:no-uid-conflict><d:href>{href}</d:href></{prefix}:no-uid-conflict>"
+                ),
             )
         }
         Err(err) => store_error(err),

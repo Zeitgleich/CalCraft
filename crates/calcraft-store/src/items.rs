@@ -364,6 +364,7 @@ impl Store {
         .bind(revision)
         .execute(&mut *tx)
         .await?;
+        record_change(&mut tx, collection_id, revision, name, false).await?;
         tx.commit().await?;
         Ok(if existing.is_some() {
             PutOutcome::Updated
@@ -397,13 +398,60 @@ impl Store {
             .bind(name)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE collections SET sync_revision = sync_revision + 1 WHERE id = ?")
-            .bind(collection_id)
-            .execute(&mut *tx)
-            .await?;
+        let revision: i64 = sqlx::query(
+            "UPDATE collections SET sync_revision = sync_revision + 1 WHERE id = ? RETURNING sync_revision",
+        )
+        .bind(collection_id)
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get("sync_revision")?;
+        record_change(&mut tx, collection_id, revision, name, true).await?;
         tx.commit().await?;
         Ok(true)
     }
+
+    /// Objects changed or deleted after revision `since`, up to and including
+    /// `until`, with only the latest change per object. Returns
+    /// `(name, deleted)` pairs.
+    pub async fn changes_between(
+        &self,
+        collection_id: i64,
+        since: i64,
+        until: i64,
+    ) -> Result<Vec<(String, bool)>> {
+        let rows = sqlx::query(
+            "SELECT c.name, c.deleted FROM changes c \
+             WHERE c.collection_id = ?1 AND c.revision > ?2 AND c.revision <= ?3 \
+               AND c.revision = (SELECT MAX(revision) FROM changes \
+                                 WHERE collection_id = ?1 AND name = c.name AND revision <= ?3) \
+             ORDER BY c.name",
+        )
+        .bind(collection_id)
+        .bind(since)
+        .bind(until)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| Ok((row.try_get("name")?, row.try_get("deleted")?)))
+            .collect()
+    }
+}
+
+async fn record_change(
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    collection_id: i64,
+    revision: i64,
+    name: &str,
+    deleted: bool,
+) -> Result<()> {
+    sqlx::query("INSERT INTO changes (collection_id, revision, name, deleted) VALUES (?, ?, ?, ?)")
+        .bind(collection_id)
+        .bind(revision)
+        .bind(name)
+        .bind(deleted)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -571,6 +619,85 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn change_log_for_sync() {
+        let (store, cal, other) = setup().await;
+        let rev = |store: Store, id: i64, owner: i64, slug: Slug| async move {
+            store
+                .collections(owner, CollectionKind::Calendar)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|c| c.id == id && c.slug == slug)
+                .unwrap()
+                .sync_revision
+        };
+        let start = rev(store.clone(), cal.id, cal.owner_id, cal.slug.clone()).await;
+        store
+            .put_item(
+                cal.id,
+                "a.ics",
+                &item("a", "\"1\"", None, None),
+                &Precondition::None,
+            )
+            .await
+            .unwrap();
+        store
+            .put_item(
+                cal.id,
+                "b.ics",
+                &item("b", "\"1\"", None, None),
+                &Precondition::None,
+            )
+            .await
+            .unwrap();
+        let mid = rev(store.clone(), cal.id, cal.owner_id, cal.slug.clone()).await;
+        store
+            .put_item(
+                cal.id,
+                "a.ics",
+                &item("a", "\"2\"", None, None),
+                &Precondition::None,
+            )
+            .await
+            .unwrap();
+        store
+            .delete_item(cal.id, "b.ics", &Precondition::None)
+            .await
+            .unwrap();
+        store
+            .put_item(
+                other.id,
+                "x.ics",
+                &item("x", "\"1\"", None, None),
+                &Precondition::None,
+            )
+            .await
+            .unwrap();
+        let end = rev(store.clone(), cal.id, cal.owner_id, cal.slug.clone()).await;
+
+        assert_eq!(
+            store.changes_between(cal.id, start, end).await.unwrap(),
+            [("a.ics".to_owned(), false), ("b.ics".to_owned(), true)]
+        );
+        assert_eq!(
+            store.changes_between(cal.id, mid, end).await.unwrap(),
+            [("a.ics".to_owned(), false), ("b.ics".to_owned(), true)]
+        );
+        assert!(
+            store
+                .changes_between(cal.id, end, end)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // Up to `mid`, b.ics still existed.
+        assert_eq!(
+            store.changes_between(cal.id, start, mid).await.unwrap(),
+            [("a.ics".to_owned(), false), ("b.ics".to_owned(), false)]
+        );
     }
 
     #[tokio::test]
