@@ -16,6 +16,8 @@ database = "calcraft.db"
 [security]
 # Send Strict-Transport-Security. Enable only when CalCraft is served over HTTPS.
 hsts = false
+# Mark session cookies Secure (HTTPS only). Browsers accept them on http://localhost too.
+secure_cookies = true
 
 [web_ui]
 enabled = true

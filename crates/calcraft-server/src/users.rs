@@ -16,6 +16,9 @@ pub enum UserCommand {
         /// Name shown in clients.
         #[arg(long)]
         display_name: Option<String>,
+        /// Grant administrator rights (user management in the web UI).
+        #[arg(long)]
+        admin: bool,
         #[command(flatten)]
         password: PasswordInput,
     },
@@ -31,6 +34,13 @@ pub enum UserCommand {
     Disable { username: String },
     /// Allow a disabled user to log in again.
     Enable { username: String },
+    /// Grant or revoke administrator rights.
+    SetAdmin {
+        username: String,
+        /// Revoke instead of grant.
+        #[arg(long)]
+        revoke: bool,
+    },
 }
 
 /// Passwords are never accepted as command-line arguments, because those
@@ -70,6 +80,7 @@ pub async fn run(store: &Store, command: UserCommand) -> anyhow::Result<()> {
         UserCommand::Add {
             username,
             display_name,
+            admin,
             password,
         } => {
             let username = parse_username(&username)?;
@@ -77,7 +88,13 @@ pub async fn run(store: &Store, command: UserCommand) -> anyhow::Result<()> {
             store
                 .create_user(&username, &hash, display_name.as_deref())
                 .await?;
-            println!("created user {username}");
+            if admin {
+                store.set_admin(&username, true).await?;
+            }
+            println!(
+                "created user {username}{}",
+                if admin { " (admin)" } else { "" }
+            );
         }
         UserCommand::Passwd { username, password } => {
             let username = parse_username(&username)?;
@@ -89,7 +106,13 @@ pub async fn run(store: &Store, command: UserCommand) -> anyhow::Result<()> {
         }
         UserCommand::List => {
             for user in store.list_users().await? {
-                let state = if user.disabled { " (disabled)" } else { "" };
+                let mut state = String::new();
+                if user.is_admin {
+                    state.push_str(" (admin)");
+                }
+                if user.disabled {
+                    state.push_str(" (disabled)");
+                }
                 match &user.display_name {
                     Some(name) => println!("{}\t{name}{state}", user.username),
                     None => println!("{}{state}", user.username),
@@ -98,6 +121,14 @@ pub async fn run(store: &Store, command: UserCommand) -> anyhow::Result<()> {
         }
         UserCommand::Disable { username } => set_disabled(store, &username, true).await?,
         UserCommand::Enable { username } => set_disabled(store, &username, false).await?,
+        UserCommand::SetAdmin { username, revoke } => {
+            let username = parse_username(&username)?;
+            if !store.set_admin(&username, !revoke).await? {
+                bail!("user {username} does not exist");
+            }
+            let state = if revoke { "revoked" } else { "granted" };
+            println!("admin rights of {username} {state}");
+        }
     }
     Ok(())
 }

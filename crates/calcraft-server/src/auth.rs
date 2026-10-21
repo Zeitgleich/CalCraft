@@ -24,7 +24,19 @@ use argon2::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use calcraft_core::Username;
 use calcraft_store::{Store, User};
+
+use crate::secrets::{hash_secret, hashes_equal};
 use tokio::sync::Semaphore;
+
+/// Prefix of app passwords: `ccap_<id>_<secret>`.
+pub const APP_PASSWORD_PREFIX: &str = "ccap_";
+
+/// Current time in Unix seconds.
+pub fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
 
 /// Minimum length of new passwords.
 pub const MIN_PASSWORD_LEN: usize = 12;
@@ -150,16 +162,108 @@ impl Authenticator {
         }))
     }
 
-    /// Authenticates the value of an `Authorization` header.
+    /// Authenticates the `Authorization` header of a DAV request.
+    ///
+    /// DAV clients may use the account password only while two-factor
+    /// authentication is off; with 2FA they must use an app password.
     pub async fn authenticate(&self, header: Option<&[u8]>) -> AuthOutcome {
         let Some(credentials) = header.and_then(parse_basic) else {
             return AuthOutcome::Denied;
         };
-        let username = credentials.username;
+        if credentials.password.starts_with(APP_PASSWORD_PREFIX) {
+            return self
+                .check_app_password(&credentials.username, &credentials.password)
+                .await;
+        }
+        match self
+            .check_first_factor(&credentials.username, &credentials.password)
+            .await
+        {
+            AuthOutcome::Authenticated(user) if user.totp_enabled => AuthOutcome::Denied,
+            AuthOutcome::Authenticated(user) => {
+                self.clear_failures(&credentials.username);
+                AuthOutcome::Authenticated(user)
+            }
+            outcome => outcome,
+        }
+    }
 
+    /// Verifies the account password and resets the failure counter on
+    /// success. Only for accounts without 2FA or after the second factor.
+    pub async fn check_password(&self, username: &Username, password: &str) -> AuthOutcome {
+        let outcome = self.check_first_factor(username, password).await;
+        if matches!(outcome, AuthOutcome::Authenticated(_)) {
+            self.clear_failures(username);
+        }
+        outcome
+    }
+
+    /// Verifies an app password of the form `ccap_<id>_<secret>`.
+    async fn check_app_password(&self, username: &Username, password: &str) -> AuthOutcome {
+        if self.is_locked_out(username) {
+            return AuthOutcome::LockedOut;
+        }
+        let parsed = password
+            .strip_prefix(APP_PASSWORD_PREFIX)
+            .and_then(|rest| rest.split_once('_'))
+            .and_then(|(id, secret)| Some((id.parse::<i64>().ok()?, secret)));
+        let stored = match parsed {
+            Some((id, _)) => match self.store.app_password_secret(id).await {
+                Ok(stored) => stored,
+                Err(err) => {
+                    tracing::error!(%err, "failed to load app password");
+                    return AuthOutcome::Error;
+                }
+            },
+            None => None,
+        };
+        let user = match &stored {
+            Some((user_id, _)) => match self.store.user_by_id(*user_id).await {
+                Ok(user) => user,
+                Err(err) => {
+                    tracing::error!(%err, "failed to load user");
+                    return AuthOutcome::Error;
+                }
+            },
+            None => None,
+        };
+        let valid = match (&parsed, &stored, &user) {
+            (Some((_, secret)), Some((_, hash)), Some(user)) => {
+                // The app password must belong to the user name it is sent with.
+                hashes_equal(&hash_secret(secret), hash) && &user.username == username
+            }
+            _ => false,
+        };
+        match (valid, user, parsed) {
+            (true, Some(user), Some((id, _))) if !user.disabled => {
+                self.clear_failures(username);
+                if let Err(err) = self.store.touch_app_password(id, now()).await {
+                    tracing::warn!(%err, "failed to record app password use");
+                }
+                AuthOutcome::Authenticated(user)
+            }
+            _ => {
+                // Count only for existing accounts (see `check_password`).
+                if matches!(self.store.user_credentials(username).await, Ok(Some(_))) {
+                    self.record_failure(username.clone());
+                }
+                AuthOutcome::Denied
+            }
+        }
+    }
+
+    /// Verifies the account password, with lockout and cache, without
+    /// resetting the failure counter: with 2FA the counter must also cover
+    /// wrong second factors, so callers reset it only after full success.
+    pub async fn check_first_factor(&self, username: &Username, password: &str) -> AuthOutcome {
+        let username = username.clone();
         if self.is_locked_out(&username) {
             return AuthOutcome::LockedOut;
         }
+        let credentials = BasicCredentials {
+            username: username.clone(),
+            password: password.to_owned(),
+        };
 
         let record = match self.store.user_credentials(&username).await {
             Ok(record) => record,
@@ -205,7 +309,6 @@ impl Authenticator {
 
         match record {
             Some(record) if valid && !record.user.disabled => {
-                self.clear_failures(&username);
                 if let Some(digest) = digest {
                     self.remember(username, digest);
                 }
@@ -260,7 +363,7 @@ impl Authenticator {
             .is_some_and(|f| f.count >= MAX_FAILURES && f.since.elapsed() < LOCKOUT_WINDOW)
     }
 
-    fn record_failure(&self, username: Username) {
+    pub fn record_failure(&self, username: Username) {
         let Ok(mut failures) = self.failures.lock() else {
             return;
         };
@@ -283,7 +386,7 @@ impl Authenticator {
         }
     }
 
-    fn clear_failures(&self, username: &Username) {
+    pub fn clear_failures(&self, username: &Username) {
         if let Ok(mut failures) = self.failures.lock() {
             failures.remove(username);
         }

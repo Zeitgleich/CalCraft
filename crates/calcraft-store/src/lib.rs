@@ -12,8 +12,10 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow},
 };
 
+mod accounts;
 mod items;
 
+pub use accounts::{AppPassword, MAX_APP_PASSWORDS, RECOVERY_CODES, Session, TotpState};
 pub use items::{Change, Item, ItemMeta, NewItem, Precondition, PutOutcome};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
@@ -54,6 +56,10 @@ pub struct User {
     pub username: Username,
     pub display_name: Option<String>,
     pub disabled: bool,
+    pub is_admin: bool,
+    /// Two-factor authentication is active; the account password is then
+    /// only accepted together with a TOTP code, never by DAV clients.
+    pub totp_enabled: bool,
 }
 
 /// A user together with the password hash, for authentication only.
@@ -188,13 +194,15 @@ impl Store {
             username: username.clone(),
             display_name: display_name.map(str::to_owned),
             disabled: false,
+            is_admin: false,
+            totp_enabled: false,
         })
     }
 
     /// Looks up a user including the password hash.
     pub async fn user_credentials(&self, username: &Username) -> Result<Option<UserCredentials>> {
         let row = sqlx::query(
-            "SELECT id, username, display_name, disabled, password_hash FROM users WHERE username = ?",
+            "SELECT id, username, display_name, disabled, is_admin, totp_enabled, password_hash FROM users WHERE username = ?",
         )
         .bind(username.as_str())
         .fetch_optional(&self.pool)
@@ -210,7 +218,7 @@ impl Store {
 
     pub async fn list_users(&self) -> Result<Vec<User>> {
         let rows =
-            sqlx::query("SELECT id, username, display_name, disabled FROM users ORDER BY username")
+            sqlx::query("SELECT id, username, display_name, disabled, is_admin, totp_enabled FROM users ORDER BY username")
                 .fetch_all(&self.pool)
                 .await?;
         rows.iter().map(user_from_row).collect()
@@ -277,7 +285,7 @@ impl Store {
     }
 }
 
-fn user_from_row(row: &SqliteRow) -> Result<User> {
+pub(crate) fn user_from_row(row: &SqliteRow) -> Result<User> {
     let username: String = row.try_get("username")?;
     Ok(User {
         id: row.try_get("id")?,
@@ -286,6 +294,8 @@ fn user_from_row(row: &SqliteRow) -> Result<User> {
             .map_err(|err| StoreError::Corrupt(format!("{err}")))?,
         display_name: row.try_get("display_name")?,
         disabled: row.try_get("disabled")?,
+        is_admin: row.try_get("is_admin")?,
+        totp_enabled: row.try_get("totp_enabled")?,
     })
 }
 

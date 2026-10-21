@@ -55,7 +55,17 @@ Point your client at `https://your-host/` – discovery via `/.well-known/caldav
 `/.well-known/carddav` leads to `/dav/`. Always run CalCraft behind TLS: DAV clients
 use HTTP Basic authentication.
 
-Other user commands: `calcraft user list|passwd|disable|enable`.
+Other user commands: `calcraft user list|passwd|disable|enable|set-admin`
+(`calcraft user add alice --admin` creates an administrator).
+
+### App passwords and two-factor authentication
+
+Each device should get its own app password (`ccap_…`), created via the REST API
+(`POST /api/v1/app-passwords`, soon in the web UI) and revocable individually.
+Once two-factor authentication (TOTP) is enabled for an account, DAV clients must
+use app passwords; the account password then only works together with a code.
+
+The REST API is described in `/api/openapi.json`.
 
 See [`calcraft.example.toml`](calcraft.example.toml). Every setting can be overridden via
 environment variables with the prefix `CALCRAFT_` and `__` as separator,

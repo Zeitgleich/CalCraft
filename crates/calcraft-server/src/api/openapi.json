@@ -1,0 +1,1148 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "CalCraft API",
+    "version": "1",
+    "description": "REST API of CalCraft. Authenticate with POST /v1/auth/login; the session is a cookie. Every state-changing request needs the x-calcraft-request header (CSRF protection).",
+    "license": {
+      "name": "AGPL-3.0-or-later",
+      "identifier": "AGPL-3.0-or-later"
+    }
+  },
+  "servers": [
+    {
+      "url": "/api"
+    }
+  ],
+  "security": [
+    {
+      "session": []
+    }
+  ],
+  "paths": {
+    "/v1/version": {
+      "get": {
+        "summary": "Server name, version and source code location",
+        "tags": [
+          "meta"
+        ],
+        "responses": {
+          "200": {
+            "description": "Version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionInfo"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/v1/auth/login": {
+      "post": {
+        "summary": "Log in; sets the session cookie",
+        "tags": [
+          "auth"
+        ],
+        "responses": {
+          "200": {
+            "description": "Logged in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Me"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          }
+        },
+        "security": [],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          }
+        ]
+      }
+    },
+    "/v1/auth/logout": {
+      "post": {
+        "summary": "End the current session",
+        "tags": [
+          "auth"
+        ],
+        "responses": {
+          "204": {
+            "description": "Logged out"
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          }
+        ]
+      }
+    },
+    "/v1/me": {
+      "get": {
+        "summary": "The logged-in user",
+        "tags": [
+          "account"
+        ],
+        "responses": {
+          "200": {
+            "description": "User",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Me"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me/password": {
+      "post": {
+        "summary": "Change the password; ends all sessions",
+        "tags": [
+          "account"
+        ],
+        "responses": {
+          "204": {
+            "description": "Changed"
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangePassword"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          }
+        ]
+      }
+    },
+    "/v1/me/totp/setup": {
+      "post": {
+        "summary": "Create a new TOTP secret (not yet active)",
+        "tags": [
+          "account"
+        ],
+        "responses": {
+          "200": {
+            "description": "Secret",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TotpSetup"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          }
+        ]
+      }
+    },
+    "/v1/me/totp/enable": {
+      "post": {
+        "summary": "Activate 2FA with a first code; returns recovery codes once",
+        "tags": [
+          "account"
+        ],
+        "responses": {
+          "200": {
+            "description": "Recovery codes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryCodes"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TotpEnable"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          }
+        ]
+      }
+    },
+    "/v1/me/totp/disable": {
+      "post": {
+        "summary": "Deactivate 2FA (password and code required)",
+        "tags": [
+          "account"
+        ],
+        "responses": {
+          "204": {
+            "description": "Disabled"
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TotpDisable"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          }
+        ]
+      }
+    },
+    "/v1/app-passwords": {
+      "get": {
+        "summary": "List app passwords",
+        "tags": [
+          "app-passwords"
+        ],
+        "responses": {
+          "200": {
+            "description": "App passwords",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AppPasswordInfo"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create an app password; the password is shown once",
+        "tags": [
+          "app-passwords"
+        ],
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedAppPassword"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAppPassword"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          }
+        ]
+      }
+    },
+    "/v1/app-passwords/{id}": {
+      "delete": {
+        "summary": "Revoke an app password",
+        "tags": [
+          "app-passwords"
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/collections": {
+      "get": {
+        "summary": "List calendars and address books",
+        "tags": [
+          "collections"
+        ],
+        "responses": {
+          "200": {
+            "description": "Collections",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CollectionInfo"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create a calendar or address book",
+        "tags": [
+          "collections"
+        ],
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionInfo"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCollection"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          }
+        ]
+      }
+    },
+    "/v1/collections/{kind}/{slug}": {
+      "patch": {
+        "summary": "Change name, description or color",
+        "tags": [
+          "collections"
+        ],
+        "responses": {
+          "204": {
+            "description": "Updated"
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateCollection"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "calendar",
+                "addressbook"
+              ]
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "delete": {
+        "summary": "Delete a collection and all its objects",
+        "tags": [
+          "collections"
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "calendar",
+                "addressbook"
+              ]
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/admin/users": {
+      "get": {
+        "summary": "List users (admins only)",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "Users",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AdminUser"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create a user (admins only)",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminUser"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUser"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          }
+        ]
+      }
+    },
+    "/v1/admin/users/{username}": {
+      "patch": {
+        "summary": "Enable/disable a user or change admin rights (admins only)",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "204": {
+            "description": "Updated"
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateUser"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "session": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "calcraft_session"
+      }
+    },
+    "parameters": {
+      "Csrf": {
+        "name": "x-calcraft-request",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Any value; required on state-changing requests."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "message"
+        ]
+      },
+      "VersionInfo": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version",
+          "source"
+        ]
+      },
+      "LoginRequest": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          },
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "additionalProperties": false
+      },
+      "Me": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_admin": {
+            "type": "boolean"
+          },
+          "totp_enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "username",
+          "is_admin",
+          "totp_enabled"
+        ]
+      },
+      "ChangePassword": {
+        "type": "object",
+        "properties": {
+          "current": {
+            "type": "string"
+          },
+          "new": {
+            "type": "string",
+            "minLength": 12
+          }
+        },
+        "required": [
+          "current",
+          "new"
+        ],
+        "additionalProperties": false
+      },
+      "TotpSetup": {
+        "type": "object",
+        "properties": {
+          "secret": {
+            "type": "string"
+          },
+          "uri": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "secret",
+          "uri"
+        ]
+      },
+      "TotpEnable": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "additionalProperties": false
+      },
+      "RecoveryCodes": {
+        "type": "object",
+        "properties": {
+          "codes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "codes"
+        ]
+      },
+      "TotpDisable": {
+        "type": "object",
+        "properties": {
+          "password": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "password",
+          "code"
+        ],
+        "additionalProperties": false
+      },
+      "AppPasswordInfo": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "last_used_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "created_at"
+        ]
+      },
+      "CreateAppPassword": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 64
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "CreatedAppPassword": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "password"
+        ]
+      },
+      "CollectionInfo": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "calendar",
+              "addressbook"
+            ]
+          },
+          "slug": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "components": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "href": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "slug",
+          "components",
+          "href"
+        ]
+      },
+      "CreateCollection": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "calendar",
+              "addressbook"
+            ]
+          },
+          "slug": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$"
+          }
+        },
+        "required": [
+          "kind",
+          "slug"
+        ],
+        "additionalProperties": false
+      },
+      "UpdateCollection": {
+        "type": "object",
+        "properties": {
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminUser": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_admin": {
+            "type": "boolean"
+          },
+          "disabled": {
+            "type": "boolean"
+          },
+          "totp_enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "username",
+          "is_admin",
+          "disabled",
+          "totp_enabled"
+        ]
+      },
+      "CreateUser": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string",
+            "minLength": 12
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_admin": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "additionalProperties": false
+      },
+      "UpdateUser": {
+        "type": "object",
+        "properties": {
+          "disabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "is_admin": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}
