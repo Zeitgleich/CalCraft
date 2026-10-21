@@ -57,3 +57,50 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check advisories bans licenses sources
+
+  compat:
+    name: client compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Build server
+        run: cargo build -p calcraft-server
+      - name: Start server with a test user
+        env:
+          CALCRAFT_STORAGE__DATABASE: ${{ runner.temp }}/compat.db
+        run: |
+          echo "compat test password" | target/debug/calcraft user add alice --password-stdin
+          target/debug/calcraft serve --bind 127.0.0.1:5232 > "$RUNNER_TEMP/server.log" 2>&1 &
+          for _ in $(seq 1 30); do curl -sf http://127.0.0.1:5232/readyz && break; sleep 1; done
+      - name: python-caldav session
+        env:
+          CALCRAFT_URL: http://127.0.0.1:5232
+          CALCRAFT_USER: alice
+          CALCRAFT_PASSWORD: compat test password
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet -r tests/compat/requirements.txt
+          "$RUNNER_TEMP/venv/bin/python" tests/compat/caldav_client.py
+      - name: Server log
+        if: always()
+        run: cat "$RUNNER_TEMP/server.log"
+
+  fuzz:
+    name: fuzz (smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install nightly and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo +nightly install cargo-fuzz --locked --version 0.13.2
+      - name: Fuzz each target for 60 seconds
+        run: |
+          for target in ical_object dav_xml; do
+            cargo +nightly fuzz run "$target" -- -max_total_time=60 -rss_limit_mb=1024
+          done

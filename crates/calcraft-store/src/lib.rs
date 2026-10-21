@@ -12,6 +12,10 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow},
 };
 
+mod items;
+
+pub use items::{Item, ItemMeta, NewItem, Precondition, PutOutcome};
+
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Slug of the calendar and address book created for every new user.
@@ -29,6 +33,16 @@ pub enum StoreError {
     Corrupt(String),
     #[error("failed to set permissions on database file: {0}")]
     Permissions(std::io::Error),
+    /// If-Match / If-None-Match did not hold.
+    #[error("precondition failed")]
+    PreconditionFailed,
+    /// Another resource in the collection already uses this UID.
+    #[error("UID already used by {0}")]
+    UidConflict(String),
+    #[error("collection already exists")]
+    CollectionExists,
+    #[error("limit reached: {0}")]
+    Limit(&'static str),
 }
 
 pub type Result<T, E = StoreError> = std::result::Result<T, E>;
@@ -69,12 +83,14 @@ pub struct Collection {
     pub description: Option<String>,
     pub color: Option<String>,
     pub sync_revision: i64,
+    /// Comma-separated component types, e.g. `VEVENT,VTODO`.
+    pub components: String,
 }
 
 /// Handle to the database. Cheap to clone.
 #[derive(Debug, Clone)]
 pub struct Store {
-    pool: SqlitePool,
+    pub(crate) pool: SqlitePool,
 }
 
 impl Store {
@@ -227,7 +243,7 @@ impl Store {
         kind: CollectionKind,
     ) -> Result<Vec<Collection>> {
         let rows = sqlx::query(
-            "SELECT id, owner_id, kind, slug, display_name, description, color, sync_revision \
+            "SELECT id, owner_id, kind, slug, display_name, description, color, sync_revision, components \
              FROM collections WHERE owner_id = ? AND kind = ? ORDER BY slug",
         )
         .bind(owner_id)
@@ -245,7 +261,7 @@ impl Store {
         slug: &Slug,
     ) -> Result<Option<Collection>> {
         let row = sqlx::query(
-            "SELECT id, owner_id, kind, slug, display_name, description, color, sync_revision \
+            "SELECT id, owner_id, kind, slug, display_name, description, color, sync_revision, components \
              FROM collections WHERE owner_id = ? AND kind = ? AND slug = ?",
         )
         .bind(owner_id)
@@ -269,7 +285,7 @@ fn user_from_row(row: &SqliteRow) -> Result<User> {
     })
 }
 
-fn collection_from_row(row: &SqliteRow) -> Result<Collection> {
+pub(crate) fn collection_from_row(row: &SqliteRow) -> Result<Collection> {
     let kind: String = row.try_get("kind")?;
     let slug: String = row.try_get("slug")?;
     Ok(Collection {
@@ -285,6 +301,7 @@ fn collection_from_row(row: &SqliteRow) -> Result<Collection> {
         description: row.try_get("description")?,
         color: row.try_get("color")?,
         sync_revision: row.try_get("sync_revision")?,
+        components: row.try_get("components")?,
     })
 }
 

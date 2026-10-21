@@ -168,7 +168,7 @@ Der Client-Track startet nach M4 (wenn Web-UI-Komponenten existieren).
 |---|---|
 | **M0** ✅ | Workspace, Lizenz, Doku, CI auf Linux/macOS/Windows (fmt, clippy, test, deny), Dockerfile, Server-Grundgerüst mit Config, Feature-Flags, Security-Headern, Health-Endpunkten, `.well-known` |
 | **M1** ✅ | WebDAV-Kern: OPTIONS, PROPFIND (Depth 0/1), Principal Discovery, Basic Auth, Storage (SQLite) |
-| **M2** | CalDAV: MKCALENDAR, PUT/GET/DELETE mit Preconditions, calendar-query, calendar-multiget; Parser-Limits + Fuzzing |
+| **M2** ✅ | CalDAV: MKCALENDAR, PUT/GET/DELETE mit Preconditions, calendar-query, calendar-multiget; Parser-Limits + Fuzzing |
 | **M3** | sync-collection, CardDAV |
 | **M4** | REST-API + OpenAPI, lokale Auth mit 2FA, App-Passwörter, Web-UI Stufe 1–2 |
 | **M5** | OIDC/Keycloak, Freigaben, Gruppen, Erinnerungen (SMTP), Web-UI Stufe 3–4 |
@@ -191,7 +191,17 @@ Der Client-Track startet nach M4 (wenn Web-UI-Komponenten existieren).
 - Aufgezeichnete Client-Requests als Golden-File-Regressionstests.
 - Fuzzing in der CI.
 
-## 12. Offene Entscheidungen
+## 12. Bekannte Einschränkungen (Stand M2)
+
+- `calendar-query` filtert nach Komponententyp und Zeitraum. Der Zeitraum wird konservativ bestimmt:
+  Wiederholungen ohne `UNTIL` gelten als offen, lokale Zeiten werden um ±14 h erweitert. Es können also
+  zusätzliche Objekte zurückkommen, aber nie fehlen. Exakte RRULE-Expansion (mit Budget) folgt später.
+- `prop-filter`, `param-filter` und `text-match` werden mit `CALDAV:supported-filter` (403) abgelehnt
+  statt stillschweigend ignoriert.
+- `calendar-data` liefert immer das ganze Objekt (keine Teilabfrage, kein `expand`).
+- Unbekannte Properties bei MKCALENDAR (z. B. `calendar-order`) werden nicht gespeichert.
+
+## 13. Offene Entscheidungen
 
 - CardDAV bereits in v1? (aktuell geplant: ja, M3)
 - Lizenz der wiederverwendbaren Bibliotheken (`calcraft-ical`, ggf. `leptos-calendar`):

@@ -75,13 +75,30 @@ async fn options_is_public_and_advertises_dav() {
     let request = Request::options("/dav/").body(Body::empty()).unwrap();
     let response = app.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()["dav"], "1");
+    assert!(
+        response.headers()["dav"]
+            .to_str()
+            .unwrap()
+            .contains("calendar-access")
+    );
     assert!(
         response.headers()[header::ALLOW]
             .to_str()
             .unwrap()
             .contains("PROPFIND")
     );
+}
+
+#[tokio::test]
+async fn dav_methods_on_server_root_are_redirected() {
+    let app = app().await;
+    let response = app
+        .clone()
+        .oneshot(propfind("/", Some("0"), Some(ALICE), PRINCIPAL_QUERY))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::MOVED_PERMANENTLY);
+    assert_eq!(response.headers()[header::LOCATION], "/dav/");
 }
 
 #[tokio::test]
@@ -289,7 +306,9 @@ async fn allprop_and_propname() {
 #[tokio::test]
 async fn unsupported_methods_return_405() {
     let app = app().await;
-    let request = Request::put("/dav/calendars/alice/default/x.ics")
+    let request = Request::builder()
+        .method(Method::from_bytes(b"LOCK").unwrap())
+        .uri("/dav/calendars/alice/default/x.ics")
         .header(header::AUTHORIZATION, basic(ALICE))
         .body(Body::empty())
         .unwrap();

@@ -7,7 +7,7 @@ use axum::{
     extract::{DefaultBodyLimit, State},
     http::{StatusCode, header::LOCATION},
     middleware,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{any, get},
 };
 use tower_http::{
@@ -40,7 +40,12 @@ impl AppState {
 
 /// Builds the complete application router for the given configuration.
 pub fn router(config: &Config, state: AppState) -> Router {
+    let web_ui = config.web_ui.enabled && cfg!(feature = "web-ui");
     let app = Router::new()
+        // GET / shows the web UI; DAV clients configured with the bare
+        // server URL send PROPFIND & co. to / and are redirected like
+        // .well-known discovery.
+        .route("/", get(move || root_page(web_ui)).fallback(well_known))
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
         .route("/.well-known/caldav", any(well_known))
@@ -98,6 +103,15 @@ async fn ready(State(state): State<AppState>) -> impl IntoResponse {
             (StatusCode::SERVICE_UNAVAILABLE, "database unavailable")
         }
     }
+}
+
+async fn root_page(web_ui: bool) -> Response {
+    #[cfg(feature = "web-ui")]
+    if web_ui {
+        return calcraft_web::index().await.into_response();
+    }
+    let _ = web_ui;
+    not_found().await.into_response()
 }
 
 async fn not_found() -> impl IntoResponse {

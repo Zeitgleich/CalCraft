@@ -55,8 +55,13 @@ impl Element {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Response {
     pub href: String,
+    /// A status for the whole resource (e.g. 404 in a multiget); when set,
+    /// no properties are written.
+    pub status: Option<u16>,
     pub found: Vec<(PropName, PropValue)>,
     pub not_found: Vec<PropName>,
+    /// Properties that could not be changed, with their status code.
+    pub failed: Vec<(PropName, u16)>,
 }
 
 impl Response {
@@ -66,6 +71,27 @@ impl Response {
             ..Self::default()
         }
     }
+
+    pub fn with_status(href: impl Into<String>, status: u16) -> Self {
+        Self {
+            href: href.into(),
+            status: Some(status),
+            ..Self::default()
+        }
+    }
+}
+
+fn status_line(code: u16) -> String {
+    let reason = match code {
+        200 => "OK",
+        403 => "Forbidden",
+        404 => "Not Found",
+        409 => "Conflict",
+        424 => "Failed Dependency",
+        507 => "Insufficient Storage",
+        _ => "Error",
+    };
+    format!("HTTP/1.1 {code} {reason}")
 }
 
 /// A complete multistatus document.
@@ -81,6 +107,11 @@ impl Multistatus {
         for response in &self.responses {
             out.push_str("<d:response>");
             let _ = write!(out, "<d:href>{}</d:href>", escape_text(&response.href));
+            if let Some(status) = response.status {
+                let _ = write!(out, "<d:status>{}</d:status>", status_line(status));
+                out.push_str("</d:response>");
+                continue;
+            }
             if !response.found.is_empty() {
                 out.push_str("<d:propstat><d:prop>");
                 for (name, value) in &response.found {
@@ -94,6 +125,20 @@ impl Multistatus {
                     write_prop(&mut out, name, &PropValue::Empty);
                 }
                 out.push_str("</d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat>");
+            }
+            let mut codes: Vec<u16> = response.failed.iter().map(|(_, code)| *code).collect();
+            codes.sort_unstable();
+            codes.dedup();
+            for code in codes {
+                out.push_str("<d:propstat><d:prop>");
+                for (name, _) in response.failed.iter().filter(|(_, c)| *c == code) {
+                    write_prop(&mut out, name, &PropValue::Empty);
+                }
+                let _ = write!(
+                    out,
+                    "</d:prop><d:status>{}</d:status></d:propstat>",
+                    status_line(code)
+                );
             }
             out.push_str("</d:response>");
         }
@@ -192,6 +237,26 @@ mod tests {
         assert!(xml.contains("<d:resourcetype><d:collection/><c:calendar/></d:resourcetype>"));
         assert!(xml.contains(r#"<x:foo xmlns:x="http://example.com/&quot;ns"/>"#));
         assert!(xml.contains("HTTP/1.1 404 Not Found"));
+    }
+
+    #[test]
+    fn writes_status_and_failed_props() {
+        let mut failed = Response::new("/a/");
+        failed.failed.push((PropName::new(NS_DAV, "owner"), 403));
+        failed
+            .failed
+            .push((PropName::new(NS_DAV, "displayname"), 424));
+        let xml = Multistatus {
+            responses: vec![Response::with_status("/missing.ics", 404), failed],
+        }
+        .to_xml();
+        assert!(xml.contains(
+            "<d:href>/missing.ics</d:href><d:status>HTTP/1.1 404 Not Found</d:status></d:response>"
+        ));
+        assert!(xml.contains("<d:owner/></d:prop><d:status>HTTP/1.1 403 Forbidden</d:status>"));
+        assert!(xml.contains(
+            "<d:displayname/></d:prop><d:status>HTTP/1.1 424 Failed Dependency</d:status>"
+        ));
     }
 
     #[test]

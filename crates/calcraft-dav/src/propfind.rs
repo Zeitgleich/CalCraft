@@ -1,15 +1,15 @@
 //! PROPFIND request bodies (RFC 4918 §9.1).
 
-use quick_xml::{NsReader, events::Event, name::ResolveResult};
-
-use crate::{DavError, xml::NS_DAV};
+use crate::{
+    DavError,
+    tree::{self, Node},
+    xml::NS_DAV,
+};
 
 /// Largest accepted PROPFIND body. Real clients send a few kilobytes.
 pub const MAX_PROPFIND_BODY: usize = 64 * 1024;
 
-const MAX_DEPTH: usize = 16;
 const MAX_PROPS: usize = 256;
-const MAX_NAME_LEN: usize = 256;
 
 /// A property name: namespace URI plus local name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -41,9 +41,6 @@ pub enum Propfind {
 
 impl Propfind {
     /// Parses a PROPFIND body. An empty body means `allprop`.
-    ///
-    /// Document type declarations are rejected, which rules out entity
-    /// expansion attacks; nesting depth and property count are bounded.
     pub fn parse(body: &[u8]) -> Result<Self, DavError> {
         if body.len() > MAX_PROPFIND_BODY {
             return Err(DavError::TooLarge);
@@ -51,104 +48,49 @@ impl Propfind {
         if body.trim_ascii().is_empty() {
             return Ok(Self::AllProp);
         }
-        let text =
-            std::str::from_utf8(body).map_err(|_| DavError::BadRequest("body is not UTF-8"))?;
-
-        let mut reader = NsReader::from_str(text);
-        reader.config_mut().expand_empty_elements = true;
-        reader.config_mut().trim_text(true);
-
-        // Element path below the root, as (is DAV namespace, local name).
-        let mut stack: Vec<(bool, String)> = Vec::new();
-        let mut kind: Option<Propfind> = None;
-        let mut props: Vec<PropName> = Vec::new();
-
-        loop {
-            let (ns, event) = reader
-                .read_resolved_event()
-                .map_err(|_| DavError::BadRequest("malformed XML"))?;
-            match event {
-                Event::Start(start) => {
-                    if stack.len() >= MAX_DEPTH {
-                        return Err(DavError::BadRequest("XML nested too deeply"));
-                    }
-                    let local_name = start.local_name();
-                    let local: &str = local_name.into_inner();
-                    if local.len() > MAX_NAME_LEN {
-                        return Err(DavError::BadRequest("element name too long"));
-                    }
-                    let namespace = match ns {
-                        ResolveResult::Bound(ns) => ns.0,
-                        ResolveResult::Unbound => "",
-                        ResolveResult::Unknown(_) => {
-                            return Err(DavError::BadRequest("undeclared namespace prefix"));
-                        }
-                    };
-                    if namespace.len() > MAX_NAME_LEN {
-                        return Err(DavError::BadRequest("namespace too long"));
-                    }
-                    let is_dav = namespace == NS_DAV;
-                    match stack.as_slice() {
-                        [] if !(is_dav && local == "propfind") => {
-                            return Err(DavError::BadRequest("root element must be DAV:propfind"));
-                        }
-                        [(true, root)] if root == "propfind" && is_dav => {
-                            let next = match local {
-                                "allprop" => Some(Propfind::AllProp),
-                                "propname" => Some(Propfind::PropName),
-                                "prop" => Some(Propfind::Prop(Vec::new())),
-                                // `include` (allprop extension) is ignored.
-                                _ => None,
-                            };
-                            if let Some(next) = next {
-                                if kind.is_some() {
-                                    return Err(DavError::BadRequest(
-                                        "more than one of allprop, propname and prop",
-                                    ));
-                                }
-                                kind = Some(next);
-                            }
-                        }
-                        [_, (true, parent)] if parent == "prop" => {
-                            if props.len() >= MAX_PROPS {
-                                return Err(DavError::BadRequest("too many properties"));
-                            }
-                            props.push(PropName::new(namespace, local));
-                        }
-                        _ => {}
-                    }
-                    stack.push((is_dav, local.to_owned()));
-                }
-                Event::End(_) => {
-                    stack.pop();
-                }
-                Event::DocType(_) => {
-                    return Err(DavError::BadRequest(
-                        "document type declarations are not allowed",
-                    ));
-                }
-                Event::GeneralRef(_) => {
-                    return Err(DavError::BadRequest("entity references are not allowed"));
-                }
-                Event::Eof if stack.is_empty() => break,
-                Event::Eof => return Err(DavError::BadRequest("unexpected end of XML")),
-                Event::Text(_)
-                | Event::CData(_)
-                | Event::Comment(_)
-                | Event::Decl(_)
-                | Event::PI(_)
-                | Event::Empty(_) => {}
-            }
+        let root = tree::parse(body, MAX_PROPFIND_BODY)?;
+        if !root.is(NS_DAV, "propfind") {
+            return Err(DavError::BadRequest("root element must be DAV:propfind"));
         }
-
-        match kind {
-            Some(Propfind::Prop(_)) => Ok(Propfind::Prop(props)),
-            Some(other) => Ok(other),
-            None => Err(DavError::BadRequest(
-                "propfind without allprop, propname or prop",
-            )),
-        }
+        Self::from_parent(&root)?.ok_or(DavError::BadRequest(
+            "propfind without allprop, propname or prop",
+        ))
     }
+
+    /// Reads `allprop`, `propname` or `prop` from the children of `parent`.
+    /// Shared by PROPFIND and REPORT bodies.
+    pub(crate) fn from_parent(parent: &Node) -> Result<Option<Self>, DavError> {
+        let mut found = parent.children.iter().filter_map(|child| {
+            if child.is(NS_DAV, "allprop") {
+                Some(Ok(Self::AllProp))
+            } else if child.is(NS_DAV, "propname") {
+                Some(Ok(Self::PropName))
+            } else if child.is(NS_DAV, "prop") {
+                Some(prop_names(child).map(Self::Prop))
+            } else {
+                None
+            }
+        });
+        let first = found.next().transpose()?;
+        if found.next().is_some() {
+            return Err(DavError::BadRequest(
+                "more than one of allprop, propname and prop",
+            ));
+        }
+        Ok(first)
+    }
+}
+
+/// The property names inside a `DAV:prop` element.
+pub(crate) fn prop_names(prop: &Node) -> Result<Vec<PropName>, DavError> {
+    if prop.children.len() > MAX_PROPS {
+        return Err(DavError::BadRequest("too many properties"));
+    }
+    Ok(prop
+        .children
+        .iter()
+        .map(|child| PropName::new(&child.namespace, &child.name))
+        .collect())
 }
 
 #[cfg(test)]

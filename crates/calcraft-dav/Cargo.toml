@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+calcraft-ical.workspace = true
 quick-xml.workspace = true
 thiserror.workspace = true
 

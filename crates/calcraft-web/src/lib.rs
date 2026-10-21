@@ -4,14 +4,17 @@
 //! deliberately uses no inline scripts or styles so it works under the strict
 //! Content Security Policy set by the server.
 
-use axum::{Router, response::Html, routing::get};
+use axum::{Router, response::Html};
 
-/// Builds the web UI router, mounted at the root path.
+/// Routes of the web UI below the root path (static assets, later the app).
+/// The root page itself is served through [`index`] so that the server can
+/// combine it with DAV handling on `/`.
 pub fn router() -> Router {
-    Router::new().route("/", get(index))
+    Router::new()
 }
 
-async fn index() -> Html<String> {
+/// The page served on `GET /`.
+pub async fn index() -> Html<String> {
     Html(format!(
         "<!doctype html>\n\
          <html lang=\"en\">\n\
