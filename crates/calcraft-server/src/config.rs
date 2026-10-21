@@ -74,11 +74,23 @@ impl Default for StorageConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SecurityConfig {
     /// Send `Strict-Transport-Security`. Enable only when served over HTTPS.
     pub hsts: bool,
+    /// Mark session cookies `Secure`. Browsers also accept them on
+    /// `http://localhost`; disable only for plain-HTTP tests on other hosts.
+    pub secure_cookies: bool,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            hsts: false,
+            secure_cookies: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

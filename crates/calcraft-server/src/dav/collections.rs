@@ -17,6 +17,8 @@ use calcraft_dav::{
 };
 use calcraft_ical::ComponentKind;
 
+use crate::validate::{MAX_DESCRIPTION, MAX_DISPLAY_NAME, clean_color, clean_text};
+
 use super::{
     Ctx, bad_request, dav_error, method_not_allowed, multistatus,
     paths::{Resource, href_of},
@@ -24,38 +26,12 @@ use super::{
     read_body, store_error,
 };
 
-const MAX_DISPLAY_NAME: usize = 256;
-const MAX_DESCRIPTION: usize = 4096;
-
 /// A validated change to one editable collection property.
 #[derive(Debug, Default)]
 struct Changes {
     display_name: Option<Option<String>>,
     description: Option<Option<String>>,
     color: Option<Option<String>>,
-}
-
-/// Invisible formatting characters that can disguise names: zero-width
-/// characters, bidirectional overrides and isolates, byte order mark.
-fn is_format_char(c: char) -> bool {
-    matches!(
-        c,
-        '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}'
-    )
-}
-
-fn clean_text(node: &Node, max: usize) -> Option<String> {
-    let text = node.text.trim();
-    (text.chars().count() <= max && !text.chars().any(|c| c.is_control() || is_format_char(c)))
-        .then(|| text.to_owned())
-}
-
-/// `#RRGGBB` or `#RRGGBBAA`, as used by Apple and Thunderbird.
-fn clean_color(node: &Node) -> Option<String> {
-    let text = node.text.trim();
-    let hex = text.strip_prefix('#')?;
-    (matches!(hex.len(), 6 | 8) && hex.bytes().all(|b| b.is_ascii_hexdigit()))
-        .then(|| text.to_ascii_uppercase())
 }
 
 fn is_writable(name: &PropName, kind: CollectionKind) -> bool {
@@ -78,14 +54,14 @@ fn apply(
     }
     let text = |max| match value {
         None => Some(None),
-        Some(node) => clean_text(node, max).map(|t| (!t.is_empty()).then_some(t)),
+        Some(node) => clean_text(&node.text, max).map(|t| (!t.is_empty()).then_some(t)),
     };
     let result = if name.is(NS_DAV, "displayname") {
         text(MAX_DISPLAY_NAME).map(|v| changes.display_name = Some(v))
     } else if name.is(NS_APPLE_ICAL, "calendar-color") {
         match value {
             None => Some(None),
-            Some(node) => clean_color(node).map(Some),
+            Some(node) => clean_color(&node.text).map(Some),
         }
         .map(|v| changes.color = Some(v))
     } else {

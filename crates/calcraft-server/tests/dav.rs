@@ -325,8 +325,9 @@ async fn repeated_failures_lock_the_account() {
         let (status, _) = call(&app, propfind("/dav/", Some("0"), Some(wrong), "")).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
+    // Locked: even the correct password is refused, indistinguishable from a wrong one.
     let (status, _) = call(&app, propfind("/dav/", Some("0"), Some(ALICE), "")).await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
     // Bob is not affected.
     let (status, _) = call(&app, propfind("/dav/", Some("0"), Some(BOB), "")).await;
     assert_eq!(status, StatusCode::MULTI_STATUS);

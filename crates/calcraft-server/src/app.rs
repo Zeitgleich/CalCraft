@@ -27,6 +27,8 @@ pub const DAV_ROOT: &str = "/dav/";
 pub struct AppState {
     pub store: Store,
     pub auth: Arc<Authenticator>,
+    /// Mark session cookies `Secure` (HTTPS only).
+    pub secure_cookies: bool,
 }
 
 impl AppState {
@@ -34,6 +36,7 @@ impl AppState {
         Ok(Self {
             auth: Authenticator::new(store.clone())?,
             store,
+            secure_cookies: true,
         })
     }
 }
@@ -52,15 +55,15 @@ pub fn router(config: &Config, state: AppState) -> Router {
         .route("/.well-known/carddav", any(well_known))
         .route("/dav", any(dav::handle))
         .route("/dav/", any(dav::handle))
-        .route("/dav/{*path}", any(dav::handle))
-        .with_state(state);
+        .route("/dav/{*path}", any(dav::handle));
 
     #[cfg(feature = "api")]
     let app = if config.api.enabled {
-        app.nest("/api", calcraft_api::router())
+        app.nest("/api", crate::api::router())
     } else {
         app
     };
+    let app = app.with_state(state);
 
     #[cfg(feature = "web-ui")]
     let app = if config.web_ui.enabled {

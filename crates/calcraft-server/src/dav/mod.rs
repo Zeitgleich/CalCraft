@@ -17,7 +17,7 @@ use axum::{
     extract::{Request, State},
     http::{
         HeaderValue, Method, StatusCode,
-        header::{ALLOW, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER, WWW_AUTHENTICATE},
+        header::{ALLOW, AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE},
     },
     response::{IntoResponse, Response},
 };
@@ -48,14 +48,8 @@ pub async fn handle(State(state): State<AppState>, request: Request) -> Response
     let user = match state.auth.authenticate(header).await {
         AuthOutcome::Authenticated(user) => user,
         AuthOutcome::Denied => return unauthorized(),
-        AuthOutcome::LockedOut => {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                [(RETRY_AFTER, "900")],
-                "too many failed login attempts",
-            )
-                .into_response();
-        }
+        // A locked account looks like wrong credentials (no account oracle).
+        AuthOutcome::LockedOut => return unauthorized(),
         AuthOutcome::Error => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 

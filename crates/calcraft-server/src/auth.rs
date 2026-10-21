@@ -24,7 +24,19 @@ use argon2::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use calcraft_core::Username;
 use calcraft_store::{Store, User};
+
+use crate::secrets::{hash_secret, hashes_equal};
 use tokio::sync::Semaphore;
+
+/// Prefix of app passwords: `ccap_<id>_<secret>`.
+pub const APP_PASSWORD_PREFIX: &str = "ccap_";
+
+/// Current time in Unix seconds.
+pub fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
 
 /// Minimum length of new passwords.
 pub const MIN_PASSWORD_LEN: usize = 12;
@@ -44,6 +56,8 @@ pub enum PasswordError {
     TooShort,
     #[error("password must be at most {MAX_PASSWORD_LEN} bytes long")]
     TooLong,
+    #[error("password must not start with {APP_PASSWORD_PREFIX} (reserved for app passwords)")]
+    Reserved,
     #[error("password hashing failed")]
     Hash,
 }
@@ -56,10 +70,20 @@ pub fn hash_password(password: &str) -> Result<String, PasswordError> {
     if password.len() > MAX_PASSWORD_LEN {
         return Err(PasswordError::TooLong);
     }
+    if password.starts_with(APP_PASSWORD_PREFIX) {
+        return Err(PasswordError::Reserved);
+    }
     Argon2::default()
         .hash_password(password.as_bytes())
         .map(|hash| hash.to_string())
         .map_err(|_| PasswordError::Hash)
+}
+
+/// [`hash_password`] on a blocking thread, for use in request handlers.
+pub async fn hash_password_async(password: String) -> Result<String, PasswordError> {
+    tokio::task::spawn_blocking(move || hash_password(&password))
+        .await
+        .map_err(|_| PasswordError::Hash)?
 }
 
 fn verify_password(password: &str, hash: &str) -> bool {
@@ -111,6 +135,8 @@ fn parse_basic(header: &[u8]) -> Option<BasicCredentials> {
 
 struct Failures {
     count: u32,
+    /// Attempts currently being verified.
+    in_flight: u32,
     since: Instant,
 }
 
@@ -150,17 +176,155 @@ impl Authenticator {
         }))
     }
 
-    /// Authenticates the value of an `Authorization` header.
+    /// Authenticates the `Authorization` header of a DAV request.
+    ///
+    /// DAV clients may use the account password only while two-factor
+    /// authentication is off; with 2FA they must use an app password.
     pub async fn authenticate(&self, header: Option<&[u8]>) -> AuthOutcome {
         let Some(credentials) = header.and_then(parse_basic) else {
             return AuthOutcome::Denied;
         };
-        let username = credentials.username;
-
-        if self.is_locked_out(&username) {
-            return AuthOutcome::LockedOut;
+        let username = &credentials.username;
+        let Some(attempt) = self.reserve(username) else {
+            return self.locked_out().await;
+        };
+        if let Some((id, secret)) = parse_app_password(&credentials.password) {
+            return self.check_app_password(&attempt, id, secret).await;
         }
+        match self
+            .check_first_factor_reserved(&attempt, &credentials.password)
+            .await
+        {
+            AuthOutcome::Authenticated(user) if user.totp_enabled => AuthOutcome::Denied,
+            AuthOutcome::Authenticated(user) => {
+                self.clear_failures(username);
+                AuthOutcome::Authenticated(user)
+            }
+            outcome => outcome,
+        }
+    }
 
+    /// Verifies the account password and resets the failure counter on
+    /// success. Only for accounts without 2FA or after the second factor.
+    pub async fn check_password(&self, username: &Username, password: &str) -> AuthOutcome {
+        let Some(attempt) = self.reserve(username) else {
+            return self.locked_out().await;
+        };
+        let outcome = self.check_first_factor_reserved(&attempt, password).await;
+        if matches!(outcome, AuthOutcome::Authenticated(_)) {
+            self.clear_failures(username);
+        }
+        outcome
+    }
+
+    /// Reserves a login attempt for `username`. Attempts in progress count
+    /// towards the limit together with recorded failures, so concurrent
+    /// requests cannot bypass the lockout. Returns `None` when locked.
+    pub fn reserve(&self, username: &Username) -> Option<Attempt<'_>> {
+        let Ok(mut failures) = self.failures.lock() else {
+            return None;
+        };
+        if failures.len() >= MAX_TRACKED {
+            failures.retain(|_, f| f.in_flight > 0 || f.since.elapsed() < LOCKOUT_WINDOW);
+            if failures.len() >= MAX_TRACKED {
+                // Degrade safely under extreme load.
+                return None;
+            }
+        }
+        let entry = failures.entry(username.clone()).or_insert(Failures {
+            count: 0,
+            in_flight: 0,
+            since: Instant::now(),
+        });
+        if entry.since.elapsed() >= LOCKOUT_WINDOW && entry.in_flight == 0 {
+            entry.count = 0;
+            entry.since = Instant::now();
+        }
+        if entry.count + entry.in_flight >= MAX_FAILURES {
+            if entry.count == 0 && entry.in_flight == 0 {
+                failures.remove(username);
+            }
+            return None;
+        }
+        entry.in_flight += 1;
+        Some(Attempt {
+            auth: self,
+            username: username.clone(),
+        })
+    }
+
+    /// Response for a locked account. It does the same work as a wrong
+    /// password, so neither the status nor the timing reveals the lockout
+    /// (and with it, whether the account exists).
+    pub async fn locked_out(&self) -> AuthOutcome {
+        let hash = self.dummy_hash.clone();
+        if let Ok(_permit) = self.hashing.acquire().await {
+            let _ = tokio::task::spawn_blocking(move || verify_password("locked", &hash)).await;
+        }
+        tracing::debug!("login attempt for a locked account");
+        AuthOutcome::LockedOut
+    }
+
+    /// Verifies an app password (`ccap_<id>_<secret>`) of the reserved user.
+    async fn check_app_password(
+        &self,
+        attempt: &Attempt<'_>,
+        id: i64,
+        secret: &str,
+    ) -> AuthOutcome {
+        let username = &attempt.username;
+        let stored = match self.store.app_password_secret(id).await {
+            Ok(stored) => stored,
+            Err(err) => {
+                tracing::error!(%err, "failed to load app password");
+                return AuthOutcome::Error;
+            }
+        };
+        let user = match &stored {
+            Some((user_id, _)) => match self.store.user_by_id(*user_id).await {
+                Ok(user) => user,
+                Err(err) => {
+                    tracing::error!(%err, "failed to load user");
+                    return AuthOutcome::Error;
+                }
+            },
+            None => None,
+        };
+        let valid = match (&stored, &user) {
+            (Some((_, hash)), Some(user)) => {
+                // The app password must belong to the user name it is sent with.
+                hashes_equal(&hash_secret(secret), hash) && &user.username == username
+            }
+            _ => false,
+        };
+        match user {
+            Some(user) if valid && !user.disabled => {
+                self.clear_failures(username);
+                if let Err(err) = self.store.touch_app_password(id, now()).await {
+                    tracing::warn!(%err, "failed to record app password use");
+                }
+                AuthOutcome::Authenticated(user)
+            }
+            _ => {
+                // Count only for existing accounts (see `check_first_factor_reserved`).
+                if matches!(self.store.user_credentials(username).await, Ok(Some(_))) {
+                    self.record_failure(username.clone());
+                }
+                AuthOutcome::Denied
+            }
+        }
+    }
+
+    /// Verifies the account password of a reserved attempt, with cache,
+    /// without resetting the failure counter: with 2FA the counter must also
+    /// cover wrong second factors, so callers reset it only after full
+    /// success.
+    pub async fn check_first_factor_reserved(
+        &self,
+        attempt: &Attempt<'_>,
+        password: &str,
+    ) -> AuthOutcome {
+        let username = attempt.username.clone();
         let record = match self.store.user_credentials(&username).await {
             Ok(record) => record,
             Err(err) => {
@@ -173,7 +337,7 @@ impl Authenticator {
         // as the password changes.
         let digest = record.as_ref().map(|record| {
             blake3::Hasher::new_keyed(&self.cache_key)
-                .update(credentials.password.as_bytes())
+                .update(password.as_bytes())
                 .update(&[0xff])
                 .update(record.password_hash.as_bytes())
                 .finalize()
@@ -193,7 +357,7 @@ impl Authenticator {
         let Ok(_permit) = self.hashing.acquire().await else {
             return AuthOutcome::Error;
         };
-        let password = credentials.password;
+        let password = password.to_owned();
         let valid =
             match tokio::task::spawn_blocking(move || verify_password(&password, &hash)).await {
                 Ok(valid) => valid,
@@ -205,15 +369,14 @@ impl Authenticator {
 
         match record {
             Some(record) if valid && !record.user.disabled => {
-                self.clear_failures(&username);
                 if let Some(digest) = digest {
                     self.remember(username, digest);
                 }
                 AuthOutcome::Authenticated(record.user)
             }
-            // Failures are only counted for existing accounts. Counting
-            // made-up names would let an attacker fill the table and push
-            // real accounts out of the lockout.
+            // Failures are only counted for existing accounts; entries of
+            // unknown names disappear when their attempt ends, so made-up
+            // names cannot fill the table.
             Some(_) => {
                 self.record_failure(username);
                 AuthOutcome::Denied
@@ -251,26 +414,14 @@ impl Authenticator {
         }
     }
 
-    fn is_locked_out(&self, username: &Username) -> bool {
-        let Ok(failures) = self.failures.lock() else {
-            return true;
-        };
-        failures
-            .get(username)
-            .is_some_and(|f| f.count >= MAX_FAILURES && f.since.elapsed() < LOCKOUT_WINDOW)
-    }
-
-    fn record_failure(&self, username: Username) {
+    /// Records a failed attempt of an existing account.
+    pub fn record_failure(&self, username: Username) {
         let Ok(mut failures) = self.failures.lock() else {
             return;
         };
-        // Entries exist only for real accounts, so the table is bounded by
-        // the number of users; expired entries are still dropped regularly.
-        if failures.len() >= MAX_TRACKED {
-            failures.retain(|_, f| f.since.elapsed() < LOCKOUT_WINDOW);
-        }
         let entry = failures.entry(username).or_insert(Failures {
             count: 0,
+            in_flight: 0,
             since: Instant::now(),
         });
         if entry.since.elapsed() >= LOCKOUT_WINDOW {
@@ -283,11 +434,62 @@ impl Authenticator {
         }
     }
 
-    fn clear_failures(&self, username: &Username) {
-        if let Ok(mut failures) = self.failures.lock() {
-            failures.remove(username);
+    /// Resets the failure count after a fully successful login.
+    pub fn clear_failures(&self, username: &Username) {
+        if let Ok(mut failures) = self.failures.lock()
+            && let Some(entry) = failures.get_mut(username)
+        {
+            entry.count = 0;
+            if entry.in_flight == 0 {
+                failures.remove(username);
+            }
         }
     }
+
+    fn release(&self, username: &Username) {
+        if let Ok(mut failures) = self.failures.lock()
+            && let Some(entry) = failures.get_mut(username)
+        {
+            entry.in_flight = entry.in_flight.saturating_sub(1);
+            if entry.count == 0 && entry.in_flight == 0 {
+                failures.remove(username);
+            }
+        }
+    }
+}
+
+/// A reserved login attempt; released when dropped.
+pub struct Attempt<'a> {
+    auth: &'a Authenticator,
+    username: Username,
+}
+
+impl Attempt<'_> {
+    pub fn username(&self) -> &Username {
+        &self.username
+    }
+}
+
+impl Drop for Attempt<'_> {
+    fn drop(&mut self) {
+        self.auth.release(&self.username);
+    }
+}
+
+/// Splits an app password `ccap_<id>_<secret>` with a 32-character Base32
+/// secret. Anything else is treated as an account password.
+fn parse_app_password(password: &str) -> Option<(i64, &str)> {
+    let (id, secret) = password
+        .strip_prefix(APP_PASSWORD_PREFIX)?
+        .split_once('_')?;
+    let valid_secret = secret.len() == 32
+        && secret
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b));
+    if !valid_secret || id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((id.parse().ok()?, secret))
 }
 
 #[cfg(test)]

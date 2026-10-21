@@ -44,11 +44,10 @@ crates/
 ├── calcraft-ical    # iCal/vCard-Parsing, Limits, RRULE-Expansion (wasm-kompatibel)
 ├── calcraft-dav     # WebDAV/CalDAV/CardDAV-Protokoll, XML
 ├── calcraft-store   # Storage-Trait, SQLite (Default) + PostgreSQL
-├── calcraft-api     # REST-API + OpenAPI (utoipa); einzige API, auch für die UI
 ├── calcraft-web     # Leptos-App (SSR + Hydration), Feature `web-ui`
 ├── calcraft-ui      # Wiederverwendbare Leptos-Komponenten (Kalenderansichten), für Web-UI und Client
 ├── calcraft-client  # CalDAV/CardDAV-Client-Bibliothek (Sync, Offline-Cache)
-└── calcraft-server  # Binary: Config, CLI, Routing, Middleware
+└── calcraft-server  # Binary: Config, CLI, Routing, Middleware, DAV und REST-API (Modul `api`)
 apps/
 └── calcraft-desktop # Tauri-2-App (Linux, macOS, Windows; später iOS/Android)
 ```
@@ -58,6 +57,9 @@ apps/
 Grundsätze:
 
 - **Eine API:** Die Web-UI nutzt ausschließlich die REST-API, keine Leptos Server Functions.
+  Die JSON-Typen liegen in `calcraft-core::api` und werden von Server und UI geteilt.
+- **OpenAPI:** handgeschriebene Spezifikation (`/api/openapi.json`), ein Test prüft, dass jede Route
+  dokumentiert ist (kein utoipa, um Abhängigkeiten zu sparen).
 - **Shared Code:** `calcraft-core` und `calcraft-ical` kompilieren auch für `wasm32`.
 - **Speicher:** Rohdaten (`.ics`/`.vcf`) unverändert als Blob + extrahierter Index
   (UID, DTSTART/DTEND, RRULE-Flag) für Time-Range-Queries. ETag = Inhalts-Hash.
@@ -170,7 +172,7 @@ Der Client-Track startet nach M4 (wenn Web-UI-Komponenten existieren).
 | **M1** ✅ | WebDAV-Kern: OPTIONS, PROPFIND (Depth 0/1), Principal Discovery, Basic Auth, Storage (SQLite) |
 | **M2** ✅ | CalDAV: MKCALENDAR, PUT/GET/DELETE mit Preconditions, calendar-query, calendar-multiget; Parser-Limits + Fuzzing |
 | **M3** ✅ | sync-collection, CardDAV |
-| **M4** | REST-API + OpenAPI, lokale Auth mit 2FA, App-Passwörter, Web-UI Stufe 1–2 |
+| **M4** | **M4a** ✅ REST-API + OpenAPI, Sessions, 2FA (TOTP + Wiederherstellungscodes), App-Passwörter, Admin · **M4b** Web-UI Stufe 1 · **M4c** Web-UI Stufe 2 |
 | **M5** | OIDC/Keycloak, Freigaben, Gruppen, Erinnerungen (SMTP), Web-UI Stufe 3–4 |
 | **M6** | Import/Export aller Formate, Webcal mit SSRF-Schutz, Backup/Restore, Migration aus Radicale/Baïkal |
 | **M7** | Externes Security-Review, Doku, Paketierung, Release v1.0 |

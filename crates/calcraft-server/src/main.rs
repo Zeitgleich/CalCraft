@@ -130,7 +130,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         );
     }
 
-    let state = AppState::new(open_store(&config).await?)?;
+    let mut state = AppState::new(open_store(&config).await?)?;
+    state.secure_cookies = config.security.secure_cookies;
     let listener = TcpListener::bind(config.server.bind)
         .await
         .with_context(|| format!("failed to bind {}", config.server.bind))?;
