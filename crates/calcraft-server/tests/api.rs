@@ -317,7 +317,9 @@ async fn app_passwords_for_dav_clients() {
     );
     // The app password only works for its owner, and only with the full secret.
     assert_eq!(dav(&app, "bob", &password).await, StatusCode::UNAUTHORIZED);
-    let tampered = format!("{}x", &password[..password.len() - 1]);
+    // Change the last character to a different one (it may already be 'x').
+    let last = if password.ends_with('x') { 'y' } else { 'x' };
+    let tampered = format!("{}{last}", &password[..password.len() - 1]);
     assert_eq!(
         dav(&app, "alice", &tampered).await,
         StatusCode::UNAUTHORIZED
