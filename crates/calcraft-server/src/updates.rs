@@ -19,14 +19,14 @@ use std::{
     time::Duration,
 };
 
-use axum::http::Uri;
+use axum::http::{StatusCode, Uri};
 use calcraft_core::api::UpdateInfo;
 use serde::Deserialize;
 
 use crate::{
     auth::now,
     config::UpdatesConfig,
-    https::{HttpClient, MAX_RESPONSE},
+    https::{HttpClient, HttpError, MAX_RESPONSE},
     secrets::random_bytes,
 };
 
@@ -227,6 +227,10 @@ pub fn spawn(config: &UpdatesConfig) -> Arc<UpdateCheck> {
                         Ok(()) => tracing::debug!(info = ?check.info(), "update check done"),
                         Err(err) => tracing::warn!(%err, "update check failed"),
                     },
+                    // GitHub answers 404 while the repository has no published release.
+                    Err(HttpError::Status(StatusCode::NOT_FOUND)) => {
+                        tracing::info!("update check: no published release yet");
+                    }
                     // HttpError never contains the response body.
                     Err(err) => tracing::warn!(%err, "update check failed"),
                 }
