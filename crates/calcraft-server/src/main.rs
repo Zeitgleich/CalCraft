@@ -122,6 +122,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         );
     }
 
+    if !config.server.bind.ip().is_loopback() && !config.security.hsts {
+        tracing::warn!(
+            bind = %config.server.bind,
+            "listening on a non-loopback address: DAV clients send passwords with HTTP Basic \
+             authentication, so serve CalCraft only behind TLS (reverse proxy) and set security.hsts = true"
+        );
+    }
+
     let state = AppState::new(open_store(&config).await?)?;
     let listener = TcpListener::bind(config.server.bind)
         .await

@@ -5,6 +5,11 @@
 //! for a short time under a keyed BLAKE3 hash (the key never leaves the
 //! process), concurrent Argon2 runs are bounded, and repeated failures lock
 //! the account for a while.
+//!
+//! Trade-off: anyone who knows a username can lock that account for the
+//! lockout window by sending wrong passwords. This is accepted in favour of
+//! stopping online guessing; per-source limits follow together with the
+//! trusted-proxy configuration.
 
 use std::{
     collections::HashMap,
@@ -206,10 +211,14 @@ impl Authenticator {
                 }
                 AuthOutcome::Authenticated(record.user)
             }
-            _ => {
+            // Failures are only counted for existing accounts. Counting
+            // made-up names would let an attacker fill the table and push
+            // real accounts out of the lockout.
+            Some(_) => {
                 self.record_failure(username);
                 AuthOutcome::Denied
             }
+            None => AuthOutcome::Denied,
         }
     }
 
@@ -255,11 +264,10 @@ impl Authenticator {
         let Ok(mut failures) = self.failures.lock() else {
             return;
         };
+        // Entries exist only for real accounts, so the table is bounded by
+        // the number of users; expired entries are still dropped regularly.
         if failures.len() >= MAX_TRACKED {
             failures.retain(|_, f| f.since.elapsed() < LOCKOUT_WINDOW);
-        }
-        if failures.len() >= MAX_TRACKED && !failures.contains_key(&username) {
-            return;
         }
         let entry = failures.entry(username).or_insert(Failures {
             count: 0,
@@ -403,6 +411,26 @@ mod tests {
         assert!(matches!(
             auth.authenticate(Some(old.as_bytes())).await,
             AuthOutcome::Denied
+        ));
+    }
+
+    #[tokio::test]
+    async fn unknown_usernames_cannot_disable_the_lockout() {
+        let auth = setup().await;
+        // Flooding with made-up names must not stop counting for real accounts.
+        for i in 0..50 {
+            let fake = basic(&format!("ghost{i}"), "whatever password");
+            auth.authenticate(Some(fake.as_bytes())).await;
+        }
+        assert!(auth.failures.lock().unwrap().is_empty());
+        let wrong = basic("alice", "wrong password!!");
+        for _ in 0..MAX_FAILURES {
+            auth.authenticate(Some(wrong.as_bytes())).await;
+        }
+        let good = basic("alice", "correct horse battery");
+        assert!(matches!(
+            auth.authenticate(Some(good.as_bytes())).await,
+            AuthOutcome::LockedOut
         ));
     }
 
