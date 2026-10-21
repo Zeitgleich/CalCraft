@@ -764,12 +764,13 @@ impl Exporter {
                     return Err(IcalError::Invalid("not a calendar object"));
                 }
                 if self.format == Format::Csv {
+                    // CSV holds events only; to-dos and journals are left out.
                     let master = root
                         .components
                         .iter()
-                        .filter(|c| c.name != "VTIMEZONE")
+                        .filter(|c| c.name == "VEVENT")
                         .find(|c| c.property("RECURRENCE-ID").is_none())
-                        .or_else(|| root.components.iter().find(|c| c.name != "VTIMEZONE"));
+                        .or_else(|| root.components.iter().find(|c| c.name == "VEVENT"));
                     if let Some(master) = master {
                         csv::push_row(&event_row(master), &mut out);
                     }

@@ -170,6 +170,26 @@ pub struct UpdateUser {
     pub is_admin: Option<bool>,
 }
 
+/// Result of importing a file into a collection.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportReport {
+    pub created: u64,
+    pub replaced: u64,
+    /// Objects whose UID already existed (with `on_conflict=skip`).
+    pub skipped: u64,
+    /// Objects that failed validation or limits.
+    pub rejected: u64,
+    /// Reasons for the first rejections (at most 20).
+    pub errors: Vec<ImportRejection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportRejection {
+    /// UID of the object, if known (shortened to 200 characters).
+    pub uid: Option<String>,
+    pub reason: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

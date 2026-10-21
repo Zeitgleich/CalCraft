@@ -304,6 +304,7 @@ dependencies = [
  "calcraft-web",
  "clap",
  "figment",
+ "futures-core",
  "getrandom",
  "hmac",
  "http-body-util",

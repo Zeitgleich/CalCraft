@@ -56,7 +56,7 @@ pub(crate) fn default_type(dialect: Dialect, name: &str) -> &'static str {
             "CALSCALE" | "METHOD" | "PRODID" | "VERSION" | "CATEGORIES" | "CLASS" | "COMMENT"
             | "DESCRIPTION" | "LOCATION" | "RESOURCES" | "STATUS" | "SUMMARY" | "TRANSP"
             | "TZID" | "TZNAME" | "CONTACT" | "RELATED-TO" | "UID" | "ACTION"
-            | "REQUEST-STATUS" | "NAME" | "COLOR" => "text",
+            | "REQUEST-STATUS" | "NAME" | "COLOR" | "X-WR-CALNAME" | "X-WR-CALDESC" => "text",
             "ATTACH" | "TZURL" | "URL" | "IMAGE" | "CONFERENCE" | "SOURCE" => "uri",
             "ATTENDEE" | "ORGANIZER" => "cal-address",
             "DTSTART" | "DTEND" | "DUE" | "RECURRENCE-ID" | "EXDATE" | "RDATE" | "COMPLETED"
