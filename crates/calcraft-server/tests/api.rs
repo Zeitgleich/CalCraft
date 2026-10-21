@@ -432,6 +432,18 @@ async fn two_factor_login_and_dav_rules() {
         StatusCode::UNAUTHORIZED
     );
 
+    // Changing the password with 2FA requires a code.
+    let session = cookie_of(&login(&app, ALICE, Some(&recovery[1])).await);
+    let no_code = call(
+        &app,
+        Method::POST,
+        "/api/v1/me/password",
+        Some(&session),
+        Some(json!({"current": ALICE.1, "new": "another long password"})),
+    )
+    .await;
+    assert_eq!(no_code.json["error"], "totp_required");
+
     // With 2FA, DAV clients need an app password.
     assert_eq!(dav(&app, "alice", ALICE.1).await, StatusCode::UNAUTHORIZED);
     assert_eq!(
@@ -452,7 +464,27 @@ async fn wrong_second_factor_counts_towards_lockout() {
     }
     let code = totp_code(&secret, now() / TOTP_STEP + 1);
     let locked = login(&app, ALICE, Some(&code)).await;
-    assert_eq!(locked.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(locked.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(locked.json["error"], "invalid_credentials");
+}
+
+#[tokio::test]
+async fn concurrent_attempts_cannot_bypass_the_lockout() {
+    let app = app().await;
+    // Twenty wrong passwords at once: at most five may be verified.
+    let handles: Vec<_> = (0..20)
+        .map(|_| {
+            let app = app.clone();
+            tokio::spawn(async move { dav(&app, "alice", "wrong password!!").await })
+        })
+        .collect();
+    let mut results = Vec::new();
+    for handle in handles {
+        results.push(handle.await.unwrap());
+    }
+    assert!(results.iter().all(|s| *s == StatusCode::UNAUTHORIZED));
+    // The account is now locked, even for the correct password.
+    assert_eq!(dav(&app, "alice", ALICE.1).await, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

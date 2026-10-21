@@ -836,6 +836,12 @@
           "new": {
             "type": "string",
             "minLength": 12
+          },
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [

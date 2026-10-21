@@ -14,7 +14,7 @@ use calcraft_store::User;
 use super::{AdminUser, ApiError, ApiJson};
 use crate::{
     app::AppState,
-    auth::{PasswordError, hash_password},
+    auth::{PasswordError, hash_password_async},
     validate::{MAX_DISPLAY_NAME, clean_text},
 };
 
@@ -59,19 +59,18 @@ pub async fn create(
         None => None,
     }
     .filter(|name: &String| !name.is_empty());
-    let hash = hash_password(&request.password).map_err(|err| match err {
-        PasswordError::TooShort => ApiError::BadRequest("password is too short"),
-        PasswordError::TooLong => ApiError::BadRequest("password is too long"),
-        PasswordError::Hash => ApiError::Internal,
-    })?;
-    let mut user = state
+    let hash = hash_password_async(request.password)
+        .await
+        .map_err(|err| match err {
+            PasswordError::TooShort => ApiError::BadRequest("password is too short"),
+            PasswordError::TooLong => ApiError::BadRequest("password is too long"),
+            PasswordError::Reserved => ApiError::BadRequest("password must not start with ccap_"),
+            PasswordError::Hash => ApiError::Internal,
+        })?;
+    let user = state
         .store
-        .create_user(&username, &hash, display_name.as_deref())
+        .create_user_with_role(&username, &hash, display_name.as_deref(), request.is_admin)
         .await?;
-    if request.is_admin {
-        state.store.set_admin(&username, true).await?;
-        user.is_admin = true;
-    }
     Ok((StatusCode::CREATED, Json(info(user))))
 }
 

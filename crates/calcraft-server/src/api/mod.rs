@@ -122,7 +122,6 @@ pub enum ApiError {
     Unauthorized,
     InvalidCredentials,
     TotpRequired,
-    LockedOut,
     Forbidden,
     Csrf,
     NotFound,
@@ -146,17 +145,12 @@ impl IntoResponse for ApiError {
             Self::InvalidCredentials => (
                 StatusCode::UNAUTHORIZED,
                 "invalid_credentials",
-                "wrong username, password or code".to_owned(),
+                "wrong username, password or code, or too many attempts".to_owned(),
             ),
             Self::TotpRequired => (
                 StatusCode::UNAUTHORIZED,
                 "totp_required",
                 "a two-factor code is required".to_owned(),
-            ),
-            Self::LockedOut => (
-                StatusCode::TOO_MANY_REQUESTS,
-                "locked_out",
-                "too many failed attempts, try again later".to_owned(),
             ),
             Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden", "not allowed".to_owned()),
             Self::Csrf => (

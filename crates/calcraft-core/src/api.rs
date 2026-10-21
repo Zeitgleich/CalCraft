@@ -48,6 +48,9 @@ pub struct Me {
 pub struct ChangePassword {
     pub current: String,
     pub new: String,
+    /// TOTP or recovery code, required when 2FA is enabled.
+    #[serde(default)]
+    pub code: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

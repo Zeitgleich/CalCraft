@@ -86,11 +86,8 @@ pub async fn run(store: &Store, command: UserCommand) -> anyhow::Result<()> {
             let username = parse_username(&username)?;
             let hash = hash_password(&password.read()?)?;
             store
-                .create_user(&username, &hash, display_name.as_deref())
+                .create_user_with_role(&username, &hash, display_name.as_deref(), admin)
                 .await?;
-            if admin {
-                store.set_admin(&username, true).await?;
-            }
             println!(
                 "created user {username}{}",
                 if admin { " (admin)" } else { "" }
@@ -99,9 +96,12 @@ pub async fn run(store: &Store, command: UserCommand) -> anyhow::Result<()> {
         UserCommand::Passwd { username, password } => {
             let username = parse_username(&username)?;
             let hash = hash_password(&password.read()?)?;
-            if !store.set_password_hash(&username, &hash).await? {
+            let Some(record) = store.user_credentials(&username).await? else {
                 bail!("user {username} does not exist");
-            }
+            };
+            store.set_password_hash(&username, &hash).await?;
+            // Existing web sessions end, e.g. when recovering an account.
+            store.delete_sessions_of(record.user.id).await?;
             println!("password of {username} changed");
         }
         UserCommand::List => {
@@ -135,8 +135,12 @@ pub async fn run(store: &Store, command: UserCommand) -> anyhow::Result<()> {
 
 async fn set_disabled(store: &Store, username: &str, disable: bool) -> anyhow::Result<()> {
     let username = parse_username(username)?;
-    if !store.set_disabled(&username, disable).await? {
+    let Some(record) = store.user_credentials(&username).await? else {
         bail!("user {username} does not exist");
+    };
+    store.set_disabled(&username, disable).await?;
+    if disable {
+        store.delete_sessions_of(record.user.id).await?;
     }
     let state = if disable { "disabled" } else { "enabled" };
     println!("user {username} {state}");

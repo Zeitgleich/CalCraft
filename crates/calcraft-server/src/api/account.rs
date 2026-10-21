@@ -18,7 +18,9 @@ use calcraft_store::{RECOVERY_CODES, User};
 use super::{ApiError, ApiJson, SESSION_TTL, SessionUser, session_cookie};
 use crate::{
     app::AppState,
-    auth::{APP_PASSWORD_PREFIX, AuthOutcome, MAX_PASSWORD_LEN, PasswordError, hash_password, now},
+    auth::{
+        APP_PASSWORD_PREFIX, AuthOutcome, MAX_PASSWORD_LEN, PasswordError, hash_password_async, now,
+    },
     secrets::{base32_encode, hash_secret, random_bytes, random_token, totp_uri, totp_verify},
     validate::clean_text,
 };
@@ -39,23 +41,6 @@ fn parse_username(name: &str) -> Result<Username, ApiError> {
         .to_ascii_lowercase()
         .parse()
         .map_err(|_| ApiError::InvalidCredentials)
-}
-
-/// Verifies the account password without resetting the failure counter.
-async fn first_factor(
-    state: &AppState,
-    username: &Username,
-    password: &str,
-) -> Result<User, ApiError> {
-    if password.is_empty() || password.len() > MAX_PASSWORD_LEN {
-        return Err(ApiError::InvalidCredentials);
-    }
-    match state.auth.check_first_factor(username, password).await {
-        AuthOutcome::Authenticated(user) => Ok(user),
-        AuthOutcome::Denied => Err(ApiError::InvalidCredentials),
-        AuthOutcome::LockedOut => Err(ApiError::LockedOut),
-        AuthOutcome::Error => Err(ApiError::Internal),
-    }
 }
 
 /// Normalises a recovery code as typed by a user (`abcd-efgh-…`).
@@ -86,15 +71,32 @@ async fn second_factor(state: &AppState, user: &User, code: &str) -> Result<bool
 }
 
 /// Full authentication including the second factor, used by login and
-/// sensitive account changes. Failures of either factor count towards the
-/// lockout; the counter is only reset after both succeeded.
+/// sensitive account changes. One reserved attempt covers both factors, so
+/// concurrent requests cannot bypass the lockout; failures of either factor
+/// count, and the counter is only reset after both succeeded. A locked
+/// account looks exactly like wrong credentials.
 async fn authenticate(
     state: &AppState,
     username: &Username,
     password: &str,
     code: Option<&str>,
 ) -> Result<User, ApiError> {
-    let user = first_factor(state, username, password).await?;
+    if password.is_empty() || password.len() > MAX_PASSWORD_LEN {
+        return Err(ApiError::InvalidCredentials);
+    }
+    let Some(attempt) = state.auth.reserve(username) else {
+        state.auth.locked_out().await;
+        return Err(ApiError::InvalidCredentials);
+    };
+    let user = match state
+        .auth
+        .check_first_factor_reserved(&attempt, password)
+        .await
+    {
+        AuthOutcome::Authenticated(user) => user,
+        AuthOutcome::Denied | AuthOutcome::LockedOut => return Err(ApiError::InvalidCredentials),
+        AuthOutcome::Error => return Err(ApiError::Internal),
+    };
     if user.totp_enabled {
         let Some(code) = code else {
             return Err(ApiError::TotpRequired);
@@ -105,7 +107,17 @@ async fn authenticate(
         }
     }
     state.auth.clear_failures(username);
+    drop(attempt);
     Ok(user)
+}
+
+fn password_error(err: PasswordError) -> ApiError {
+    match err {
+        PasswordError::TooShort => ApiError::BadRequest("new password is too short"),
+        PasswordError::TooLong => ApiError::BadRequest("new password is too long"),
+        PasswordError::Reserved => ApiError::BadRequest("password must not start with ccap_"),
+        PasswordError::Hash => ApiError::Internal,
+    }
 }
 
 pub async fn login(
@@ -155,13 +167,16 @@ pub async fn change_password(
     ApiJson(request): ApiJson<ChangePassword>,
 ) -> Result<Response, ApiError> {
     let user = session.user;
-    first_factor(&state, &user.username, &request.current).await?;
-    state.auth.clear_failures(&user.username);
-    let hash = hash_password(&request.new).map_err(|err| match err {
-        PasswordError::TooShort => ApiError::BadRequest("new password is too short"),
-        PasswordError::TooLong => ApiError::BadRequest("new password is too long"),
-        PasswordError::Hash => ApiError::Internal,
-    })?;
+    authenticate(
+        &state,
+        &user.username,
+        &request.current,
+        request.code.as_deref(),
+    )
+    .await?;
+    let hash = hash_password_async(request.new)
+        .await
+        .map_err(password_error)?;
     state.store.set_password_hash(&user.username, &hash).await?;
     // All sessions end; the client has to log in again.
     state.store.delete_sessions_of(user.id).await?;

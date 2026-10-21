@@ -158,13 +158,26 @@ impl Store {
         password_hash: &str,
         display_name: Option<&str>,
     ) -> Result<User> {
+        self.create_user_with_role(username, password_hash, display_name, false)
+            .await
+    }
+
+    /// Like [`Store::create_user`], setting admin rights in the same transaction.
+    pub async fn create_user_with_role(
+        &self,
+        username: &Username,
+        password_hash: &str,
+        display_name: Option<&str>,
+        is_admin: bool,
+    ) -> Result<User> {
         let mut tx = self.pool.begin().await?;
         let result = sqlx::query(
-            "INSERT INTO users (username, password_hash, display_name) VALUES (?, ?, ?) RETURNING id",
+            "INSERT INTO users (username, password_hash, display_name, is_admin) VALUES (?, ?, ?, ?) RETURNING id",
         )
         .bind(username.as_str())
         .bind(password_hash)
         .bind(display_name)
+        .bind(is_admin)
         .fetch_one(&mut *tx)
         .await;
         let id: i64 = match result {
@@ -194,7 +207,7 @@ impl Store {
             username: username.clone(),
             display_name: display_name.map(str::to_owned),
             disabled: false,
-            is_admin: false,
+            is_admin,
             totp_enabled: false,
         })
     }
