@@ -585,20 +585,21 @@ clients that need it (e.g. `https://cal.example.com/dav/calendars/alice/default/
 
 ## 13. Backups
 
-All data is in the SQLite database. Back it up while CalCraft is running with
-SQLite's online backup (safe with the write-ahead log):
+All data is in the SQLite database. Back it up while CalCraft is running
+(consistent online snapshot, verified, written with permissions `0600`):
 
 ```bash
-sudo apt install -y sqlite3
+sudo install -d -m 0700 -o calcraft -g calcraft /var/lib/calcraft/backups
 ```
 
 ```bash
-sudo -u calcraft sqlite3 /var/lib/calcraft/calcraft.db ".backup '/var/lib/calcraft/backup.db'"
+sudo -u calcraft env CALCRAFT_CONFIG=/etc/calcraft/calcraft.toml calcraft backup /var/lib/calcraft/backups/calcraft-$(date +%F).db
 ```
 
-Copy `backup.db` to a safe place (e.g. with your regular backup tool) and keep
-several generations. Backups contain password hashes and all calendar data:
-store them encrypted and with restricted permissions.
+Copy the backups to a safe place (e.g. with your regular backup tool) and
+keep several generations. Backups contain password hashes and all calendar
+data: store them encrypted and with restricted permissions. A daily cron
+example and all details are in [`backup-and-upgrade.md`](backup-and-upgrade.md).
 
 Single calendars or address books can also be exported, e.g. as iCalendar:
 
@@ -606,32 +607,34 @@ Single calendars or address books can also be exported, e.g. as iCalendar:
 sudo -u calcraft env CALCRAFT_CONFIG=/etc/calcraft/calcraft.toml calcraft export --user alice --collection calendar/default --format ics -o /var/lib/calcraft/alice-default.ics
 ```
 
-To restore, stop CalCraft, replace the database file (and delete stale
-`calcraft.db-wal` / `calcraft.db-shm` files), fix the owner and start it
-again:
+To restore, stop CalCraft (`calcraft restore` refuses to run while the
+server has the database open), restore and start it again. The current
+database is kept as `calcraft.db.before-restore-<timestamp>`:
 
 ```bash
 sudo systemctl stop calcraft
 ```
 
 ```bash
-sudo install -m 0600 -o calcraft -g calcraft /path/to/backup.db /var/lib/calcraft/calcraft.db
-```
-
-```bash
-sudo rm -f /var/lib/calcraft/calcraft.db-wal /var/lib/calcraft/calcraft.db-shm
+sudo -u calcraft env CALCRAFT_CONFIG=/etc/calcraft/calcraft.toml calcraft restore /var/lib/calcraft/backups/calcraft-2026-10-21.db
 ```
 
 ```bash
 sudo systemctl start calcraft
 ```
 
-With Docker, run the backup command against the volume, e.g. by stopping the
-container and copying `/data/calcraft.db` out of the volume.
+With Docker, `docker exec calcraft calcraft backup /data/backup.db --force`
+writes a backup into the volume; to restore, stop the container and run
+`calcraft restore --yes /data/backup.db` in a one-off container on the same
+volume.
 
 ## 14. Updates
 
-1. Back up the database (section 13).
+1. Back up the database (section 13). In addition, CalCraft writes a
+   backup `calcraft.db.pre-migration-<version>-<timestamp>` next to the
+   database before applying migrations (the last 3 are kept).
+   If the running CalCraft predates `calcraft backup`, stop it before
+   installing the new version: older servers take no database lock.
 2. Update the code and rebuild (from source):
 
    ```bash
@@ -657,7 +660,12 @@ container and copying `/data/calcraft.db` out of the volume.
    With Docker: `git pull`, rebuild the image, then remove and re-create the
    container with the same `docker run` command (the volume keeps the data).
 3. Database migrations run automatically at startup. Check
-   `journalctl -u calcraft` and `curl -s http://127.0.0.1:5232/readyz`.
+   `journalctl -u calcraft` (`wrote pre-migration backup`,
+   `database migrations applied`) and `curl -s http://127.0.0.1:5232/readyz`.
+
+Migrations are forward-only. To roll back, stop the new version, install the
+old binary and restore the pre-migration backup; see
+[`backup-and-upgrade.md`](backup-and-upgrade.md#rollback).
 
 Security fixes are announced via GitHub security advisories; watch the
 repository (*Watch → Custom → Security alerts*).

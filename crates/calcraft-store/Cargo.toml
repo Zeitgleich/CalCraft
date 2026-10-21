@@ -12,6 +12,8 @@ authors.workspace = true
 calcraft-core.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tracing.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
