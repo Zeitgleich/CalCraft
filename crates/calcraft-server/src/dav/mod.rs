@@ -26,6 +26,7 @@ use calcraft_store::StoreError;
 
 use crate::{app::AppState, auth::AuthOutcome};
 
+pub(crate) use objects::{Rejection, Validated, check_object, etag};
 pub use paths::valid_item_name;
 
 const ALLOWED_METHODS: &str =

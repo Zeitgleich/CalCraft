@@ -2,11 +2,11 @@
 
 use crate::{IcalError, MAX_OBJECT_SIZE};
 
-const MAX_DEPTH: usize = 8;
+pub(crate) const MAX_DEPTH: usize = 8;
 const MAX_COMPONENTS: usize = 1_000;
 const MAX_PROPERTIES: usize = 10_000;
-const MAX_PARAMETERS: usize = 64;
-const MAX_NAME_LEN: usize = 128;
+pub(crate) const MAX_PARAMETERS: usize = 64;
+pub(crate) const MAX_NAME_LEN: usize = 128;
 
 /// A property parameter, e.g. `TZID=Europe/Berlin`. Values are unquoted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,16 +50,42 @@ impl Component {
     }
 }
 
+/// Resource limits for one parsed stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Limits {
+    pub max_size: usize,
+    pub max_components: usize,
+    pub max_properties: usize,
+}
+
+/// Limits for a single stored object (PUT).
+const OBJECT_LIMITS: Limits = Limits {
+    max_size: MAX_OBJECT_SIZE,
+    max_components: MAX_COMPONENTS,
+    max_properties: MAX_PROPERTIES,
+};
+
 /// Parses an iCalendar stream with exactly one top-level component.
 pub fn parse(data: &[u8]) -> Result<Component, IcalError> {
-    if data.len() > MAX_OBJECT_SIZE {
+    let mut roots = parse_with(data, &OBJECT_LIMITS, false)?;
+    roots.pop().ok_or(IcalError::Malformed("no component"))
+}
+
+/// Parses a stream with any number of top-level components (an import
+/// file: several `VCALENDAR`s or `VCARD`s), within `limits`.
+pub(crate) fn parse_all(data: &[u8], limits: &Limits) -> Result<Vec<Component>, IcalError> {
+    parse_with(data, limits, true)
+}
+
+fn parse_with(data: &[u8], limits: &Limits, many: bool) -> Result<Vec<Component>, IcalError> {
+    if data.len() > limits.max_size {
         return Err(IcalError::TooLarge);
     }
     let text = std::str::from_utf8(data).map_err(|_| IcalError::Malformed("not UTF-8"))?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
 
     let mut stack: Vec<Component> = Vec::new();
-    let mut root: Option<Component> = None;
+    let mut roots: Vec<Component> = Vec::new();
     let mut components = 0usize;
     let mut properties = 0usize;
 
@@ -68,7 +94,7 @@ pub fn parse(data: &[u8]) -> Result<Component, IcalError> {
         if line.is_empty() {
             continue;
         }
-        if root.is_some() {
+        if !many && !roots.is_empty() {
             return Err(IcalError::Malformed(
                 "content after the end of the calendar",
             ));
@@ -80,7 +106,7 @@ pub fn parse(data: &[u8]) -> Result<Component, IcalError> {
                     return Err(IcalError::Limit("components nested too deeply"));
                 }
                 components += 1;
-                if components > MAX_COMPONENTS {
+                if components > limits.max_components {
                     return Err(IcalError::Limit("too many components"));
                 }
                 stack.push(Component {
@@ -98,12 +124,12 @@ pub fn parse(data: &[u8]) -> Result<Component, IcalError> {
                 }
                 match stack.last_mut() {
                     Some(parent) => parent.components.push(component),
-                    None => root = Some(component),
+                    None => roots.push(component),
                 }
             }
             _ => {
                 properties += 1;
-                if properties > MAX_PROPERTIES {
+                if properties > limits.max_properties {
                     return Err(IcalError::Limit("too many properties"));
                 }
                 stack
@@ -117,7 +143,10 @@ pub fn parse(data: &[u8]) -> Result<Component, IcalError> {
     if !stack.is_empty() {
         return Err(IcalError::Malformed("unterminated component"));
     }
-    root.ok_or(IcalError::Malformed("no component"))
+    if roots.is_empty() {
+        return Err(IcalError::Malformed("no component"));
+    }
+    Ok(roots)
 }
 
 /// Splits into logical lines, joining folded continuation lines.
@@ -155,7 +184,7 @@ fn component_name(value: &str) -> Result<String, IcalError> {
     Ok(value.to_ascii_uppercase())
 }
 
-fn is_name(s: &str) -> bool {
+pub(crate) fn is_name(s: &str) -> bool {
     s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 

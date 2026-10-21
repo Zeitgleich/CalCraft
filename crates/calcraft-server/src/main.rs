@@ -1,3 +1,4 @@
+mod transfer_cmd;
 mod users;
 
 use std::{net::SocketAddr, path::PathBuf, process::ExitCode};
@@ -31,6 +32,22 @@ enum Command {
         config: ConfigArgs,
         #[command(subcommand)]
         command: users::UserCommand,
+    },
+    /// Write a calendar or address book to a file (ics, jcal, xcal, vcf,
+    /// jcard, csv).
+    Export {
+        #[command(flatten)]
+        config: ConfigArgs,
+        #[command(flatten)]
+        args: transfer_cmd::ExportArgs,
+    },
+    /// Import a file into a calendar or address book. Every object is
+    /// validated like a DAV upload.
+    Import {
+        #[command(flatten)]
+        config: ConfigArgs,
+        #[command(flatten)]
+        args: transfer_cmd::ImportArgs,
     },
 }
 
@@ -92,6 +109,20 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             runtime()?.block_on(async {
                 let store = open_store(&config).await?;
                 users::run(&store, command).await
+            })
+        }
+        Command::Export { config, args } => {
+            let config = Config::load(config.config.as_deref())?;
+            runtime()?.block_on(async {
+                let store = open_store(&config).await?;
+                transfer_cmd::export(&store, args).await
+            })
+        }
+        Command::Import { config, args } => {
+            let config = Config::load(config.config.as_deref())?;
+            runtime()?.block_on(async {
+                let store = open_store(&config).await?;
+                transfer_cmd::import(&store, args).await
             })
         }
     }

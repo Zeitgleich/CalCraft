@@ -34,6 +34,17 @@ allow = [
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Single XML parser rule: all XML (DAV bodies, xCal) goes through
+# calcraft_ical::xml on top of quick-xml. No second XML parser.
+deny = [
+    { name = "xml-rs" },
+    { name = "xml5ever" },
+    { name = "roxmltree" },
+    { name = "xmltree" },
+    { name = "libxml" },
+    { name = "sxd-document" },
+    { name = "minidom" },
+]
 
 [sources]
 unknown-registry = "deny"
