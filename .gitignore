@@ -4,3 +4,4 @@
 *.db-wal
 /calcraft.toml
 .DS_Store
+/crates/calcraft-ui/dist

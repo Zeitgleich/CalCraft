@@ -147,3 +147,122 @@ async fn api_can_be_disabled() {
         StatusCode::NOT_FOUND
     );
 }
+
+#[cfg(feature = "web-ui")]
+async fn body_text(response: axum::response::Response) -> String {
+    use http_body_util::BodyExt;
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    String::from_utf8(body.to_vec()).unwrap()
+}
+
+/// Asset file names referenced as `"/assets/<name>"` or `"./<name>"`.
+#[cfg(feature = "web-ui")]
+fn referenced_assets(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for prefix in ["\"/assets/", "\"./"] {
+        for part in text.split(prefix).skip(1) {
+            if let Some((name, _)) = part.split_once('"') {
+                names.push(name.to_owned());
+            }
+        }
+    }
+    names
+}
+
+#[cfg(feature = "web-ui")]
+#[tokio::test]
+async fn web_ui_shell_and_assets() {
+    use calcraft_server::security::CSP;
+
+    let app = app(&Config::default()).await;
+    let response = get(&app, "/").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers();
+    assert_eq!(headers[header::CONTENT_TYPE], "text/html; charset=utf-8");
+    assert_eq!(headers[header::CACHE_CONTROL], "no-cache");
+    assert_eq!(headers[header::CONTENT_SECURITY_POLICY], CSP);
+    let html = body_text(response).await;
+    assert!(!html.contains("style="), "inline style attribute");
+    assert!(!html.contains("<style"), "inline stylesheet");
+
+    let mut pending = referenced_assets(&html);
+    if !calcraft_web::ASSETS_EMBEDDED {
+        assert!(pending.is_empty(), "placeholder must not reference assets");
+        return;
+    }
+    // Follow the references of the page and of the bootstrap script.
+    let mut seen = Vec::new();
+    while let Some(name) = pending.pop() {
+        if seen.contains(&name) {
+            continue;
+        }
+        let response = get(&app, &format!("/assets/{name}")).await;
+        assert_eq!(response.status(), StatusCode::OK, "{name}");
+        let headers = response.headers();
+        let expected = match name.rsplit_once('.').map(|(_, ext)| ext) {
+            Some("js") => "text/javascript; charset=utf-8",
+            Some("wasm") => "application/wasm",
+            Some("css") => "text/css; charset=utf-8",
+            other => panic!("unexpected asset type {other:?}"),
+        };
+        assert_eq!(headers[header::CONTENT_TYPE], expected, "{name}");
+        assert_eq!(
+            headers[header::CACHE_CONTROL],
+            "public, max-age=31536000, immutable",
+            "{name}"
+        );
+        assert_eq!(headers[header::CONTENT_SECURITY_POLICY], CSP, "{name}");
+        assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        if name.starts_with("boot-") {
+            pending.extend(referenced_assets(&body_text(response).await));
+        }
+        seen.push(name);
+    }
+    // Page -> stylesheet and bootstrap; bootstrap -> glue and module.
+    assert_eq!(seen.len(), 4, "{seen:?}");
+    assert_eq!(seen.len(), calcraft_web::assets().len());
+}
+
+#[cfg(feature = "web-ui")]
+#[tokio::test]
+async fn web_ui_assets_unknown_or_disabled() {
+    let mut config = Config::default();
+    let app_on = app(&config).await;
+    for uri in [
+        "/assets/app.js",
+        "/assets/nope-0000000000000000.js",
+        "/assets/",
+    ] {
+        assert_eq!(
+            get(&app_on, uri).await.status(),
+            StatusCode::NOT_FOUND,
+            "{uri}"
+        );
+    }
+
+    config.web_ui.enabled = false;
+    let app_off = app(&config).await;
+    for asset in calcraft_web::assets() {
+        let uri = format!("/assets/{}", asset.name);
+        assert_eq!(get(&app_on, &uri).await.status(), StatusCode::OK, "{uri}");
+        assert_eq!(
+            get(&app_off, &uri).await.status(),
+            StatusCode::NOT_FOUND,
+            "{uri}"
+        );
+    }
+}
+
+#[cfg(not(feature = "web-ui"))]
+#[tokio::test]
+async fn no_web_ui_without_feature() {
+    let app = app(&Config::default()).await;
+    for uri in ["/", "/assets/app.js"] {
+        assert_eq!(
+            get(&app, uri).await.status(),
+            StatusCode::NOT_FOUND,
+            "{uri}"
+        );
+    }
+}

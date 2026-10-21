@@ -2,3 +2,4 @@ target
 .git
 *.db
 calcraft.toml
+crates/calcraft-ui/dist
