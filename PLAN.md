@@ -3,6 +3,9 @@
 Selbst gehosteter CalDAV-/CardDAV-Server in Rust mit optionaler Web-Oberfläche.
 Alternative zu Radicale und Baïkal. Lizenz: **AGPL-3.0-or-later**.
 
+**Freigabe:** Anforderungen, Ist-Stand und Fahrplan bis zur stabilen Version stehen in
+[docs/produktionsreife.md](docs/produktionsreife.md) und haben Vorrang vor neuen Funktionen.
+
 ## 1. Ziele
 
 - Ein einziges, statisch gelinktes Binary (optional Docker-Image).
