@@ -82,10 +82,13 @@ oder kann offline mit einem heruntergeladenen Bundle arbeiten
 
 ## 3. Docker-Image
 
-Das Image ist per Digest mit cosign (keyless) signiert. Die Signatur prüfen:
+Das Image ist per Digest mit cosign (keyless) signiert. Den Digest nennen die
+Release-Notes (`Image: … = ghcr.io/zeitgleich/calcraft@sha256:…`). Geprüft
+wird immer per Digest, denn ein Tag könnte nachträglich auf ein anderes Image
+zeigen:
 
 ```bash
-cosign verify ghcr.io/zeitgleich/calcraft:1.2.3 \
+cosign verify ghcr.io/zeitgleich/calcraft@sha256:<digest> \
   --certificate-identity-regexp '^https://github\.com/Zeitgleich/CalCraft/\.github/workflows/release\.yml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
@@ -96,13 +99,13 @@ Für genau ein Release statt des regulären Ausdrucks:
 Die Build-Provenance des Images:
 
 ```bash
-gh attestation verify oci://ghcr.io/zeitgleich/calcraft:1.2.3 \
+gh attestation verify oci://ghcr.io/zeitgleich/calcraft@sha256:<digest> \
   --repo Zeitgleich/CalCraft
 ```
 
-Beide Befehle geben den geprüften Digest (`sha256:…`) aus. Im Betrieb das
-Image **per Digest** einbinden, damit ein später verschobenes Tag nichts
-ändert:
+Die Pipeline überschreibt keine vorhandenen Versions-Tags und bricht ab, wenn
+es das Release schon gibt. Trotzdem das Image im Betrieb **per Digest**
+einbinden, damit ein verschobenes Tag nichts ändert:
 
 ```bash
 docker pull ghcr.io/zeitgleich/calcraft@sha256:<digest>

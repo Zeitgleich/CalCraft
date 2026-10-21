@@ -42,6 +42,8 @@ jobs:
           EVENT: ${{ github.event_name }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           crate=$(cargo metadata --no-deps --format-version 1 --locked \
             | jq -r '.packages[] | select(.name == "calcraft-server") | .version')
@@ -53,6 +55,11 @@ jobs:
             version=${REF_NAME#v}
             if [ "$version" != "$crate" ]; then
               echo "::error::tag $REF_NAME does not match the workspace version $crate in Cargo.toml"
+              exit 1
+            fi
+            # A re-run must not repoint published tags to a rebuilt image.
+            if gh release view "$REF_NAME" >/dev/null 2>&1; then
+              echo "::error::release $REF_NAME already exists; publish a new version instead of re-running"
               exit 1
             fi
             publish=true
@@ -260,6 +267,8 @@ jobs:
     needs: [meta, docker]
     if: needs.meta.outputs.publish == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.index.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -284,6 +293,10 @@ jobs:
           VERSION: ${{ needs.meta.outputs.version }}
         working-directory: ${{ runner.temp }}/digests
         run: |
+          if docker buildx imagetools inspect "$IMAGE:$VERSION" >/dev/null 2>&1; then
+            echo "::error::$IMAGE:$VERSION already exists; refusing to overwrite it"
+            exit 1
+          fi
           set --
           for tag in $(printf '%s' "$TAGS" | tr ',' ' '); do
             set -- "$@" --tag "$tag"
@@ -327,6 +340,7 @@ jobs:
           TAG: ${{ github.ref_name }}
           VERSION: ${{ needs.meta.outputs.version }}
           PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+          DIGEST: ${{ needs.docker-manifest.outputs.digest }}
         run: |
           cat > "$RUNNER_TEMP/notes.md" <<EOF
           ## Verification
@@ -338,11 +352,13 @@ jobs:
           \`\`\`sh
           sha256sum --ignore-missing -c SHA256SUMS
           gh attestation verify calcraft-$VERSION-x86_64-unknown-linux-gnu.tar.gz --repo Zeitgleich/CalCraft
-          gh attestation verify oci://$IMAGE:$VERSION --repo Zeitgleich/CalCraft
-          cosign verify $IMAGE:$VERSION \\
+          gh attestation verify oci://$IMAGE@$DIGEST --repo Zeitgleich/CalCraft
+          cosign verify $IMAGE@$DIGEST \\
             --certificate-identity "https://github.com/Zeitgleich/CalCraft/.github/workflows/release.yml@refs/tags/$TAG" \\
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
           \`\`\`
+
+          Image: \`$IMAGE:$VERSION\` = \`$IMAGE@$DIGEST\`
           EOF
           set -- --verify-tag --title "CalCraft $VERSION" --generate-notes --notes-file "$RUNNER_TEMP/notes.md"
           if [ "$PRERELEASE" = true ]; then

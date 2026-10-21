@@ -50,7 +50,9 @@ das GitHub-Release an. Lokal wird nichts gebaut oder signiert.
 
 - Fehlgeschlagener Lauf vor dem Release-Job: Ursache beheben, Tag löschen
   (`git push origin :refs/tags/v1.2.3`, lokal `git tag -d v1.2.3`) und neu
-  setzen. Bereits gepushte Image-Digests sind dann ungetaggt und können im
-  Paket gelöscht werden.
+  setzen. Lief der Job `docker manifest` schon durch, existiert das
+  Image-Tag bereits und die Pipeline verweigert das Überschreiben: dann die
+  Paketversion in GHCR löschen oder gleich eine neue Patch-Version
+  herausgeben.
 - Veröffentlichte Releases nicht überschreiben: stattdessen eine neue
   Patch-Version herausgeben.
