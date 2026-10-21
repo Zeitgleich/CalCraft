@@ -96,6 +96,12 @@ pub struct Store {
 impl Store {
     /// Opens (and creates, if missing) the database file and applies migrations.
     pub async fn open(path: &Path) -> Result<Self> {
+        // SQLite keeps recent pages (including password hashes) in the
+        // -wal and -shm files and reuses existing files with their
+        // permissions, so all three are created owner-only up front.
+        for file in database_files(path) {
+            create_private(&file)?;
+        }
         let options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
@@ -106,8 +112,11 @@ impl Store {
             .max_connections(8)
             .connect_with(options)
             .await?;
-        restrict_permissions(path)?;
-        Self::init(pool).await
+        let store = Self::init(pool).await?;
+        for file in database_files(path) {
+            restrict_permissions(&file)?;
+        }
+        Ok(store)
     }
 
     /// Opens a private in-memory database, for tests.
@@ -296,15 +305,49 @@ pub(crate) fn collection_from_row(row: &SqliteRow) -> Result<Collection> {
     })
 }
 
-/// Makes the database file readable by the owner only.
+/// The database file and its WAL companions.
+fn database_files(path: &Path) -> [std::path::PathBuf; 3] {
+    let with_suffix = |suffix: &str| {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        std::path::PathBuf::from(name)
+    };
+    [path.to_path_buf(), with_suffix("-wal"), with_suffix("-shm")]
+}
+
+/// Creates an empty file with owner-only permissions if it does not exist.
+#[cfg(unix)]
+fn create_private(path: &Path) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(err) => Err(StoreError::Permissions(err)),
+    }
+}
+
+/// On Windows the files inherit the ACL of their directory.
+#[cfg(not(unix))]
+fn create_private(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Makes a file readable by the owner only, if it exists.
 #[cfg(unix)]
 fn restrict_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .map_err(StoreError::Permissions)
+    match std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(StoreError::Permissions(err)),
+    }
 }
 
-/// On Windows the file inherits the ACL of its directory.
 #[cfg(not(unix))]
 fn restrict_permissions(_path: &Path) -> Result<()> {
     Ok(())
@@ -415,8 +458,14 @@ mod tests {
         let path = dir.join("test.db");
         let store = Store::open(&path).await.unwrap();
         store.ping().await.unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
+        store
+            .create_user(&name("walcheck"), "secret-hash", None)
+            .await
+            .unwrap();
+        for file in database_files(&path) {
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "{}", file.display());
+        }
         drop(store);
         std::fs::remove_dir_all(&dir).unwrap();
     }
