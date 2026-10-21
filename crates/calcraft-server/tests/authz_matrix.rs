@@ -1282,6 +1282,14 @@ mod api_matrix {
             self
         }
 
+        fn raw(mut self, content_type: &'static str, text: &str) -> Self {
+            self.body = Some(Payload {
+                content_type,
+                text: text.to_owned(),
+            });
+            self
+        }
+
         fn public(mut self, anonymous: u16) -> Self {
             self.public = true;
             self.anonymous = anonymous;
@@ -1320,6 +1328,14 @@ mod api_matrix {
             case("patch", "/v1/collections/{kind}/{slug}", 404)
                 .uri(bob_cal.clone(), no_cal.clone())
                 .body(json!({"display_name": "zzattack"})),
+            case("get", "/v1/collections/{kind}/{slug}/export", 404)
+                .uri(format!("{bob_cal}/export"), format!("{no_cal}/export")),
+            case("post", "/v1/collections/{kind}/{slug}/import", 404)
+                .uri(format!("{bob_cal}/import"), format!("{no_cal}/import"))
+                .raw(
+                    "text/calendar",
+                    &super::event("zzattack-import", "zzattack"),
+                ),
             case("delete", "/v1/collections/{kind}/{slug}", 404).uri(bob_cal, no_cal),
             case("get", "/v1/admin/users", 403),
             case("post", "/v1/admin/users", 403).body(json!({
