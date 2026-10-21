@@ -19,12 +19,20 @@ api = ["dep:calcraft-api"]
 
 [dependencies]
 anyhow.workspace = true
+argon2.workspace = true
 axum.workspace = true
+base64.workspace = true
+blake3.workspace = true
+bytes.workspace = true
 calcraft-api = { workspace = true, optional = true }
 calcraft-core.workspace = true
+calcraft-dav.workspace = true
+calcraft-store.workspace = true
 calcraft-web = { workspace = true, optional = true }
 clap.workspace = true
 figment.workspace = true
+getrandom.workspace = true
+rpassword.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

@@ -99,6 +99,21 @@ Ohne Feature ist der Code nicht im Binary (kleinere Angriffsfläche).
 - Audit-Log für sicherheitsrelevante Aktionen.
 - Mandanten-Isolation in jeder Query, mit eigenen Tests.
 
+**Lehren aus früheren Angriffen** (Details: [docs/security/angriffshistorie.md](docs/security/angriffshistorie.md)):
+- Zentrale Autorisierungsschicht: jede Abfrage ist auf den anfragenden Benutzer beschränkt, auch PROPPATCH,
+  REPORT/multiget pro Objekt, sync-token, Papierkorb/Hard-Delete und MOVE/COPY-Ziel; ACL-Properties sind read-only.
+  Testmatrix Methode × Ressource × Rolle.
+- Recurrence-Budget (Instanzen, Zeitfenster, COUNT/INTERVAL/SECONDLY, VALARM REPEAT); derselbe Parser für
+  Validierung und Expansion; keine Panics auf Eingaben.
+- Web-UI rendert Kalenderdaten nur als Text, URI-Schema-Allowlist, Fotos nie ungeprüft als `image/*`.
+- DAV-Endpunkte akzeptieren keine Cookie-Sessions; absolute URLs nur aus `public_base_url`.
+- Tokens ≥ 128 Bit, nur gehasht gespeichert; bei aktivierter 2FA Basic Auth nur mit App-Passwörtern.
+- OIDC: state, nonce, PKCE, exakte Redirect-URI, kein Account-Linking über E-Mail-Gleichheit.
+- iTIP/iMIP: ORGANIZER muss verifizierte Absenderadresse sein, Rate-Limits für Einladungen.
+- Webcal-Fetcher: DNS-Pinning, alle privaten/gemappten Bereiche blocken, jeden Redirect neu prüfen.
+- CSV-Export mit Formel-Escaping, verschlüsselte Backups.
+- Die Regressionstests aus Abschnitt 5 des Berichts werden im jeweiligen Meilenstein übernommen.
+
 **AGPL §13:** Die Web-UI zeigt einen Link auf den Quellcode der laufenden Version.
 
 ## 5. Formate
@@ -151,8 +166,8 @@ Der Client-Track startet nach M4 (wenn Web-UI-Komponenten existieren).
 
 | | Inhalt |
 |---|---|
-| **M0** | Workspace, Lizenz, Doku, CI auf Linux/macOS/Windows (fmt, clippy, test, deny), Dockerfile, Server-Grundgerüst mit Config, Feature-Flags, Security-Headern, Health-Endpunkten, `.well-known` |
-| **M1** | WebDAV-Kern: OPTIONS, PROPFIND (Depth 0/1), Principal Discovery, Basic Auth, Storage (SQLite) |
+| **M0** ✅ | Workspace, Lizenz, Doku, CI auf Linux/macOS/Windows (fmt, clippy, test, deny), Dockerfile, Server-Grundgerüst mit Config, Feature-Flags, Security-Headern, Health-Endpunkten, `.well-known` |
+| **M1** ✅ | WebDAV-Kern: OPTIONS, PROPFIND (Depth 0/1), Principal Discovery, Basic Auth, Storage (SQLite) |
 | **M2** | CalDAV: MKCALENDAR, PUT/GET/DELETE mit Preconditions, calendar-query, calendar-multiget; Parser-Limits + Fuzzing |
 | **M3** | sync-collection, CardDAV |
 | **M4** | REST-API + OpenAPI, lokale Auth mit 2FA, App-Passwörter, Web-UI Stufe 1–2 |

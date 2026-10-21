@@ -1,11 +1,13 @@
 //! CalCraft server: configuration, HTTP routing and middleware.
 
 pub mod app;
+pub mod auth;
 pub mod config;
+pub mod dav;
 pub mod security;
 pub mod telemetry;
 
-pub use app::router;
+pub use app::{AppState, router};
 pub use config::Config;
 
 /// Whether the web UI is compiled into this binary.

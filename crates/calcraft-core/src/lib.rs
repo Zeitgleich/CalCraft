@@ -2,6 +2,10 @@
 //!
 //! This crate must stay free of I/O so it can be compiled for `wasm32`.
 
+mod names;
+
+pub use names::{CollectionKind, InvalidName, Slug, Username};
+
 /// Product name.
 pub const NAME: &str = "CalCraft";
 

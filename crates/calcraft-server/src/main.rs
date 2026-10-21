@@ -1,7 +1,10 @@
+mod users;
+
 use std::{net::SocketAddr, path::PathBuf, process::ExitCode};
 
 use anyhow::Context;
-use calcraft_server::{API_COMPILED, Config, WEB_UI_COMPILED, telemetry};
+use calcraft_server::{API_COMPILED, AppState, Config, WEB_UI_COMPILED, telemetry};
+use calcraft_store::Store;
 use clap::{Args, Parser, Subcommand};
 use tokio::net::TcpListener;
 
@@ -22,6 +25,13 @@ enum Command {
     Serve(ServeArgs),
     /// Validate the configuration and print the effective values.
     CheckConfig(ConfigArgs),
+    /// Manage local user accounts.
+    User {
+        #[command(flatten)]
+        config: ConfigArgs,
+        #[command(subcommand)]
+        command: users::UserCommand,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -75,11 +85,31 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 config.api.enabled = false;
             }
             telemetry::init(&config.logging)?;
-            tokio::runtime::Runtime::new()
-                .context("failed to start async runtime")?
-                .block_on(serve(config))
+            runtime()?.block_on(serve(config))
+        }
+        Command::User { config, command } => {
+            let config = Config::load(config.config.as_deref())?;
+            runtime()?.block_on(async {
+                let store = open_store(&config).await?;
+                users::run(&store, command).await
+            })
         }
     }
+}
+
+fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Runtime::new().context("failed to start async runtime")
+}
+
+async fn open_store(config: &Config) -> anyhow::Result<Store> {
+    Store::open(&config.storage.database)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to open database {}",
+                config.storage.database.display()
+            )
+        })
 }
 
 async fn serve(config: Config) -> anyhow::Result<()> {
@@ -92,6 +122,15 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         );
     }
 
+    if !config.server.bind.ip().is_loopback() && !config.security.hsts {
+        tracing::warn!(
+            bind = %config.server.bind,
+            "listening on a non-loopback address: DAV clients send passwords with HTTP Basic \
+             authentication, so serve CalCraft only behind TLS (reverse proxy) and set security.hsts = true"
+        );
+    }
+
+    let state = AppState::new(open_store(&config).await?)?;
     let listener = TcpListener::bind(config.server.bind)
         .await
         .with_context(|| format!("failed to bind {}", config.server.bind))?;
@@ -103,7 +142,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         calcraft_core::VERSION,
     );
 
-    axum::serve(listener, calcraft_server::router(&config))
+    axum::serve(listener, calcraft_server::router(&config, state))
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server error")?;
