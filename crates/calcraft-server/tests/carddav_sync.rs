@@ -456,7 +456,7 @@ async fn sync_tokens_cannot_cross_collections() {
 }
 
 #[tokio::test]
-async fn sync_respects_client_limit() {
+async fn sync_truncates_and_continues() {
     let app = app().await;
     for i in 0..3 {
         put(
@@ -473,8 +473,67 @@ async fn sync_respects_client_limit() {
         )
         .await;
     }
-    let body = r#"<d:sync-collection xmlns:d="DAV:"><d:sync-token/><d:sync-level>1</d:sync-level><d:limit><d:nresults>2</d:nresults></d:limit><d:prop><d:getetag/></d:prop></d:sync-collection>"#;
-    let reply = send(&app, ALICE, "REPORT", CAL, &[], body).await;
-    assert_eq!(reply.status, StatusCode::INSUFFICIENT_STORAGE);
-    assert!(reply.body.contains("number-of-matches-within-limits"));
+    let limited = |token: &str| {
+        format!(
+            r#"<d:sync-collection xmlns:d="DAV:"><d:sync-token>{token}</d:sync-token><d:sync-level>1</d:sync-level><d:limit><d:nresults>2</d:nresults></d:limit><d:prop><d:getetag/></d:prop></d:sync-collection>"#
+        )
+    };
+    // First page: two objects plus a 507 entry for the collection.
+    let first = send(&app, ALICE, "REPORT", CAL, &[], &limited("")).await;
+    assert_eq!(first.status, StatusCode::MULTI_STATUS);
+    assert!(
+        first.body.contains("e0.ics") && first.body.contains("e1.ics"),
+        "{}",
+        first.body
+    );
+    assert!(!first.body.contains("e2.ics"), "{}", first.body);
+    assert!(
+        first.body.contains("<d:href>/dav/calendars/alice/default/</d:href><d:status>HTTP/1.1 507 Insufficient Storage</d:status>"),
+        "{}",
+        first.body
+    );
+    // Second page continues exactly after the first.
+    let second = send(
+        &app,
+        ALICE,
+        "REPORT",
+        CAL,
+        &[],
+        &limited(&token_of(&first.body)),
+    )
+    .await;
+    assert!(second.body.contains("e2.ics"), "{}", second.body);
+    assert!(
+        !second.body.contains("e0.ics") && !second.body.contains("507"),
+        "{}",
+        second.body
+    );
+    // Fully synced: nothing left.
+    let third = send(
+        &app,
+        ALICE,
+        "REPORT",
+        CAL,
+        &[],
+        &sync_body(&token_of(&second.body)),
+    )
+    .await;
+    assert!(!third.body.contains("<d:response>"), "{}", third.body);
+}
+
+#[tokio::test]
+async fn token_of_deleted_collection_is_rejected_for_new_one() {
+    let app = app().await;
+    let uri = "/dav/calendars/alice/temp/";
+    send(&app, ALICE, "MKCALENDAR", uri, &[], "").await;
+    let old = token_of(
+        &send(&app, ALICE, "REPORT", uri, &[], &sync_body(""))
+            .await
+            .body,
+    );
+    send(&app, ALICE, "DELETE", uri, &[], "").await;
+    send(&app, ALICE, "MKCALENDAR", uri, &[], "").await;
+    let reply = send(&app, ALICE, "REPORT", uri, &[], &sync_body(&old)).await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    assert!(reply.body.contains("valid-sync-token"));
 }

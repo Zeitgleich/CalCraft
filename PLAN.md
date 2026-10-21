@@ -202,8 +202,11 @@ Der Client-Track startet nach M4 (wenn Web-UI-Komponenten existieren).
 - Unbekannte Properties bei MKCALENDAR (z. B. `calendar-order`) werden nicht gespeichert.
 - `addressbook-query` unterstützt nur einen leeren Filter (alle Kontakte); Filter werden mit
   `CARDDAV:supported-filter` abgelehnt.
-- `sync-collection` nur mit `sync-level` 1; bei Überschreitung von `nresults` oder der Server-Grenze
-  kommt 507 statt einer abgeschnittenen Antwort. Tombstones werden derzeit unbegrenzt aufbewahrt.
+- `sync-collection` nur mit `sync-level` 1. Große Ergebnisse werden abgeschnitten (507-Eintrag) und
+  mit dem gelieferten Token fortgesetzt. Das Änderungsprotokoll hält nur die letzte Änderung pro Objekt;
+  höchstens 10 000 Tombstones pro Collection, ältere Tokens erzwingen eine Neusynchronisation.
+- `calendar-query` / `addressbook-query` liefern höchstens 5 000 Objekte bzw. 32 MiB Daten, danach
+  eine abgeschnittene Antwort mit 507-Eintrag.
 
 ## 13. Offene Entscheidungen
 

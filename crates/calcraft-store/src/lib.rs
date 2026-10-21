@@ -14,7 +14,7 @@ use sqlx::{
 
 mod items;
 
-pub use items::{Item, ItemMeta, NewItem, Precondition, PutOutcome};
+pub use items::{Change, Item, ItemMeta, NewItem, Precondition, PutOutcome};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -85,6 +85,10 @@ pub struct Collection {
     pub sync_revision: i64,
     /// Comma-separated component types, e.g. `VEVENT,VTODO`.
     pub components: String,
+    /// Oldest revision a sync token may refer to (older tombstones were pruned).
+    pub sync_floor: i64,
+    /// Random value bound into sync tokens.
+    pub token_salt: i64,
 }
 
 /// Handle to the database. Cheap to clone.
@@ -169,7 +173,7 @@ impl Store {
             (CollectionKind::Addressbook, "Contacts"),
         ] {
             sqlx::query(
-                "INSERT INTO collections (owner_id, kind, slug, display_name) VALUES (?, ?, ?, ?)",
+                "INSERT INTO collections (owner_id, kind, slug, display_name, token_salt) VALUES (?, ?, ?, ?, abs(random()))",
             )
             .bind(id)
             .bind(kind.as_str())
@@ -243,7 +247,7 @@ impl Store {
         kind: CollectionKind,
     ) -> Result<Vec<Collection>> {
         let rows = sqlx::query(
-            "SELECT id, owner_id, kind, slug, display_name, description, color, sync_revision, components \
+            "SELECT id, owner_id, kind, slug, display_name, description, color, sync_revision, components, sync_floor, token_salt \
              FROM collections WHERE owner_id = ? AND kind = ? ORDER BY slug",
         )
         .bind(owner_id)
@@ -261,7 +265,7 @@ impl Store {
         slug: &Slug,
     ) -> Result<Option<Collection>> {
         let row = sqlx::query(
-            "SELECT id, owner_id, kind, slug, display_name, description, color, sync_revision, components \
+            "SELECT id, owner_id, kind, slug, display_name, description, color, sync_revision, components, sync_floor, token_salt \
              FROM collections WHERE owner_id = ? AND kind = ? AND slug = ?",
         )
         .bind(owner_id)
@@ -302,6 +306,8 @@ pub(crate) fn collection_from_row(row: &SqliteRow) -> Result<Collection> {
         color: row.try_get("color")?,
         sync_revision: row.try_get("sync_revision")?,
         components: row.try_get("components")?,
+        sync_floor: row.try_get("sync_floor")?,
+        token_salt: row.try_get("token_salt")?,
     })
 }
 
