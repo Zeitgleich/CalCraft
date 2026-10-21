@@ -1224,6 +1224,21 @@ mod api_matrix {
 
     use super::{BOB_PW, Fixture, Reply, fixture, send, session, snapshot};
 
+    /// A request body with its content type.
+    struct Payload {
+        content_type: &'static str,
+        text: String,
+    }
+
+    impl From<Value> for Payload {
+        fn from(value: Value) -> Self {
+            Self {
+                content_type: "application/json",
+                text: value.to_string(),
+            }
+        }
+    }
+
     /// One REST route, as alice (no admin) would use it against bob.
     struct ApiCase {
         method: &'static str,
@@ -1233,7 +1248,7 @@ mod api_matrix {
         /// The same request for a resource that does not exist: the answer
         /// must be identical.
         missing: Option<String>,
-        body: Option<Value>,
+        body: Option<Payload>,
         /// Reachable without a session.
         public: bool,
         /// Status without a session.
@@ -1263,7 +1278,7 @@ mod api_matrix {
         }
 
         fn body(mut self, body: Value) -> Self {
-            self.body = Some(body);
+            self.body = Some(body.into());
             self
         }
 
@@ -1328,7 +1343,7 @@ mod api_matrix {
         uri: &str,
         cookie: Option<&str>,
         csrf: bool,
-        body: Option<&Value>,
+        body: Option<&Payload>,
     ) -> (String, Reply) {
         let mut headers = Vec::new();
         if csrf {
@@ -1337,12 +1352,12 @@ mod api_matrix {
         if let Some(token) = cookie {
             headers.push(("cookie".to_owned(), format!("calcraft_session={token}")));
         }
-        let body = body.map(Value::to_string).unwrap_or_default();
-        if !body.is_empty() {
-            headers.push(("content-type".to_owned(), "application/json".to_owned()));
+        if let Some(body) = body {
+            headers.push(("content-type".to_owned(), body.content_type.to_owned()));
         }
+        let body = body.map(|b| b.text.as_str()).unwrap_or_default();
         let method = method.to_ascii_uppercase();
-        let reply = send(&fx.app, &method, uri, &headers, &body).await;
+        let reply = send(&fx.app, &method, uri, &headers, body).await;
         (format!("{method} {uri} {headers:?} {body}"), reply)
     }
 
@@ -1485,7 +1500,7 @@ mod api_matrix {
 
         // A non-admin cannot promote herself.
         let alice2 = session(&fx.store, &fx.alice).await;
-        let promote = json!({"is_admin": true});
+        let promote: Payload = json!({"is_admin": true}).into();
         let (_, reply) = call(
             &fx,
             "patch",
@@ -1517,7 +1532,7 @@ mod api_matrix {
             "/api/v1/admin/users/nobody-zz",
             Some(&admin_session),
             true,
-            Some(&json!({"disabled": true})),
+            Some(&json!({"disabled": true}).into()),
         )
         .await;
         assert_eq!(reply.status, 404);
