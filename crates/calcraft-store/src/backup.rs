@@ -236,6 +236,31 @@ fn connect_options(path: &Path) -> SqliteConnectOptions {
         .busy_timeout(Duration::from_secs(5))
 }
 
+async fn connect_pool(path: &Path, max_connections: u32) -> Result<SqlitePool> {
+    Ok(sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(max_connections)
+        .connect_with(connect_options(path).create_if_missing(true))
+        .await?)
+}
+
+/// `true` if the database contains any schema object (tables, indexes, …).
+async fn has_schema(pool: &SqlitePool) -> Result<bool> {
+    Ok(sqlx::query("SELECT 1 FROM sqlite_master LIMIT 1")
+        .fetch_optional(pool)
+        .await?
+        .is_some())
+}
+
+/// Migration state of an opened database: pending versions, or an error if
+/// this build must not touch it.
+async fn check_database(pool: &SqlitePool, path: &Path) -> Result<Vec<i64>> {
+    match pool_applied(pool).await? {
+        Some(applied) => pending_migrations(&applied),
+        None if has_schema(pool).await? => Err(StoreError::NotCalcraft(path.display().to_string())),
+        None => Ok(known_versions().collect()),
+    }
+}
+
 impl Store {
     /// Opens (and creates, if missing) the database file, holding the shared
     /// process lock, and applies pending migrations.
@@ -243,8 +268,16 @@ impl Store {
     /// Migrations need the exclusive lock, i.e. no other CalCraft process
     /// may use the database. Before migrating an existing database a backup
     /// `<database>.pre-migration-<version>-<timestamp>` is written; if that
-    /// fails, nothing is migrated. A database migrated by a newer version
-    /// is refused.
+    /// fails, nothing is migrated. A database migrated by a newer version,
+    /// and a non-empty SQLite file that is not a CalCraft database, are
+    /// refused.
+    ///
+    /// Connections exist only while this process holds a lock: to switch
+    /// between shared and exclusive (which the OS cannot do atomically), all
+    /// connections are closed first and the database is opened again after
+    /// the new lock is held. A restore that runs in such a gap therefore
+    /// never replaces the file under an open connection; the state is simply
+    /// checked again on the restored file.
     pub async fn open_with(path: &Path, options: &StoreOptions) -> Result<Self> {
         // SQLite keeps recent pages (including password hashes) in the
         // -wal and -shm files and reuses existing files with their
@@ -253,65 +286,76 @@ impl Store {
             crate::create_private(&file)?;
         }
         let lock = Arc::new(DbLock::open(path)?);
-        if !lock.acquire(LockMode::Shared, LOCK_WAIT).await? {
-            return Err(StoreError::InUse(format!(
-                "database {} is locked exclusively ({}): a restore or migration is running",
-                path.display(),
-                lock.path.display()
-            )));
-        }
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(8)
-            .connect_with(connect_options(path).create_if_missing(true))
-            .await?;
-        let store = Self {
-            pool,
-            lock: Some(lock.clone()),
-        };
-        let applied = pool_applied(&store.pool).await?.unwrap_or_default();
-        if !pending_migrations(&applied)?.is_empty() {
+        // Normally one round; a second one after migrating. More rounds only
+        // happen if other processes keep restoring or migrating concurrently.
+        for _ in 0..4 {
+            if !lock.acquire(LockMode::Shared, LOCK_WAIT).await? {
+                return Err(StoreError::InUse(format!(
+                    "database {} is locked exclusively ({}): a restore or migration is running",
+                    path.display(),
+                    lock.path.display()
+                )));
+            }
+            let pool = connect_pool(path, 8).await?;
+            let pending = match check_database(&pool, path).await {
+                Ok(pending) => pending,
+                Err(err) => {
+                    pool.close().await;
+                    lock.release()?;
+                    return Err(err);
+                }
+            };
+            if pending.is_empty() {
+                remove_stale_temp_files(path);
+                for file in database_files(path) {
+                    restrict_permissions(&file)?;
+                }
+                return Ok(Self {
+                    pool,
+                    lock: Some(lock),
+                    path: Some(Arc::new(path.to_path_buf())),
+                });
+            }
+            pool.close().await;
             lock.release()?;
-            let exclusive = lock.acquire(LockMode::Exclusive, LOCK_WAIT).await?;
-            if !exclusive {
-                store.pool.close().await;
+
+            if !lock.acquire(LockMode::Exclusive, LOCK_WAIT).await? {
                 return Err(StoreError::InUse(format!(
                     "database {} needs migrations, but another CalCraft process is using it \
                      (is an older server still running?). Stop it and start again",
                     path.display()
                 )));
             }
+            let pool = connect_pool(path, 1).await?;
+            let store = Self {
+                pool,
+                lock: None,
+                path: Some(Arc::new(path.to_path_buf())),
+            };
             let result = store.migrate(path, options).await;
+            store.pool.close().await;
             lock.release()?;
-            if let Err(err) = result {
-                store.pool.close().await;
-                return Err(err);
-            }
-            if !lock.acquire(LockMode::Shared, LOCK_WAIT).await? {
-                store.pool.close().await;
-                return Err(StoreError::InUse(format!(
-                    "database {} was locked by another process right after migrating",
-                    path.display()
-                )));
-            }
+            result?;
         }
-        for file in database_files(path) {
-            restrict_permissions(&file)?;
-        }
-        Ok(store)
+        Err(StoreError::InUse(format!(
+            "database {} keeps changing while opening it: another process restores or migrates it",
+            path.display()
+        )))
     }
 
     /// Applies pending migrations; the caller holds the exclusive lock.
     async fn migrate(&self, path: &Path, options: &StoreOptions) -> Result<()> {
-        // Another process may have migrated while we waited for the lock.
-        let applied = pool_applied(&self.pool).await?.unwrap_or_default();
-        let pending = pending_migrations(&applied)?;
+        // Another process may have migrated or restored while we waited.
+        let pending = check_database(&self.pool, path).await?;
         if pending.is_empty() {
             return Ok(());
         }
+        let applied = pool_applied(&self.pool).await?.unwrap_or_default();
         let from = applied_version(&applied);
+        let mut written = None;
         if !applied.is_empty() && options.pre_migration_backup {
             let backup = self
-                .pre_migration_backup(path, from, options.pre_migration_backups_keep)
+                .pre_migration_backup(path, from)
                 .await
                 .map_err(|err| StoreError::PreMigrationBackup(err.to_string()))?;
             tracing::info!(
@@ -320,6 +364,7 @@ impl Store {
                 version = from,
                 "wrote pre-migration backup"
             );
+            written = Some(backup.path);
         } else if !applied.is_empty() {
             tracing::warn!("pre-migration backup disabled (storage.pre_migration_backup = false)");
         }
@@ -331,30 +376,22 @@ impl Store {
         );
         MIGRATOR.run(&self.pool).await?;
         tracing::info!(version = latest_migration(), "database migrations applied");
+        // Only after a successful migration, and never the backup just written.
+        if let Some(written) = written {
+            prune_pre_migration_backups(path, options.pre_migration_backups_keep.max(1), &written);
+        }
         Ok(())
     }
 
-    async fn pre_migration_backup(
-        &self,
-        path: &Path,
-        version: i64,
-        keep: usize,
-    ) -> Result<BackupInfo> {
+    async fn pre_migration_backup(&self, path: &Path, version: i64) -> Result<BackupInfo> {
         let base = with_suffix(
             path,
             &format!(".pre-migration-{version:04}-{}", utc_timestamp()),
         );
-        let reserved = reserve_unique(&base)?;
-        match self.backup(&reserved, true).await {
-            Ok(info) => {
-                prune_pre_migration_backups(path, keep.max(1));
-                Ok(info)
-            }
-            Err(err) => {
-                let _ = std::fs::remove_file(&reserved);
-                Err(err)
-            }
-        }
+        // Written to a temporary name and renamed at the end (backup_pool),
+        // so a crash never leaves an empty file under a backup name. The
+        // exclusive lock rules out races for the free name.
+        self.backup(&free_name(&base)?, false).await
     }
 
     /// Closes all connections and releases the process lock (once all
@@ -367,6 +404,9 @@ impl Store {
     /// permissions), safe while other connections write. Refuses to replace
     /// an existing file unless `force` is set.
     pub async fn backup(&self, dest: &Path, force: bool) -> Result<BackupInfo> {
+        if let Some(path) = &self.path {
+            refuse_database_file(path, dest)?;
+        }
         backup_pool(&self.pool, dest, force).await
     }
 }
@@ -380,11 +420,7 @@ pub async fn backup_database(database: &Path, dest: &Path, force: bool) -> Resul
             database.display()
         )));
     }
-    if same_file(database, dest) {
-        return Err(StoreError::Backup(
-            "backup target is the database itself".to_owned(),
-        ));
-    }
+    refuse_database_file(database, dest)?;
     for file in database_files(database) {
         crate::create_private(&file)?;
     }
@@ -571,21 +607,33 @@ async fn restore_locked(database: &Path, backup: &Path, tmp: &Path) -> Result<Re
         checkpoint(database).await;
         let base = with_suffix(database, &format!(".before-restore-{}", utc_timestamp()));
         let kept = reserve_unique(&base)?;
-        copy_into(database, &kept)?;
-        let wal = with_suffix(database, "-wal");
-        if std::fs::metadata(&wal).is_ok_and(|m| m.len() > 0) {
-            let kept_wal = with_suffix(&kept, "-wal");
-            create_new_private(&kept_wal)
-                .map_err(|err| io_error(&kept_wal, "cannot create", err))?;
-            copy_into(&wal, &kept_wal)?;
+        if let Err(err) = keep_copy(database, &kept) {
+            // E.g. disk full: abort before touching the live database.
+            remove_with_side_files(&kept);
+            return Err(err);
         }
         previous = Some(kept);
     }
-    // A stale WAL must never be replayed into the restored database.
+    let kept_hint = || match &previous {
+        Some(kept) => format!("; the previous database is kept as {}", kept.display()),
+        None => String::new(),
+    };
+    // The side files go before the new file is put in place: a crash in
+    // between leaves the old (checkpointed, and copied above) database
+    // without its log. The other order could leave the restored database
+    // next to a stale -wal file, which SQLite would replay into it.
     for side in ["-wal", "-shm", "-journal"] {
-        remove_if_exists(&with_suffix(database, side))?;
+        let file = with_suffix(database, side);
+        remove_if_exists(&file)
+            .map_err(|err| StoreError::Backup(format!("{err}{}", kept_hint())))?;
     }
-    std::fs::rename(tmp, database).map_err(|err| io_error(database, "cannot replace", err))?;
+    std::fs::rename(tmp, database).map_err(|err| {
+        StoreError::Backup(format!(
+            "cannot replace {}: {err}{}",
+            database.display(),
+            kept_hint()
+        ))
+    })?;
     restrict_permissions(database)?;
     sync_parent(database);
     Ok(RestoreInfo {
@@ -596,6 +644,19 @@ async fn restore_locked(database: &Path, backup: &Path, tmp: &Path) -> Result<Re
         },
         previous,
     })
+}
+
+/// Copies the database (and a non-empty -wal file) to `kept`, which was
+/// reserved as an empty owner-only file.
+fn keep_copy(database: &Path, kept: &Path) -> Result<()> {
+    copy_into(database, kept)?;
+    let wal = with_suffix(database, "-wal");
+    if std::fs::metadata(&wal).is_ok_and(|m| m.len() > 0) {
+        let kept_wal = with_suffix(kept, "-wal");
+        create_new_private(&kept_wal).map_err(|err| io_error(&kept_wal, "cannot create", err))?;
+        copy_into(&wal, &kept_wal)?;
+    }
+    Ok(())
 }
 
 /// Moves committed WAL pages into the main file, so that a copy of the main
@@ -648,6 +709,10 @@ pub fn pre_migration_backups(database: &Path) -> Vec<PathBuf> {
             if parts.next().is_some() || timestamp.len() != 16 {
                 return None;
             }
+            // An empty file is never a valid backup.
+            if entry.metadata().ok()?.len() == 0 {
+                return None;
+            }
             Some((format!("{timestamp}-{n:05}"), entry.path()))
         })
         .collect();
@@ -655,8 +720,13 @@ pub fn pre_migration_backups(database: &Path) -> Vec<PathBuf> {
     found.into_iter().map(|(_, path)| path).collect()
 }
 
-fn prune_pre_migration_backups(database: &Path, keep: usize) {
-    for old in pre_migration_backups(database).into_iter().skip(keep) {
+/// Deletes all but the newest `keep` pre-migration backups. `written` (the
+/// backup of this run) always counts as one of them, whatever its time stamp.
+fn prune_pre_migration_backups(database: &Path, keep: usize, written: &Path) {
+    let others = pre_migration_backups(database)
+        .into_iter()
+        .filter(|path| !same_file(path, written) && path != written);
+    for old in others.skip(keep.saturating_sub(1)) {
         match std::fs::remove_file(&old) {
             Ok(()) => tracing::info!(path = %old.display(), "removed old pre-migration backup"),
             Err(err) => {
@@ -693,6 +763,124 @@ fn temp_path(path: &Path) -> Result<PathBuf> {
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
     Ok(parent_dir(path).join(format!(".{name}.tmp-{}-{nanos}", std::process::id())))
+}
+
+/// Absolute form of a path that may not exist yet (canonical directory plus
+/// file name).
+fn absolute(path: &Path) -> Option<PathBuf> {
+    if let Ok(path) = path.canonicalize() {
+        return Some(path);
+    }
+    Some(
+        parent_dir(path)
+            .canonicalize()
+            .ok()?
+            .join(path.file_name()?),
+    )
+}
+
+/// Refuses a backup target that is the database or one of its side files.
+fn refuse_database_file(database: &Path, dest: &Path) -> Result<()> {
+    let Some(dest) = absolute(dest) else {
+        return Ok(());
+    };
+    let mut protected: Vec<PathBuf> = database_files(database).to_vec();
+    protected.push(with_suffix(database, "-journal"));
+    protected.push(lock_path(database));
+    if protected
+        .iter()
+        .filter_map(|p| absolute(p))
+        .any(|p| p == dest)
+    {
+        return Err(StoreError::Backup(format!(
+            "backup target {} is the database or one of its files",
+            dest.display()
+        )));
+    }
+    Ok(())
+}
+
+/// First of `base`, `base-1`, `base-2`, … that does not exist.
+fn free_name(base: &Path) -> Result<PathBuf> {
+    (0..1000)
+        .map(|n| {
+            if n == 0 {
+                base.to_path_buf()
+            } else {
+                with_suffix(base, &format!("-{n}"))
+            }
+        })
+        .find(|candidate| !candidate.exists())
+        .ok_or_else(|| {
+            StoreError::Backup(format!(
+                "cannot find a free file name for {}",
+                base.display()
+            ))
+        })
+}
+
+/// Temporary files older than this are left over from a crash.
+const STALE_TEMP_AGE: Duration = Duration::from_secs(3600);
+
+/// `true` for names written by [`temp_path`] for the database or one of its
+/// pre-migration backups, including SQLite side files:
+/// `.<db>.tmp-<pid>-<nanos>` and `.<db>.pre-migration-<v>-<ts>.tmp-<pid>-<nanos>`.
+fn is_temp_name(name: &str, database_name: &str) -> bool {
+    let Some(rest) = name
+        .strip_prefix('.')
+        .and_then(|n| n.strip_prefix(database_name))
+    else {
+        return false;
+    };
+    let Some((middle, tail)) = rest.rsplit_once(".tmp-") else {
+        return false;
+    };
+    if !(middle.is_empty() || middle.starts_with(".pre-migration-")) {
+        return false;
+    }
+    let tail = ["-wal", "-shm", "-journal"]
+        .iter()
+        .find_map(|side| tail.strip_suffix(side))
+        .unwrap_or(tail);
+    let mut parts = tail.split('-');
+    let digits =
+        |p: Option<&str>| p.is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    digits(parts.next()) && digits(parts.next()) && parts.next().is_none()
+}
+
+/// Removes temporary files of interrupted backups/restores older than an hour.
+fn remove_stale_temp_files(database: &Path) {
+    let Some(database_name) = database.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(parent_dir(database)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if !is_temp_name(&name, database_name) {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > STALE_TEMP_AGE);
+        if !old || !entry.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => {
+                tracing::info!(path = %entry.path().display(), "removed stale temporary file")
+            }
+            Err(err) => {
+                tracing::warn!(path = %entry.path().display(), %err, "cannot remove stale temporary file")
+            }
+        }
+    }
 }
 
 fn same_file(a: &Path, b: &Path) -> bool {

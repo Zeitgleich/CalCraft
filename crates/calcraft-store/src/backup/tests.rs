@@ -586,3 +586,147 @@ async fn failed_pre_migration_backup_prevents_migration() {
     assert!(err.to_string().contains("nothing was migrated"), "{err}");
     assert_eq!(version_of(&db).await, 3);
 }
+
+#[tokio::test]
+async fn pruning_never_deletes_the_backup_just_written() {
+    let dir = TempDir::new("prune-new");
+    let db = dir.join("calcraft.db");
+    old_database(&db, 3).await;
+    // A copied file with a timestamp in the future sorts before the new backup.
+    let future = dir.join("calcraft.db.pre-migration-0002-20990101T000000Z");
+    std::fs::write(&future, b"copied").unwrap();
+    // An empty file (crash while reserving a name) is never a backup.
+    let empty = dir.join("calcraft.db.pre-migration-0002-20200105T000000Z");
+    std::fs::write(&empty, b"").unwrap();
+    let options = StoreOptions {
+        pre_migration_backups_keep: 1,
+        ..StoreOptions::default()
+    };
+    Store::open_with(&db, &options).await.unwrap().close().await;
+    let backups = pre_migration_backups(&db);
+    assert_eq!(backups.len(), 1, "{backups:?}");
+    let name = backups[0].file_name().unwrap().to_str().unwrap();
+    assert!(
+        name.starts_with("calcraft.db.pre-migration-0003-"),
+        "{name}"
+    );
+    assert_eq!(version_of(&backups[0]).await, 3);
+    assert!(!future.exists());
+    assert!(empty.exists(), "empty files are neither listed nor pruned");
+}
+
+#[tokio::test]
+async fn foreign_sqlite_file_is_not_migrated() {
+    let dir = TempDir::new("foreign");
+    let db = dir.join("calcraft.db");
+    let pool = raw(&db).await;
+    sqlx::query("CREATE TABLE notes (x)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    let err = Store::open(&db).await.unwrap_err();
+    assert!(matches!(err, StoreError::NotCalcraft(_)), "{err}");
+    assert!(err.to_string().contains("storage.database"), "{err}");
+    let pool = raw(&db).await;
+    assert!(
+        pool_applied(&pool).await.unwrap().is_none(),
+        "nothing was migrated"
+    );
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn backup_target_must_not_be_a_database_file() {
+    let dir = TempDir::new("target");
+    let db = dir.join("calcraft.db");
+    let store = Store::open(&db).await.unwrap();
+    for suffix in ["", "-wal", "-shm", "-journal", ".lock"] {
+        let target = with_suffix(&db, suffix);
+        let err = store.backup(&target, true).await.unwrap_err();
+        assert!(
+            err.to_string().contains("one of its files"),
+            "{suffix}: {err}"
+        );
+    }
+    store.close().await;
+    for suffix in ["", "-wal", ".lock"] {
+        assert!(
+            backup_database(&db, &with_suffix(&db, suffix), true)
+                .await
+                .is_err(),
+            "{suffix}"
+        );
+    }
+    // Other spellings of the same file are caught, too.
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let sneaky = dir.join("sub").join("..").join("calcraft.db-wal");
+    assert!(backup_database(&db, &sneaky, true).await.is_err());
+}
+
+#[test]
+fn temp_names_are_recognised_exactly() {
+    for name in [
+        ".calcraft.db.tmp-12-345",
+        ".calcraft.db.tmp-12-345-wal",
+        ".calcraft.db.pre-migration-0004-20261021T120000Z.tmp-1-2",
+        ".calcraft.db.pre-migration-0004-20261021T120000Z-1.tmp-1-2-journal",
+    ] {
+        assert!(is_temp_name(name, "calcraft.db"), "{name}");
+    }
+    for name in [
+        "calcraft.db.tmp-12-345",
+        ".calcraft.db.tmp-12",
+        ".calcraft.db.tmp-12-34x",
+        ".calcraft.db.tmp-1-2-3",
+        ".calcraft.db.notes.tmp-1-2",
+        ".other.db.tmp-1-2",
+        ".calcraft.db",
+    ] {
+        assert!(!is_temp_name(name, "calcraft.db"), "{name}");
+    }
+}
+
+#[tokio::test]
+async fn stale_temp_files_are_removed_on_open() {
+    let dir = TempDir::new("stale");
+    let db = dir.join("calcraft.db");
+    let two_hours_ago = SystemTime::now() - Duration::from_secs(7200);
+    let make = |name: &str, old: bool| {
+        let path = dir.join(name);
+        let file = File::create(&path).unwrap();
+        if old {
+            file.set_modified(two_hours_ago).unwrap();
+        }
+        path
+    };
+    let stale = make(".calcraft.db.tmp-1-2", true);
+    let stale_side = make(
+        ".calcraft.db.pre-migration-0003-20200101T000000Z.tmp-1-2-wal",
+        true,
+    );
+    let fresh = make(".calcraft.db.tmp-3-4", false);
+    let unrelated = make(".calcraft.db.tmp-notes", true);
+    Store::open(&db).await.unwrap().close().await;
+    assert!(!stale.exists());
+    assert!(!stale_side.exists());
+    assert!(fresh.exists(), "a backup may still be writing it");
+    assert!(unrelated.exists());
+}
+
+/// Connections only exist while a lock is held: after migrating, the open
+/// store holds the shared lock again, so a restore is refused.
+#[tokio::test]
+async fn lock_is_held_after_migrating() {
+    let dir = TempDir::new("after-migrate");
+    let db = dir.join("calcraft.db");
+    old_database(&db, 3).await;
+    let store = Store::open(&db).await.unwrap();
+    let backup = pre_migration_backups(&db).remove(0);
+    let err = restore_database(&db, &backup).await.unwrap_err();
+    assert!(matches!(err, StoreError::InUse(_)), "{err}");
+    store.list_users().await.unwrap();
+    store.close().await;
+    restore_database(&db, &backup).await.unwrap();
+    assert_eq!(version_of(&db).await, 3);
+}

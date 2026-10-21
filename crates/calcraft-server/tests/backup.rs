@@ -7,6 +7,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::atomic::{AtomicU32, Ordering},
+    time::Duration,
 };
 
 use calcraft_core::CollectionKind;
@@ -211,11 +212,17 @@ async fn restore_is_refused_while_the_server_runs() {
         .spawn()
         .unwrap();
     let stdout = server.stdout.take().unwrap();
-    let mut lines = BufReader::new(stdout).lines();
-    let started = lines
-        .by_ref()
-        .take(100)
-        .any(|line| line.map(|l| l.contains("listening")).unwrap_or(false));
+    // Read in a thread so that a hanging server cannot block the test.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if line.contains("listening") {
+                let _ = tx.send(());
+            }
+        }
+    });
+    let started = rx.recv_timeout(Duration::from_secs(30)).is_ok();
     let output = run(&db, &["restore", "--yes", backup.to_str().unwrap()]);
     server.kill().unwrap();
     server.wait().unwrap();

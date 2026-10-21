@@ -34,6 +34,11 @@ backup written to /var/lib/calcraft/backups/calcraft-2026-10-21.db (245760 bytes
 - An existing file is not replaced unless `--force` is given.
 - `calcraft backup` never migrates the database, so a newer binary can back
   up the database of an older running server.
+- The target must not be the database itself or one of its files (`-wal`,
+  `-shm`, `-journal`, `.lock`), not even with `--force`.
+- Temporary files (`.calcraft.db.tmp-*`, `.calcraft.db.pre-migration-*.tmp-*`)
+  left behind by a crash are deleted at the next start once they are older
+  than one hour.
 
 Example timer for a daily backup with 14 generations (`/etc/cron.daily/calcraft-backup`):
 
@@ -89,6 +94,10 @@ run in a terminal) and then:
    write-ahead log is never replayed into the restored database;
 5. atomically renames the verified copy to `calcraft.db` (`0600`).
 
+If keeping the copy fails (e.g. disk full), the partial copy is removed and
+the live database is not touched. If a later step fails, the error names the
+kept copy.
+
 If the backup is older than the binary, the next start migrates it (and
 writes a pre-migration backup first, see below). Sync tokens, ETags and
 everything else come back exactly as they were at backup time; clients
@@ -103,15 +112,22 @@ lock on `calcraft.db.lock` next to it (`flock` on Linux/macOS, `LockFileEx`
 on Windows). `calcraft restore` and migrations need the **exclusive** lock.
 The operating system releases the lock when the process ends – also after a
 crash or `kill -9` – so there are no stale PID files to clean up. Do not
-delete `calcraft.db.lock`; it is empty and harmless. The lock is advisory: it
+delete `calcraft.db.lock`; it is empty and harmless. Each process opens the database only
+while it holds the lock; to switch between shared and exclusive (which the OS
+cannot do atomically) it closes all connections first and reopens the
+database afterwards, so a restore can never replace the file under an open
+connection. The lock is advisory: it
 protects against CalCraft processes, not against other programs (e.g. the
 `sqlite3` shell) writing to the database. Network file systems may not
 implement locks reliably; keep the database on a local disk.
 
 ## Upgrades and migrations
 
-Database migrations run automatically at startup. Before applying them to an
-existing database, CalCraft
+Database migrations run automatically at startup (also when a CLI command
+such as `calcraft user list` opens the database; its log goes to standard
+error). A non-empty SQLite file without CalCraft's migration table (e.g. a
+wrong `storage.database` path) is refused instead of migrated. Before
+applying migrations to an existing database, CalCraft
 
 1. takes the exclusive lock – if an older server (or another CalCraft
    command) still uses the database, startup fails with *"needs migrations,
@@ -119,8 +135,9 @@ existing database, CalCraft
 2. writes a verified backup
    `calcraft.db.pre-migration-<old version>-<timestamp>` (`0600`) next to the
    database, e.g. `calcraft.db.pre-migration-0004-20261021T120000Z`;
-3. deletes older pre-migration backups beyond the configured number;
-4. applies the migrations.
+3. applies the migrations;
+4. only then deletes older pre-migration backups beyond the configured
+   number (the backup just written is always kept).
 
 If the backup cannot be written (disk full, permissions), **nothing is
 migrated** and the server does not start:
@@ -141,6 +158,10 @@ regular backups: they are on the same disk as the database.
 
 Update procedure (from source; with Docker rebuild the image instead):
 
+0. **Stop the old server first if it is older than the version that
+   introduced `calcraft backup`/`restore`:** such servers take no database
+   lock, so the new version cannot detect them and would migrate under them.
+   (`sudo systemctl stop calcraft`, install, `sudo systemctl start calcraft`.)
 1. `calcraft backup …` (optional, but recommended in addition to the
    automatic pre-migration backup, and copy it off the machine);
 2. build and install the new binary (see `installation.md`, "Updates");
@@ -166,7 +187,9 @@ To roll back an upgrade:
 1. Stop the new version: `sudo systemctl stop calcraft`.
 2. Reinstall the old binary (`sudo install -m 0755 calcraft-old /usr/local/bin/calcraft`).
 3. Restore the pre-migration backup written by the new version on its first
-   start, using the **old** binary:
+   start. Use the **old** binary if it has `calcraft restore` (any version
+   with this document); `calcraft restore` refuses backups newer than the
+   binary, and the pre-migration backup has the old schema:
 
    ```bash
    ls -1t /var/lib/calcraft/calcraft.db.pre-migration-*
@@ -175,6 +198,18 @@ To roll back an upgrade:
    ```bash
    sudo -u calcraft env CALCRAFT_CONFIG=/etc/calcraft/calcraft.toml \
      calcraft restore --yes /var/lib/calcraft/calcraft.db.pre-migration-0004-20261021T120000Z
+   ```
+
+   If the old version predates `calcraft restore`, copy the file by hand
+   with the server stopped (this is what `restore` does, without the
+   checks):
+
+   ```bash
+   cd /var/lib/calcraft
+   sudo cp -p calcraft.db calcraft.db.before-rollback
+   [ -s calcraft.db-wal ] && sudo cp -p calcraft.db-wal calcraft.db.before-rollback-wal
+   sudo rm -f calcraft.db-wal calcraft.db-shm
+   sudo install -m 0600 -o calcraft -g calcraft calcraft.db.pre-migration-0004-20261021T120000Z calcraft.db
    ```
 
 4. Start the old version: `sudo systemctl start calcraft`.
@@ -193,9 +228,12 @@ upgrade.
 - `crates/calcraft-store/src/backup/tests.rs`: consistent backup during
   concurrent writes, restore round trip (items, ETags, sync revision, token
   salt, change log), refusal of newer backups and of restores while the
-  database is open, pre-migration backup when opening an old schema, upgrade
-  from every older migration state to the current one, retention, refusal of
-  newer/failed schemas, no migration when the backup fails, permissions.
+  database is open (also right after migrating), pre-migration backup when
+  opening an old schema, upgrade from every older migration state to the
+  current one, retention (never deleting the new backup, ignoring empty
+  files), refusal of newer/failed schemas and of foreign SQLite files, no
+  migration when the backup fails, protected backup targets, removal of
+  stale temporary files, permissions.
 - `crates/calcraft-server/tests/backup.rs`: the same with the `calcraft`
   binary, including a running `calcraft serve`.
 - CI job `backup` (`.github/workflows/ci.yml`): creates a user, uploads an

@@ -66,6 +66,11 @@ pub enum StoreError {
          pre-migration backup, see docs/backup-and-upgrade.md"
     )]
     DirtyMigration(i64),
+    #[error(
+        "{0} is a non-empty SQLite database without CalCraft's migration table; refusing to \
+         migrate it (check storage.database)"
+    )]
+    NotCalcraft(String),
     #[error("backup before migrating failed, nothing was migrated: {0}")]
     PreMigrationBackup(String),
 }
@@ -127,6 +132,8 @@ pub struct Store {
     /// Shared process lock on `<database>.lock`; `None` in memory.
     #[allow(dead_code)]
     lock: Option<Arc<backup::DbLock>>,
+    /// Database file; `None` in memory.
+    path: Option<Arc<std::path::PathBuf>>,
 }
 
 impl Store {
@@ -149,7 +156,11 @@ impl Store {
 
     async fn init(pool: SqlitePool) -> Result<Self> {
         MIGRATOR.run(&pool).await?;
-        Ok(Self { pool, lock: None })
+        Ok(Self {
+            pool,
+            lock: None,
+            path: None,
+        })
     }
 
     /// Checks that the database is reachable.

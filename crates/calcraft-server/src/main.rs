@@ -94,6 +94,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::User { config, command } => {
             let config = Config::load(config.config.as_deref())?;
+            telemetry::init_cli(&config.logging)?;
             runtime()?.block_on(async {
                 let store = open_store(&config).await?;
                 users::run(&store, command).await
@@ -101,10 +102,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Backup(args) => {
             let config = Config::load(args.config.config.as_deref())?;
+            telemetry::init_cli(&config.logging)?;
             runtime()?.block_on(backup_cmd::backup(&config, &args))
         }
         Command::Restore(args) => {
             let config = Config::load(args.config.config.as_deref())?;
+            telemetry::init_cli(&config.logging)?;
             runtime()?.block_on(backup_cmd::restore(&config, &args))
         }
     }
