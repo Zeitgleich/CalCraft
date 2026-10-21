@@ -27,6 +27,7 @@ bytes.workspace = true
 calcraft-api = { workspace = true, optional = true }
 calcraft-core.workspace = true
 calcraft-dav.workspace = true
+calcraft-ical.workspace = true
 calcraft-store.workspace = true
 calcraft-web = { workspace = true, optional = true }
 clap.workspace = true

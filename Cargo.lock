@@ -281,6 +281,7 @@ dependencies = [
 name = "calcraft-dav"
 version = "0.1.0"
 dependencies = [
+ "calcraft-ical",
  "quick-xml",
  "thiserror",
 ]
@@ -288,6 +289,9 @@ dependencies = [
 [[package]]
 name = "calcraft-ical"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
 
 [[package]]
 name = "calcraft-server"
@@ -302,6 +306,7 @@ dependencies = [
  "calcraft-api",
  "calcraft-core",
  "calcraft-dav",
+ "calcraft-ical",
  "calcraft-store",
  "calcraft-web",
  "clap",
