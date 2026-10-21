@@ -224,6 +224,18 @@ impl Store {
         row.as_ref().map(item_from_row).transpose()
     }
 
+    /// Name of the object with this UID in the collection, if any.
+    pub async fn item_name_by_uid(&self, collection_id: i64, uid: &str) -> Result<Option<String>> {
+        let row = sqlx::query("SELECT name FROM items WHERE collection_id = ? AND uid = ?")
+            .bind(collection_id)
+            .bind(uid)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| row.try_get("name"))
+            .transpose()
+            .map_err(Into::into)
+    }
+
     /// Metadata of a single object, without loading its content.
     pub async fn item_meta(&self, collection_id: i64, name: &str) -> Result<Option<ItemMeta>> {
         let row = sqlx::query(
@@ -668,6 +680,32 @@ mod tests {
             .unwrap()
             .sync_revision;
         assert_eq!(revision, 3);
+    }
+
+    #[tokio::test]
+    async fn uid_lookup_is_scoped_to_the_collection() {
+        let (store, alice, bob) = setup().await;
+        let new = item("shared-uid", "\"e\"", None, None);
+        store
+            .put_item(alice.id, "a.ics", &new, &Precondition::None)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .item_name_by_uid(alice.id, "shared-uid")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("a.ics")
+        );
+        assert_eq!(
+            store.item_name_by_uid(bob.id, "shared-uid").await.unwrap(),
+            None
+        );
+        assert_eq!(
+            store.item_name_by_uid(alice.id, "other").await.unwrap(),
+            None
+        );
     }
 
     #[tokio::test]

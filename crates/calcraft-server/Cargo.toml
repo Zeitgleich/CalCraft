@@ -15,7 +15,7 @@ path = "src/main.rs"
 [features]
 default = ["web-ui", "api"]
 web-ui = ["dep:calcraft-web"]
-api = []
+api = ["dep:futures-core"]
 
 [dependencies]
 anyhow.workspace = true
@@ -31,6 +31,7 @@ calcraft-store.workspace = true
 calcraft-web = { workspace = true, optional = true }
 clap.workspace = true
 figment.workspace = true
+futures-core = { workspace = true, optional = true }
 getrandom.workspace = true
 hmac.workspace = true
 rpassword.workspace = true
