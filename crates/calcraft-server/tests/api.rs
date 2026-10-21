@@ -597,6 +597,95 @@ async fn admin_endpoints() {
 }
 
 #[tokio::test]
+async fn update_check_is_off_by_default_and_admin_only() {
+    let app = app().await;
+    let admin = cookie_of(&login(&app, ALICE, None).await);
+    let bob = cookie_of(&login(&app, BOB, None).await);
+    for cookie in [None, Some(bob.as_str())] {
+        let reply = call(&app, Method::GET, "/api/v1/admin/update", cookie, None).await;
+        assert!(reply.status.is_client_error());
+        assert!(reply.json.get("current").is_none());
+    }
+    let reply = call(
+        &app,
+        Method::GET,
+        "/api/v1/admin/update",
+        Some(&admin),
+        None,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(
+        reply.json,
+        json!({
+            "enabled": false,
+            "current": calcraft_core::VERSION,
+            "latest": null,
+            "newer": false,
+            "url": null,
+            "checked_at": null
+        })
+    );
+}
+
+/// The check itself is not run (no network in tests): the state is fed a
+/// recorded response.
+#[cfg(feature = "update-check")]
+#[tokio::test]
+async fn update_check_reports_a_newer_release() {
+    use std::sync::Arc;
+
+    use calcraft_server::updates::UpdateCheck;
+
+    let store = Store::in_memory().await.unwrap();
+    store
+        .create_user_with_role(
+            &"alice".parse().unwrap(),
+            &hash_password(ALICE.1).unwrap(),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+    let check = Arc::new(UpdateCheck::new());
+    let mut state = AppState::new(store).unwrap();
+    state.updates = Some(check.clone());
+    let app = router(&Config::default(), state);
+    let admin = cookie_of(&login(&app, ALICE, None).await);
+
+    let reply = call(
+        &app,
+        Method::GET,
+        "/api/v1/admin/update",
+        Some(&admin),
+        None,
+    )
+    .await;
+    assert_eq!(reply.json["enabled"], true);
+    assert_eq!(reply.json["newer"], false);
+    assert_eq!(reply.json["checked_at"], Value::Null);
+
+    let page = "https://github.com/Zeitgleich/CalCraft/releases/tag/v9999.1.0";
+    let body =
+        json!({"tag_name": "v9999.1.0", "html_url": page, "draft": false, "prerelease": false});
+    check
+        .apply(body.to_string().as_bytes(), 1_700_000_000)
+        .unwrap();
+    let reply = call(
+        &app,
+        Method::GET,
+        "/api/v1/admin/update",
+        Some(&admin),
+        None,
+    )
+    .await;
+    assert_eq!(reply.json["latest"], "9999.1.0");
+    assert_eq!(reply.json["newer"], true);
+    assert_eq!(reply.json["url"], page);
+    assert_eq!(reply.json["checked_at"], 1_700_000_000);
+}
+
+#[tokio::test]
 async fn openapi_is_served() {
     let app = app().await;
     let spec = call(&app, Method::GET, "/api/openapi.json", None, None).await;

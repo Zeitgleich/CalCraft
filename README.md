@@ -28,6 +28,7 @@ Cargo features of `calcraft-server`:
 | `web-ui` | yes | Embedded web interface |
 | `api` | yes | REST API |
 | `oidc` | yes | Single sign-on via OpenID Connect (implies `api`; adds an HTTPS client: rustls/ring) |
+| `update-check` | yes | Optional update notice for administrators (implies `api`; same HTTPS client; off unless `[updates] check = true`) |
 
 CalCraft runs on Linux, macOS and Windows.
 
@@ -104,6 +105,20 @@ Before applying database migrations, CalCraft writes a backup
 are kept). Migrations are forward-only; to roll back an upgrade, restore that
 backup with the previous version. Details in
 [`docs/backup-and-upgrade.md`](docs/backup-and-upgrade.md).
+
+Optionally, the admin area shows a notice when a new release is out:
+
+```toml
+[updates]
+check = true          # default: false
+interval_hours = 24   # 1-168
+```
+
+CalCraft then requests `https://api.github.com/repos/Zeitgleich/CalCraft/releases/latest`
+at startup and every `interval_hours` (plain `GET`, no cookies, no credentials, nothing
+about your installation). GitHub sees the server's IP address and the User-Agent
+`calcraft/<version>`. Drafts and pre-releases are ignored; the result is kept in memory
+only and is also available as `GET /api/v1/admin/update`.
 
 ### App passwords and two-factor authentication
 

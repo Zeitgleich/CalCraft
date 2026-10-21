@@ -66,6 +66,15 @@ enabled = false
 # ca_file = "/etc/calcraft/idp-ca.pem"
 # button_label = "Single sign-on"
 
+[updates]
+# Show "New version X available" in the admin area. Off by default. When on, the
+# server sends one GET to https://api.github.com/repos/Zeitgleich/CalCraft/releases/latest
+# at startup and every interval_hours (no cookies, no credentials, no data about this
+# installation); GitHub sees the server's IP address and User-Agent "calcraft/<version>".
+check = false
+# Hours between checks (1-168); a random delay of up to 10 % is added.
+interval_hours = 24
+
 [logging]
 # Filter syntax of tracing-subscriber; RUST_LOG takes precedence.
 level = "info"

@@ -678,6 +678,24 @@ old binary and restore the pre-migration backup; see
 Security fixes are announced via GitHub security advisories; watch the
 repository (*Watch → Custom → Security alerts*).
 
+To see new releases in the web UI's admin area, enable the optional update
+notice in `/etc/calcraft/calcraft.toml` and restart:
+
+```toml
+[updates]
+check = true
+# interval_hours = 24   # 1-168
+```
+
+CalCraft then sends a single `GET` to
+`https://api.github.com/repos/Zeitgleich/CalCraft/releases/latest` at startup
+and every `interval_hours` (plus a random delay of up to 10 %). Nothing else is
+sent: no cookies, no credentials, no data about the installation. GitHub sees
+the server's IP address and the User-Agent `calcraft/<version>`. The server
+needs outbound HTTPS (port 443) for this; failures are logged as warnings and
+do not affect serving. The notice is off by default and nothing is requested
+while it is off.
+
 ## 15. Troubleshooting
 
 | Symptom | Cause and fix |

@@ -72,8 +72,8 @@ Grundsätze:
 
 | Ebene | Schalter |
 |---|---|
-| Compile-Zeit (Cargo) | `web-ui`, `api`, `oidc`, `swagger-ui`, `postgres` |
-| Laufzeit (Config/ENV/CLI) | `web_ui.enabled`, `api.enabled`, `api.swagger_ui` |
+| Compile-Zeit (Cargo) | `web-ui`, `api`, `oidc`, `update-check`, `swagger-ui`, `postgres` |
+| Laufzeit (Config/ENV/CLI) | `web_ui.enabled`, `api.enabled`, `api.swagger_ui`, `updates.check` |
 
 Ohne Feature ist der Code nicht im Binary (kleinere Angriffsfläche).
 
@@ -295,6 +295,29 @@ standardmäßig aus; wird beim Start validiert.
   TraceLayer-Spans enthalten nur den Pfad, nie die Query.
 - **Später:** Backchannel-Logout und RP-initiated Logout, Admin-API zum Lösen von
   SSO-Bindungen und -Freigaben, Rate-Limit pro Client.
+
+### Update-Hinweis (Phase 4)
+
+`crates/calcraft-server/src/updates.rs` (Cargo-Feature `update-check`, Default an),
+Konfiguration `[updates] check = false` (Default aus), `interval_hours = 24` (1–168).
+Der ausgehende HTTPS-Client liegt jetzt in `src/https.rs` (internes Feature
+`https-client`, von `oidc` und `update-check` genutzt).
+
+- Nur wenn eingeschaltet: Hintergrund-Task holt beim Start und danach alle
+  `interval_hours` (+ bis zu 10 % Zufall) `GET
+  https://api.github.com/repos/Zeitgleich/CalCraft/releases/latest`. Feste URL, nicht
+  konfigurierbar; nur HTTPS, Timeout 10 s, Antwort ≤ 256 KiB, keine Redirects, keine
+  Cookies, keine Credentials, User-Agent `calcraft/<version>`, sonst nichts (GitHub sieht
+  IP und User-Agent).
+- Gelesen werden nur `tag_name`, `html_url`, `prerelease`, `draft`. Drafts/Pre-Releases
+  und Tags ≠ `vX.Y.Z` werden ignoriert; Versionsvergleich handgeschrieben (kein
+  semver-Crate). `html_url` nur, wenn unter `https://github.com/Zeitgleich/CalCraft/releases/`
+  und ohne Sonderzeichen, sonst verworfen.
+- Ergebnis nur im Speicher; Fehler als Warnung ohne Antwortinhalt, ohne Einfluss auf den
+  Betrieb. `GET /api/v1/admin/update` (nur Admins) liefert `{enabled, current, latest,
+  newer, url, checked_at}`; die Web-UI zeigt im Admin-Bereich „New version X available“
+  mit Link (`target=_blank`, `rel="noopener noreferrer"`), bei `enabled: false` einen
+  Hinweis zum Einschalten.
 
 ## 13. Bekannte Einschränkungen (Stand M2)
 

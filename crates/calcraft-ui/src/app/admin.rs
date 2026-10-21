@@ -1,6 +1,7 @@
-//! User administration (administrators only; the server checks again).
+//! User administration and update notice (administrators only; the server
+//! checks again).
 
-use calcraft_core::api::{AdminUser, CreateUser, UpdateUser};
+use calcraft_core::api::{AdminUser, CreateUser, UpdateInfo, UpdateUser};
 use calcraft_ui::{
     text as t,
     validate::{MAX_DISPLAY_NAME, check_length, check_new_password, check_username},
@@ -30,6 +31,7 @@ pub fn Admin() -> impl IntoView {
 
     view! {
         <h1>{t::ADMIN_TITLE}</h1>
+        <UpdateNotice />
         <ErrorText error />
         <section>
             <h2>{t::USERS}</h2>
@@ -59,6 +61,45 @@ pub fn Admin() -> impl IntoView {
             }}
         </section>
         <CreateUserForm on_created=reload />
+    }
+}
+
+/// "New version available" when the optional update check found one, a
+/// hint how to enable it when it is off, nothing otherwise (also on errors:
+/// the notice is not essential).
+#[component]
+fn UpdateNotice() -> impl IntoView {
+    let info = RwSignal::new(None::<UpdateInfo>);
+    leptos::task::spawn_local(async move {
+        if let Ok(update) = api::get::<UpdateInfo>("/v1/admin/update").await {
+            info.try_set(Some(update));
+        }
+    });
+    move || {
+        info.get().and_then(|update| {
+            if !update.enabled {
+                return Some(view! { <p class="hint">{t::UPDATE_CHECK_OFF}</p> }.into_any());
+            }
+            let latest = update.latest.filter(|_| update.newer)?;
+            // The server only passes links to the project's release pages.
+            let link = update.url.map(|url| {
+                view! {
+                    " "
+                    <a href=url target="_blank" rel="noopener noreferrer">
+                        {t::RELEASE_NOTES}
+                    </a>
+                }
+            });
+            Some(
+                view! {
+                    <p class="warning" role="status">
+                        {t::update_available(&latest)}
+                        {link}
+                    </p>
+                }
+                .into_any(),
+            )
+        })
     }
 }
 

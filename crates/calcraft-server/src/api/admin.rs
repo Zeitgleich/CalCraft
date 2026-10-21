@@ -1,4 +1,4 @@
-//! User administration (admins only).
+//! User administration and the update notice (admins only).
 
 use axum::{
     Json,
@@ -7,7 +7,7 @@ use axum::{
 };
 use calcraft_core::{
     Username,
-    api::{AdminUser as AdminUserInfo, CreateUser, UpdateUser},
+    api::{AdminUser as AdminUserInfo, CreateUser, UpdateInfo, UpdateUser},
 };
 use calcraft_store::User;
 
@@ -103,4 +103,23 @@ pub async fn update(
         state.store.set_admin(&username, is_admin).await?;
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Result of the optional update check; `enabled: false` if it is off or
+/// not compiled in.
+pub async fn update_check(State(state): State<AppState>, _admin: AdminUser) -> Json<UpdateInfo> {
+    #[cfg(feature = "update-check")]
+    if let Some(check) = &state.updates {
+        return Json(check.info());
+    }
+    #[cfg(not(feature = "update-check"))]
+    let _ = state;
+    Json(UpdateInfo {
+        enabled: false,
+        current: calcraft_core::VERSION.to_owned(),
+        latest: None,
+        newer: false,
+        url: None,
+        checked_at: None,
+    })
 }

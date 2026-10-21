@@ -61,6 +61,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("get", "/v1/admin/users"),
     ("post", "/v1/admin/users"),
     ("patch", "/v1/admin/users/{username}"),
+    ("get", "/v1/admin/update"),
 ];
 
 /// Builds the API router, to be nested under `/api`.
@@ -101,7 +102,8 @@ pub fn router() -> Router<AppState> {
             post(transfer::import),
         )
         .route("/v1/admin/users", get(admin::list).post(admin::create))
-        .route("/v1/admin/users/{username}", patch(admin::update));
+        .route("/v1/admin/users/{username}", patch(admin::update))
+        .route("/v1/admin/update", get(admin::update_check));
     // Without the `oidc` feature these paths fall through to 404.
     #[cfg(feature = "oidc")]
     let router = router

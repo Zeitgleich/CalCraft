@@ -30,6 +30,7 @@ pub struct Config {
     pub web_ui: WebUiConfig,
     pub api: ApiConfig,
     pub oidc: OidcConfig,
+    pub updates: UpdatesConfig,
     pub logging: LoggingConfig,
 }
 
@@ -402,6 +403,36 @@ impl OidcConfig {
     }
 }
 
+/// Bounds of `updates.interval_hours`.
+pub const UPDATE_INTERVAL_HOURS: std::ops::RangeInclusive<u64> = 1..=168;
+
+/// Optional update notice for administrators.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpdatesConfig {
+    /// Ask GitHub for the latest release (at startup and every
+    /// `interval_hours`) and show a notice in the admin area. Off by default:
+    /// GitHub sees the server's IP address and User-Agent.
+    pub check: bool,
+    /// Hours between checks (1 to 168).
+    pub interval_hours: u64,
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        Self {
+            check: false,
+            interval_hours: 24,
+        }
+    }
+}
+
+impl UpdatesConfig {
+    pub fn interval(&self) -> Duration {
+        Duration::from_secs(self.interval_hours.saturating_mul(3600))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
@@ -483,6 +514,11 @@ impl Config {
         if self.storage.pre_migration_backups_keep == 0 {
             return Err(ConfigError::Invalid(
                 "storage.pre_migration_backups_keep must be at least 1",
+            ));
+        }
+        if !UPDATE_INTERVAL_HOURS.contains(&self.updates.interval_hours) {
+            return Err(ConfigError::Invalid(
+                "updates.interval_hours must be between 1 and 168",
             ));
         }
         self.oidc.validate()
@@ -617,6 +653,22 @@ redirect_uri = "https://cal.example/api/v1/auth/oidc/callback"
         let sso_only = from_toml(&format!("{OIDC}[security]\npassword_login = false\n")).unwrap();
         assert!(!sso_only.security.password_login);
         assert!(!sso_only.oidc.require_local_totp);
+    }
+
+    #[test]
+    fn update_check_is_off_by_default_and_bounded() {
+        let config = Config::default();
+        assert!(!config.updates.check);
+        assert_eq!(config.updates.interval(), Duration::from_secs(24 * 3600));
+        let config = from_toml("[updates]\ncheck = true\ninterval_hours = 168\n").unwrap();
+        assert!(config.updates.check);
+        for bad in [
+            "interval_hours = 0",
+            "interval_hours = 169",
+            "url = \"https://x\"",
+        ] {
+            assert!(from_toml(&format!("[updates]\n{bad}\n")).is_err(), "{bad}");
+        }
     }
 
     #[test]
