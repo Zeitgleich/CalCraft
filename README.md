@@ -64,6 +64,12 @@ A step-by-step guide for production setups — DNS records, build or Docker,
 systemd service, TLS with Let's Encrypt and ready-to-use **nginx** and
 **Apache** configurations — is in [docs/installation.md](docs/installation.md).
 
+Released binaries (Linux, macOS, Windows) and the Docker image
+`ghcr.io/zeitgleich/calcraft` come with SHA-256 checksums, build provenance
+attestations and a keyless cosign signature; how to check them is described in
+[docs/release-verification.md](docs/release-verification.md). Maintainers: see
+[docs/releasing.md](docs/releasing.md) and [CHANGELOG.md](CHANGELOG.md).
+
 ## Running
 
 Create a user (the password is prompted for, or read from stdin with `--password-stdin`;
