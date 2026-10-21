@@ -5,17 +5,32 @@
 //! (later) recurrence expansion all work on its output, so they can never
 //! disagree about what an object contains.
 //!
+//! The alternative formats (jCal, jCard, xCal, CSV) are converted to and
+//! from the same component tree; imports therefore end up as iCalendar or
+//! vCard text that is validated like any PUT ([`transfer`]).
+//!
 //! This crate is free of I/O so it can be compiled for `wasm32`.
 
+pub mod csv;
 mod datetime;
+mod jcal;
 mod object;
 mod parser;
+pub mod transfer;
+mod values;
 mod vcard;
+pub mod write;
+mod xcal;
+pub mod xml;
 
 pub use datetime::{DateTime, parse_date_or_datetime, parse_duration, parse_utc_datetime};
 pub use object::{CalendarObject, ComponentKind, TimeRange};
 pub use parser::{Component, Parameter, Property, parse};
+pub use transfer::{
+    Exporter, Format, ImportContext, ImportedObject, MAX_IMPORT_OBJECTS, MAX_IMPORT_SIZE, Target,
+};
 pub use vcard::VCard;
+pub use xcal::NS_XCAL;
 
 /// Largest accepted calendar object in bytes (`CALDAV:max-resource-size`).
 pub const MAX_OBJECT_SIZE: usize = 1024 * 1024;
