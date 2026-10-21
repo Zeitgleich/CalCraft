@@ -57,6 +57,12 @@ Minimal DAV-only build:
 cargo build --release -p calcraft-server --no-default-features
 ```
 
+## Installation
+
+A step-by-step guide for production setups — DNS records, build or Docker,
+systemd service, TLS with Let's Encrypt and ready-to-use **nginx** and
+**Apache** configurations — is in [docs/installation.md](docs/installation.md).
+
 ## Running
 
 Create a user (the password is prompted for, or read from stdin with `--password-stdin`;
