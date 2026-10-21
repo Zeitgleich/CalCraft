@@ -299,6 +299,86 @@ async fn multiget_checks_every_href() {
 }
 
 #[tokio::test]
+async fn multiget_duplicates_are_collapsed() {
+    let app = app().await;
+    put(
+        &app,
+        ALICE,
+        &format!("{CAL}one.ics"),
+        &event("one", "20261021T100000Z", "20261021T110000Z", "Only once"),
+        &[],
+    )
+    .await;
+    let hrefs = "<d:href>/dav/calendars/alice/default/one.ics</d:href>".repeat(1500);
+    let body = format!(
+        r#"<c:calendar-multiget xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:calendar-data/></d:prop>{hrefs}</c:calendar-multiget>"#
+    );
+    let reply = send(&app, ALICE, "REPORT", CAL, &[], &body).await;
+    assert_eq!(reply.status, StatusCode::MULTI_STATUS);
+    assert_eq!(reply.body.matches("SUMMARY:Only once").count(), 1);
+}
+
+#[tokio::test]
+async fn conditional_headers_follow_rfc() {
+    let app = app().await;
+    let uri = format!("{CAL}cond.ics");
+    let created = put(
+        &app,
+        ALICE,
+        &uri,
+        &event("c", "20261021T100000Z", "20261021T110000Z", "C"),
+        &[],
+    )
+    .await;
+    let etag = created.headers[header::ETAG].to_str().unwrap().to_owned();
+    let body = event("c", "20261021T100000Z", "20261021T120000Z", "C2");
+
+    // A list with the current tag matches; a weak tag never matches If-Match.
+    let list = format!("\"nope\", {etag}");
+    assert_eq!(
+        put(&app, ALICE, &uri, &body, &[("if-match", &list)])
+            .await
+            .status,
+        StatusCode::NO_CONTENT
+    );
+    let weak = format!(
+        "W/{}",
+        put(&app, ALICE, &uri, &body, &[]).await.headers[header::ETAG]
+            .to_str()
+            .unwrap()
+    );
+    assert_eq!(
+        put(&app, ALICE, &uri, &body, &[("if-match", &weak)])
+            .await
+            .status,
+        StatusCode::PRECONDITION_FAILED
+    );
+
+    let current = send(&app, ALICE, "GET", &uri, &[], "").await.headers[header::ETAG]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        put(&app, ALICE, &uri, &body, &[("if-none-match", &current)])
+            .await
+            .status,
+        StatusCode::PRECONDITION_FAILED
+    );
+    assert_eq!(
+        put(&app, ALICE, &uri, &body, &[("if-none-match", "\"other\"")])
+            .await
+            .status,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        put(&app, ALICE, &uri, &body, &[("if-match", "garbage")])
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
 async fn calendar_query_filters_by_time_range() {
     let app = app().await;
     put(
@@ -472,6 +552,14 @@ async fn proppatch_cannot_change_access() {
         let reply = send(&app, BOB, "PROPPATCH", path, &[], rename).await;
         assert_eq!(reply.status, StatusCode::NOT_FOUND, "{path}");
     }
+
+    let bidi = "<d:propertyupdate xmlns:d=\"DAV:\"><d:set><d:prop><d:displayname>evil\u{202E}txt.exe</d:displayname></d:prop></d:set></d:propertyupdate>";
+    let reply = send(&app, ALICE, "PROPPATCH", CAL, &[], bidi).await;
+    assert!(
+        reply.body.contains("HTTP/1.1 409 Conflict"),
+        "{}",
+        reply.body
+    );
 
     let bad_color = r#"<d:propertyupdate xmlns:d="DAV:" xmlns:ic="http://apple.com/ns/ical/"><d:set><d:prop><ic:calendar-color>javascript:alert(1)</ic:calendar-color></d:prop></d:set></d:propertyupdate>"#;
     let reply = send(&app, ALICE, "PROPPATCH", CAL, &[], bad_color).await;

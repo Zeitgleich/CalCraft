@@ -56,9 +56,22 @@ impl Node {
     }
 }
 
+fn check_len(value: &str) -> Result<(), DavError> {
+    if value.len() > MAX_NAME_LEN {
+        return Err(DavError::BadRequest("XML name or value too long"));
+    }
+    Ok(())
+}
+
+/// Element and attribute names are echoed into responses, so they must be
+/// valid XML names (letters, digits, `_`, `-`, `.`; no leading digit,
+/// hyphen or dot). quick-xml does not check this itself.
 fn check_name(name: &str) -> Result<(), DavError> {
-    if name.len() > MAX_NAME_LEN {
-        return Err(DavError::BadRequest("XML name too long"));
+    check_len(name)?;
+    let mut chars = name.chars();
+    let valid_start = chars.next().is_some_and(|c| c.is_alphabetic() || c == '_');
+    if !valid_start || !chars.all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.')) {
+        return Err(DavError::BadRequest("invalid XML name"));
     }
     Ok(())
 }
@@ -71,7 +84,7 @@ fn start_node(ns: ResolveResult<'_>, start: &BytesStart<'_>) -> Result<Node, Dav
             return Err(DavError::BadRequest("undeclared namespace prefix"));
         }
     };
-    check_name(&namespace)?;
+    check_len(&namespace)?;
     let local_name = start.local_name();
     let name: &str = local_name.into_inner();
     check_name(name)?;
@@ -91,7 +104,7 @@ fn start_node(ns: ResolveResult<'_>, start: &BytesStart<'_>) -> Result<Node, Dav
         let value = attribute
             .normalized_value(XmlVersion::Implicit1_0)
             .map_err(|_| DavError::BadRequest("malformed attribute value"))?;
-        check_name(&value)?;
+        check_len(&value)?;
         attributes.push((key.to_owned(), value.into_owned()));
     }
     Ok(Node {
@@ -218,6 +231,18 @@ mod tests {
                 .join(" ")
         );
         assert!(parse(many_attrs.as_bytes(), 1024).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_names() {
+        for xml in [&b"<a&b/>"[..], b"<1a/>", b"<-a/>", b"<a x&y=\"1\"/>"] {
+            assert!(
+                parse(xml, 1024).is_err(),
+                "{}",
+                String::from_utf8_lossy(xml)
+            );
+        }
+        assert!(parse("<\u{00e4}rger/>".as_bytes(), 1024).is_ok());
     }
 
     #[test]

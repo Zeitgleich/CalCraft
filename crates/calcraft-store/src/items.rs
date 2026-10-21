@@ -13,6 +13,8 @@ use crate::{Collection, Result, Store, StoreError, collection_from_row};
 pub const MAX_COLLECTIONS_PER_USER: i64 = 100;
 /// Maximum number of objects per collection.
 pub const MAX_ITEMS_PER_COLLECTION: i64 = 100_000;
+/// Storage quota per user for object content.
+pub const MAX_BYTES_PER_USER: i64 = 512 * 1024 * 1024;
 
 /// A stored calendar object including its content.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,16 +43,20 @@ pub struct NewItem<'a> {
     pub content: &'a [u8],
 }
 
-/// Conditional request headers for writes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Precondition<'a> {
+/// Conditional request headers for writes (RFC 9110 §13.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Precondition {
     None,
     /// `If-None-Match: *` – only create.
     MustNotExist,
-    /// `If-Match: "etag"` – only overwrite this version.
-    EtagMatches(&'a str),
     /// `If-Match: *` – only overwrite.
     MustExist,
+    /// `If-Match` with entity tags: the current tag must be one of them
+    /// (strong comparison).
+    IfMatch(Vec<String>),
+    /// `If-None-Match` with entity tags: the current tag must not be one of
+    /// them (weak comparison; tags are passed without `W/`).
+    IfNoneMatch(Vec<String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,18 +65,27 @@ pub enum PutOutcome {
     Updated,
 }
 
-fn check(precondition: Precondition<'_>, existing: Option<&str>) -> Result<()> {
+fn check(precondition: &Precondition, existing: Option<&str>) -> Result<()> {
     let ok = match precondition {
         Precondition::None => true,
         Precondition::MustNotExist => existing.is_none(),
         Precondition::MustExist => existing.is_some(),
-        Precondition::EtagMatches(etag) => existing == Some(etag),
+        Precondition::IfMatch(tags) => existing.is_some_and(|e| tags.iter().any(|t| t == e)),
+        Precondition::IfNoneMatch(tags) => existing.is_none_or(|e| !tags.iter().any(|t| t == e)),
     };
     if ok {
         Ok(())
     } else {
         Err(StoreError::PreconditionFailed)
     }
+}
+
+fn meta_from_row(row: &SqliteRow) -> Result<ItemMeta> {
+    Ok(ItemMeta {
+        name: row.try_get("name")?,
+        etag: row.try_get("etag")?,
+        size: row.try_get("size")?,
+    })
 }
 
 fn item_from_row(row: &SqliteRow) -> Result<Item> {
@@ -182,15 +197,7 @@ impl Store {
         .bind(collection_id)
         .fetch_all(&self.pool)
         .await?;
-        rows.iter()
-            .map(|row| {
-                Ok(ItemMeta {
-                    name: row.try_get("name")?,
-                    etag: row.try_get("etag")?,
-                    size: row.try_get("size")?,
-                })
-            })
-            .collect()
+        rows.iter().map(meta_from_row).collect()
     }
 
     /// A single object of a collection.
@@ -203,6 +210,44 @@ impl Store {
         .fetch_optional(&self.pool)
         .await?;
         row.as_ref().map(item_from_row).transpose()
+    }
+
+    /// Metadata of a single object, without loading its content.
+    pub async fn item_meta(&self, collection_id: i64, name: &str) -> Result<Option<ItemMeta>> {
+        let row = sqlx::query(
+            "SELECT name, etag, length(content) AS size FROM items WHERE collection_id = ? AND name = ?",
+        )
+        .bind(collection_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(meta_from_row).transpose()
+    }
+
+    /// Like [`Store::query_items`], but returns only metadata, so callers can
+    /// check result size before loading any content.
+    pub async fn query_item_meta(
+        &self,
+        collection_id: i64,
+        component: Option<&str>,
+        start: Option<i64>,
+        end: Option<i64>,
+    ) -> Result<Vec<ItemMeta>> {
+        let rows = sqlx::query(
+            "SELECT name, etag, length(content) AS size FROM items \
+             WHERE collection_id = ?1 \
+               AND (?2 IS NULL OR component = ?2) \
+               AND (?3 IS NULL OR range_end IS NULL OR range_end > ?3) \
+               AND (?4 IS NULL OR range_start IS NULL OR range_start < ?4) \
+             ORDER BY name",
+        )
+        .bind(collection_id)
+        .bind(component)
+        .bind(start)
+        .bind(end)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(meta_from_row).collect()
     }
 
     /// Objects whose conservative time span overlaps `[start, end)`.
@@ -236,9 +281,11 @@ impl Store {
         collection_id: i64,
         name: &str,
         item: &NewItem<'_>,
-        precondition: Precondition<'_>,
+        precondition: &Precondition,
     ) -> Result<PutOutcome> {
-        let mut tx = self.pool.begin().await?;
+        // IMMEDIATE takes the write lock up front, so the checks below and
+        // the write are atomic and concurrent writers wait instead of failing.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let existing: Option<String> =
             sqlx::query("SELECT etag FROM items WHERE collection_id = ? AND name = ?")
                 .bind(collection_id)
@@ -271,6 +318,22 @@ impl Store {
             if count >= MAX_ITEMS_PER_COLLECTION {
                 return Err(StoreError::Limit("too many objects in collection"));
             }
+        }
+
+        let used: i64 = sqlx::query(
+            "SELECT COALESCE(SUM(length(i.content)), 0) AS used FROM items i \
+             JOIN collections c ON c.id = i.collection_id \
+             WHERE c.owner_id = (SELECT owner_id FROM collections WHERE id = ?1) \
+               AND NOT (i.collection_id = ?1 AND i.name = ?2)",
+        )
+        .bind(collection_id)
+        .bind(name)
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get("used")?;
+        let size = i64::try_from(item.content.len()).unwrap_or(i64::MAX);
+        if used.saturating_add(size) > MAX_BYTES_PER_USER {
+            return Err(StoreError::Limit("storage quota exceeded"));
         }
 
         let revision: i64 = sqlx::query(
@@ -314,9 +377,9 @@ impl Store {
         &self,
         collection_id: i64,
         name: &str,
-        precondition: Precondition<'_>,
+        precondition: &Precondition,
     ) -> Result<bool> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let existing: Option<String> =
             sqlx::query("SELECT etag FROM items WHERE collection_id = ? AND name = ?")
                 .bind(collection_id)
@@ -387,27 +450,37 @@ mod tests {
         let new = item("u1", "\"e1\"", Some(0), Some(10));
         assert_eq!(
             store
-                .put_item(cal.id, "a.ics", &new, Precondition::MustNotExist)
+                .put_item(cal.id, "a.ics", &new, &Precondition::MustNotExist)
                 .await
                 .unwrap(),
             PutOutcome::Created
         );
         assert!(matches!(
             store
-                .put_item(cal.id, "a.ics", &new, Precondition::MustNotExist)
+                .put_item(cal.id, "a.ics", &new, &Precondition::MustNotExist)
                 .await,
             Err(StoreError::PreconditionFailed)
         ));
         let v2 = item("u1", "\"e2\"", Some(0), Some(10));
         assert!(matches!(
             store
-                .put_item(cal.id, "a.ics", &v2, Precondition::EtagMatches("\"old\""))
+                .put_item(
+                    cal.id,
+                    "a.ics",
+                    &v2,
+                    &Precondition::IfMatch(vec!["\"old\"".into()])
+                )
                 .await,
             Err(StoreError::PreconditionFailed)
         ));
         assert_eq!(
             store
-                .put_item(cal.id, "a.ics", &v2, Precondition::EtagMatches("\"e1\""))
+                .put_item(
+                    cal.id,
+                    "a.ics",
+                    &v2,
+                    &Precondition::IfMatch(vec!["\"e1\"".into()])
+                )
                 .await
                 .unwrap(),
             PutOutcome::Updated
@@ -419,19 +492,23 @@ mod tests {
 
         assert!(matches!(
             store
-                .delete_item(cal.id, "a.ics", Precondition::EtagMatches("\"e1\""))
+                .delete_item(
+                    cal.id,
+                    "a.ics",
+                    &Precondition::IfMatch(vec!["\"e1\"".into()])
+                )
                 .await,
             Err(StoreError::PreconditionFailed)
         ));
         assert!(
             store
-                .delete_item(cal.id, "a.ics", Precondition::None)
+                .delete_item(cal.id, "a.ics", &Precondition::None)
                 .await
                 .unwrap()
         );
         assert!(
             !store
-                .delete_item(cal.id, "a.ics", Precondition::None)
+                .delete_item(cal.id, "a.ics", &Precondition::None)
                 .await
                 .unwrap()
         );
@@ -446,6 +523,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn if_none_match_with_tags() {
+        let (store, cal, _) = setup().await;
+        let v1 = item("u", "\"e1\"", None, None);
+        store
+            .put_item(cal.id, "a.ics", &v1, &Precondition::None)
+            .await
+            .unwrap();
+        let v2 = item("u", "\"e2\"", None, None);
+        assert!(matches!(
+            store
+                .put_item(
+                    cal.id,
+                    "a.ics",
+                    &v2,
+                    &Precondition::IfNoneMatch(vec!["\"e1\"".into()])
+                )
+                .await,
+            Err(StoreError::PreconditionFailed)
+        ));
+        store
+            .put_item(
+                cal.id,
+                "a.ics",
+                &v2,
+                &Precondition::IfNoneMatch(vec!["\"other\"".into()]),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .put_item(
+                    cal.id,
+                    "a.ics",
+                    &v1,
+                    &Precondition::IfMatch(vec!["\"x\"".into(), "\"e1\"".into()])
+                )
+                .await,
+            Err(StoreError::PreconditionFailed)
+        ));
+        store
+            .put_item(
+                cal.id,
+                "a.ics",
+                &v1,
+                &Precondition::IfMatch(vec!["\"x\"".into(), "\"e2\"".into()]),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn uid_must_be_unique_per_collection() {
         let (store, alice, bob) = setup().await;
         store
@@ -453,12 +581,12 @@ mod tests {
                 alice.id,
                 "a.ics",
                 &item("same", "\"1\"", None, None),
-                Precondition::None,
+                &Precondition::None,
             )
             .await
             .unwrap();
         assert!(matches!(
-            store.put_item(alice.id, "b.ics", &item("same", "\"2\"", None, None), Precondition::None).await,
+            store.put_item(alice.id, "b.ics", &item("same", "\"2\"", None, None), &Precondition::None).await,
             Err(StoreError::UidConflict(name)) if name == "a.ics"
         ));
         // Another user's calendar is independent.
@@ -467,7 +595,7 @@ mod tests {
                 bob.id,
                 "b.ics",
                 &item("same", "\"2\"", None, None),
-                Precondition::None,
+                &Precondition::None,
             )
             .await
             .unwrap();
@@ -481,7 +609,7 @@ mod tests {
                 alice.id,
                 "secret.ics",
                 &item("u", "\"1\"", None, None),
-                Precondition::None,
+                &Precondition::None,
             )
             .await
             .unwrap();
@@ -495,7 +623,7 @@ mod tests {
         );
         assert!(
             !store
-                .delete_item(bob.id, "secret.ics", Precondition::None)
+                .delete_item(bob.id, "secret.ics", &Precondition::None)
                 .await
                 .unwrap()
         );
@@ -516,7 +644,7 @@ mod tests {
                     cal.id,
                     name,
                     &item(name, "\"e\"", start, end),
-                    Precondition::None,
+                    &Precondition::None,
                 )
                 .await
                 .unwrap();
@@ -596,7 +724,7 @@ mod tests {
                 work.id,
                 "x.ics",
                 &item("x", "\"1\"", None, None),
-                Precondition::None,
+                &Precondition::None,
             )
             .await
             .unwrap();

@@ -93,7 +93,7 @@ impl CalendarObject {
         if calendar.name != "VCALENDAR" {
             return Err(IcalError::Invalid("top-level component must be VCALENDAR"));
         }
-        if calendar.property("VERSION").map(|p| p.value.as_str()) != Some("2.0") {
+        if single(&calendar, "VERSION")?.map(|p| p.value.as_str()) != Some("2.0") {
             return Err(IcalError::Invalid("VERSION:2.0 is required"));
         }
         // Scheduling messages are not calendar object resources (RFC 4791 §4.1).
@@ -361,6 +361,7 @@ mod tests {
             )
             .is_err()
         );
+        assert!(CalendarObject::parse(b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nVERSION:3.0\r\nBEGIN:VEVENT\r\nUID:a\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n").is_err());
         assert!(CalendarObject::parse(b"BEGIN:VCARD\r\nVERSION:4.0\r\nEND:VCARD\r\n").is_err());
     }
 }

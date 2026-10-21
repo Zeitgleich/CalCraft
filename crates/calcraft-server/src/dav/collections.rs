@@ -35,9 +35,19 @@ struct Changes {
     color: Option<Option<String>>,
 }
 
+/// Invisible formatting characters that can disguise names: zero-width
+/// characters, bidirectional overrides and isolates, byte order mark.
+fn is_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}'
+    )
+}
+
 fn clean_text(node: &Node, max: usize) -> Option<String> {
     let text = node.text.trim();
-    (text.chars().count() <= max && !text.chars().any(char::is_control)).then(|| text.to_owned())
+    (text.chars().count() <= max && !text.chars().any(|c| c.is_control() || is_format_char(c)))
+        .then(|| text.to_owned())
 }
 
 /// `#RRGGBB` or `#RRGGBBAA`, as used by Apple and Thunderbird.

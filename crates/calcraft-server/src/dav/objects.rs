@@ -37,26 +37,46 @@ struct UnsupportedCondition;
 
 impl IntoResponse for UnsupportedCondition {
     fn into_response(self) -> Response {
-        (StatusCode::BAD_REQUEST, "unsupported conditional header").into_response()
+        (StatusCode::BAD_REQUEST, "malformed conditional header").into_response()
     }
 }
 
-/// Reads `If-Match` / `If-None-Match`. Only the forms clients use for
-/// writes are accepted: `*` and a single entity tag.
-fn precondition(headers: &HeaderMap) -> Result<Precondition<'_>, UnsupportedCondition> {
+/// Parses an entity-tag list (`"a", W/"b"`). With `weak`, the `W/` prefix
+/// is dropped (weak comparison); otherwise weak tags are kept as they are
+/// and can never equal the strong tags this server issues.
+fn etag_list(value: &str, weak: bool) -> Result<Vec<String>, UnsupportedCondition> {
+    const MAX_TAGS: usize = 32;
+    let tags: Vec<String> = value
+        .split(',')
+        .map(str::trim)
+        .map(|tag| {
+            let opaque = tag.strip_prefix("W/").unwrap_or(tag);
+            let valid = opaque.len() >= 2
+                && opaque.starts_with('"')
+                && opaque.ends_with('"')
+                && !opaque[1..opaque.len() - 1].contains('"');
+            if !valid {
+                return Err(UnsupportedCondition);
+            }
+            Ok(if weak { opaque } else { tag }.to_owned())
+        })
+        .collect::<Result<_, _>>()?;
+    if tags.is_empty() || tags.len() > MAX_TAGS {
+        return Err(UnsupportedCondition);
+    }
+    Ok(tags)
+}
+
+/// Reads `If-Match` / `If-None-Match` (RFC 9110 §13.1.1, §13.1.2).
+fn precondition(headers: &HeaderMap) -> Result<Precondition, UnsupportedCondition> {
     match (header(headers, IF_MATCH), header(headers, IF_NONE_MATCH)) {
         (None, None) => Ok(Precondition::None),
         (None, Some("*")) => Ok(Precondition::MustNotExist),
+        (None, Some(tags)) => Ok(Precondition::IfNoneMatch(etag_list(tags, true)?)),
         (Some("*"), None) => Ok(Precondition::MustExist),
-        (Some(tag), None)
-            if tag.starts_with('"')
-                && tag.ends_with('"')
-                && tag.len() >= 2
-                && !tag.contains(',') =>
-        {
-            Ok(Precondition::EtagMatches(tag))
-        }
-        _ => Err(UnsupportedCondition),
+        (Some(tags), None) => Ok(Precondition::IfMatch(etag_list(tags, false)?)),
+        // Both headers at once are not used by DAV clients.
+        (Some(_), Some(_)) => Err(UnsupportedCondition),
     }
 }
 
@@ -141,7 +161,7 @@ pub async fn put(ctx: Ctx<'_>, resource: Resource, request: Request) -> Response
     match ctx
         .state
         .store
-        .put_item(collection.id, &name, &item, precondition)
+        .put_item(collection.id, &name, &item, &precondition)
         .await
     {
         Ok(outcome) => {
@@ -172,7 +192,7 @@ pub async fn delete(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
             match ctx
                 .state
                 .store
-                .delete_item(collection.id, &name, precondition)
+                .delete_item(collection.id, &name, &precondition)
                 .await
             {
                 Ok(true) => StatusCode::NO_CONTENT.into_response(),
@@ -181,7 +201,8 @@ pub async fn delete(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
             }
         }
         Resource::Collection(collection) => {
-            if precondition != Precondition::None {
+            // Collections have no entity tag: only `If-Match: *` can hold.
+            if !matches!(precondition, Precondition::None | Precondition::MustExist) {
                 return StatusCode::PRECONDITION_FAILED.into_response();
             }
             match ctx.state.store.delete_collection(collection.id).await {
