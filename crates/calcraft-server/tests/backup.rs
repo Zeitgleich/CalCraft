@@ -40,6 +40,8 @@ fn calcraft(db: &Path) -> Command {
     command
         .env_remove("CALCRAFT_CONFIG")
         .env("CALCRAFT_STORAGE__DATABASE", db)
+        // Build switch that operators may still have exported; must not break startup.
+        .env("CALCRAFT_UI_REQUIRED", "1")
         .stdin(Stdio::null());
     command
 }

@@ -178,8 +178,13 @@ impl Config {
             }
             figment = figment.merge(Toml::file(path));
         }
-        // `CALCRAFT_CONFIG` selects the file and is not a configuration key.
-        figment = figment.merge(Env::prefixed(ENV_PREFIX).ignore(&["config"]).split("__"));
+        // `CALCRAFT_CONFIG` selects the file and `CALCRAFT_UI_REQUIRED` is a build
+        // switch (see `calcraft-web/build.rs`); neither is a configuration key.
+        figment = figment.merge(
+            Env::prefixed(ENV_PREFIX)
+                .ignore(&["config", "ui_required"])
+                .split("__"),
+        );
         Self::from_figment(figment)
     }
 
