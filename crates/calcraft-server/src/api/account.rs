@@ -120,10 +120,22 @@ fn password_error(err: PasswordError) -> ApiError {
     }
 }
 
+/// Password-based actions are refused when `security.password_login` is
+/// off: local 2FA only protects password logins, and there is no password
+/// to change or confirm.
+fn require_password_login(state: &AppState) -> Result<(), ApiError> {
+    if state.auth.password_login() {
+        Ok(())
+    } else {
+        Err(ApiError::PasswordLoginDisabled)
+    }
+}
+
 pub async fn login(
     State(state): State<AppState>,
     ApiJson(request): ApiJson<LoginRequest>,
 ) -> Result<Response, ApiError> {
+    require_password_login(&state)?;
     let username = parse_username(&request.username)?;
     let user = authenticate(
         &state,
@@ -132,7 +144,13 @@ pub async fn login(
         request.code.as_deref(),
     )
     .await?;
+    let cookie = start_session(&state, &user).await?;
+    Ok(([(SET_COOKIE, cookie)], Json(me_of(&user))).into_response())
+}
 
+/// Creates a session for an authenticated user and returns the
+/// `Set-Cookie` value. Shared by password and SSO login.
+pub(super) async fn start_session(state: &AppState, user: &User) -> Result<String, ApiError> {
     let token = random_token::<32>();
     let created = now();
     state
@@ -144,8 +162,7 @@ pub async fn login(
             created + SESSION_TTL,
         )
         .await?;
-    let cookie = session_cookie(Some(&token), state.secure_cookies);
-    Ok(([(SET_COOKIE, cookie)], Json(me_of(&user))).into_response())
+    Ok(session_cookie(Some(&token), state.secure_cookies))
 }
 
 pub async fn logout(
@@ -166,6 +183,7 @@ pub async fn change_password(
     session: SessionUser,
     ApiJson(request): ApiJson<ChangePassword>,
 ) -> Result<Response, ApiError> {
+    require_password_login(&state)?;
     let user = session.user;
     authenticate(
         &state,
@@ -188,6 +206,7 @@ pub async fn totp_setup(
     State(state): State<AppState>,
     session: SessionUser,
 ) -> Result<Json<TotpSetup>, ApiError> {
+    require_password_login(&state)?;
     let user = session.user;
     if user.totp_enabled {
         return Err(ApiError::Conflict(
@@ -219,6 +238,7 @@ pub async fn totp_enable(
     session: SessionUser,
     ApiJson(request): ApiJson<TotpEnable>,
 ) -> Result<Json<RecoveryCodes>, ApiError> {
+    require_password_login(&state)?;
     let user = session.user;
     let Some(totp) = state.store.totp_state(user.id).await? else {
         return Err(ApiError::BadRequest("call totp/setup first"));
@@ -250,6 +270,7 @@ pub async fn totp_disable(
     session: SessionUser,
     ApiJson(request): ApiJson<TotpDisable>,
 ) -> Result<StatusCode, ApiError> {
+    require_password_login(&state)?;
     let user = session.user;
     if !user.totp_enabled {
         return Err(ApiError::Conflict(

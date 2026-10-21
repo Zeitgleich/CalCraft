@@ -24,12 +24,47 @@ pre_migration_backups_keep = 3
 hsts = false
 # Mark session cookies Secure (HTTPS only). Browsers accept them on http://localhost too.
 secure_cookies = true
+# Allow login with the account password (REST login and DAV Basic auth). false = SSO
+# only (requires [oidc]); app passwords keep working.
+password_login = true
 
 [web_ui]
 enabled = true
 
 [api]
 enabled = true
+
+[oidc]
+# Single sign-on for the web UI via OpenID Connect (Keycloak, Authentik, Zitadel, Entra ID, ...).
+enabled = false
+# Issuer exactly as in the ID token; discovery: <issuer>/.well-known/openid-configuration.
+# issuer = "https://keycloak.example.com/realms/main"
+# client_id = "calcraft"
+# Prefer client_secret_file or CALCRAFT_OIDC__CLIENT_SECRET over client_secret.
+# client_secret_file = "/run/secrets/calcraft-oidc"
+# "client_secret_basic" (default), "client_secret_post" or "none" (public client).
+# token_auth_method = "client_secret_basic"
+# Must be registered at the IdP exactly like this.
+# redirect_uri = "https://cal.example.com/api/v1/auth/oidc/callback"
+# scopes = ["openid", "profile"]
+# username_claim = "preferred_username"
+# username_strip_suffix = "@example.com"
+# Admin rights from a claim (dotted paths like "realm_access.roles" work).
+# admin_claim = "groups"
+# admin_value = "/calcraft-admins"
+# Only users with this claim value may log in via SSO.
+# required_claim = "groups"
+# required_value = "/calcraft-users"
+# auto_create_users = false
+# Existing local accounts are only linked after
+# `calcraft user allow-sso-link <user> --subject <IdP user ID>` (single use, 1 h default).
+# Refuse SSO for accounts with local 2FA (default: rely on the IdP's MFA).
+# require_local_totp = false
+# signing_algs = ["RS256", "ES256"]
+# clock_skew_secs = 30
+# extra_endpoint_hosts = []
+# ca_file = "/etc/calcraft/idp-ca.pem"
+# button_label = "Single sign-on"
 
 [logging]
 # Filter syntax of tracing-subscriber; RUST_LOG takes precedence.

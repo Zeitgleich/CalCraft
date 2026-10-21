@@ -4,7 +4,7 @@ use std::io::BufRead;
 
 use anyhow::{Context, bail};
 use calcraft_core::Username;
-use calcraft_server::auth::hash_password;
+use calcraft_server::{Config, auth::hash_password};
 use calcraft_store::Store;
 use clap::{Args, Subcommand};
 
@@ -41,6 +41,22 @@ pub enum UserCommand {
         #[arg(long)]
         revoke: bool,
     },
+    /// Remove the SSO (OIDC) identity bound to a user, e.g. after the IdP
+    /// account was recreated. The next SSO login binds the new identity.
+    UnbindSso { username: String },
+    /// Allow the IdP account with this subject (user ID in the IdP admin
+    /// console) to bind the existing account on its next SSO login (single
+    /// use, issuer from `oidc.issuer`). Existing accounts are never linked
+    /// by username alone.
+    AllowSsoLink {
+        username: String,
+        /// Subject (`sub` claim) of the IdP account, e.g. the Keycloak user ID.
+        #[arg(long)]
+        subject: String,
+        /// Validity of the approval in hours (1-24).
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=24))]
+        hours: u16,
+    },
 }
 
 /// Passwords are never accepted as command-line arguments, because those
@@ -75,7 +91,7 @@ fn parse_username(name: &str) -> anyhow::Result<Username> {
     Ok(name.parse()?)
 }
 
-pub async fn run(store: &Store, command: UserCommand) -> anyhow::Result<()> {
+pub async fn run(store: &Store, config: &Config, command: UserCommand) -> anyhow::Result<()> {
     match command {
         UserCommand::Add {
             username,
@@ -128,6 +144,39 @@ pub async fn run(store: &Store, command: UserCommand) -> anyhow::Result<()> {
             }
             let state = if revoke { "revoked" } else { "granted" };
             println!("admin rights of {username} {state}");
+        }
+        UserCommand::UnbindSso { username } => {
+            let username = parse_username(&username)?;
+            let Some(record) = store.user_credentials(&username).await? else {
+                bail!("user {username} does not exist");
+            };
+            let removed = store.unbind_oidc_identities(record.user.id).await?;
+            store.delete_sessions_of(record.user.id).await?;
+            println!("removed {removed} SSO identities of {username}");
+        }
+        UserCommand::AllowSsoLink {
+            username,
+            subject,
+            hours,
+        } => {
+            if !config.oidc.enabled {
+                bail!("single sign-on is not configured ([oidc] enabled = true)");
+            }
+            let subject = subject.trim();
+            if subject.is_empty() || subject.len() > 255 || subject.chars().any(char::is_control) {
+                bail!("invalid subject");
+            }
+            let username = parse_username(&username)?;
+            let Some(record) = store.user_credentials(&username).await? else {
+                bail!("user {username} does not exist");
+            };
+            let expires = calcraft_server::auth::now() + i64::from(hours) * 3600;
+            store
+                .approve_oidc_link(record.user.id, &config.oidc.issuer, subject, expires)
+                .await?;
+            println!(
+                "the next SSO login of subject {subject} as {username} within {hours} h binds that IdP account to this user"
+            );
         }
     }
     Ok(())

@@ -13,9 +13,19 @@ name = "calcraft"
 path = "src/main.rs"
 
 [features]
-default = ["web-ui", "api"]
+default = ["web-ui", "api", "oidc"]
 web-ui = ["dep:calcraft-web"]
 api = ["dep:futures-core"]
+# Single sign-on via OpenID Connect (outbound HTTPS client and JWT verification).
+oidc = [
+    "api",
+    "dep:http-body-util",
+    "dep:hyper-util",
+    "dep:hyper-rustls",
+    "dep:ring",
+    "dep:rustls",
+    "dep:rustls-native-certs",
+]
 
 [dependencies]
 anyhow.workspace = true
@@ -34,12 +44,18 @@ figment.workspace = true
 futures-core = { workspace = true, optional = true }
 getrandom.workspace = true
 hmac.workspace = true
+http-body-util = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true, features = ["client-legacy", "http1", "tokio"] }
+hyper-rustls = { workspace = true, optional = true }
+ring = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+rustls-native-certs = { workspace = true, optional = true }
 rpassword.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha1.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["time"] }
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -13,7 +13,10 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -86,6 +89,16 @@ pub async fn hash_password_async(password: String) -> Result<String, PasswordErr
         .map_err(|_| PasswordError::Hash)?
 }
 
+/// Stored as password hash of accounts created by SSO: not a PHC string,
+/// so no password ever matches. An administrator can set a real password
+/// later (`calcraft user passwd`).
+pub const UNUSABLE_PASSWORD_HASH: &str = "!sso-only";
+
+/// Whether a stored hash can match any password.
+pub fn has_usable_password(hash: &str) -> bool {
+    PasswordHash::new(hash).is_ok()
+}
+
 fn verify_password(password: &str, hash: &str) -> bool {
     PasswordHash::new(hash).ok().is_some_and(|parsed| {
         Argon2::default()
@@ -153,9 +166,21 @@ pub struct Authenticator {
     hashing: Semaphore,
     cache: Mutex<HashMap<Username, CacheEntry>>,
     failures: Mutex<HashMap<Username, Failures>>,
+    /// Account passwords accepted (`security.password_login`).
+    password_login: AtomicBool,
 }
 
 impl Authenticator {
+    /// Enables or disables login with account passwords (REST login and
+    /// DAV Basic auth); app passwords are unaffected.
+    pub fn set_password_login(&self, enabled: bool) {
+        self.password_login.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn password_login(&self) -> bool {
+        self.password_login.load(Ordering::Relaxed)
+    }
+
     pub fn new(store: Store) -> anyhow::Result<Arc<Self>> {
         let mut cache_key = [0u8; 32];
         getrandom::fill(&mut cache_key)
@@ -173,6 +198,7 @@ impl Authenticator {
             hashing: Semaphore::new(MAX_CONCURRENT_HASHES),
             cache: Mutex::new(HashMap::new()),
             failures: Mutex::new(HashMap::new()),
+            password_login: AtomicBool::new(true),
         }))
     }
 
@@ -191,6 +217,9 @@ impl Authenticator {
         if let Some((id, secret)) = parse_app_password(&credentials.password) {
             return self.check_app_password(&attempt, id, secret).await;
         }
+        if !self.password_login() {
+            return AuthOutcome::Denied;
+        }
         match self
             .check_first_factor_reserved(&attempt, &credentials.password)
             .await
@@ -202,19 +231,6 @@ impl Authenticator {
             }
             outcome => outcome,
         }
-    }
-
-    /// Verifies the account password and resets the failure counter on
-    /// success. Only for accounts without 2FA or after the second factor.
-    pub async fn check_password(&self, username: &Username, password: &str) -> AuthOutcome {
-        let Some(attempt) = self.reserve(username) else {
-            return self.locked_out().await;
-        };
-        let outcome = self.check_first_factor_reserved(&attempt, password).await;
-        if matches!(outcome, AuthOutcome::Authenticated(_)) {
-            self.clear_failures(username);
-        }
-        outcome
     }
 
     /// Reserves a login attempt for `username`. Attempts in progress count
@@ -351,16 +367,22 @@ impl Authenticator {
             return AuthOutcome::Authenticated(record.user.clone());
         }
 
-        let hash = record
+        // Accounts without a usable password (SSO only) are checked against
+        // the dummy hash, so they take as long as a wrong password.
+        let usable = record
             .as_ref()
-            .map_or_else(|| self.dummy_hash.clone(), |r| r.password_hash.clone());
+            .is_some_and(|r| has_usable_password(&r.password_hash));
+        let hash = match &record {
+            Some(record) if usable => record.password_hash.clone(),
+            _ => self.dummy_hash.clone(),
+        };
         let Ok(_permit) = self.hashing.acquire().await else {
             return AuthOutcome::Error;
         };
         let password = password.to_owned();
         let valid =
             match tokio::task::spawn_blocking(move || verify_password(&password, &hash)).await {
-                Ok(valid) => valid,
+                Ok(valid) => valid && usable,
                 Err(err) => {
                     tracing::error!(%err, "password verification task failed");
                     return AuthOutcome::Error;
