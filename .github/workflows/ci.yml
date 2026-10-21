@@ -116,6 +116,26 @@ jobs:
         if: always()
         run: cat "$RUNNER_TEMP/server.log"
 
+  backup:
+    name: backup/restore smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Build server
+        run: cargo build -p calcraft-server
+      - name: Upgrade test (database of every older migration state -> current)
+        run: cargo test -p calcraft-store upgrade_from_every_previous_migration
+      - name: Backup, delete, restore with the real binary
+        env:
+          CALCRAFT_STORAGE__DATABASE: ${{ runner.temp }}/smoke/calcraft.db
+        run: scripts/backup-smoke-test.sh target/debug/calcraft "$RUNNER_TEMP/smoke"
+      - name: Server log
+        if: always()
+        run: cat "$RUNNER_TEMP/smoke/server.log" || true
+
   fuzz:
     name: fuzz (smoke)
     runs-on: ubuntu-latest

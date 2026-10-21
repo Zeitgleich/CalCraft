@@ -12,6 +12,12 @@ request_timeout_secs = 30
 [storage]
 # SQLite database file, created with owner-only permissions on first start.
 database = "calcraft.db"
+# Before migrating an existing database at startup, write a backup
+# <database>.pre-migration-<version>-<timestamp> next to it. If the backup
+# fails, CalCraft does not migrate and does not start.
+pre_migration_backup = true
+# Number of pre-migration backups to keep (older ones are deleted).
+pre_migration_backups_keep = 3
 
 [security]
 # Send Strict-Transport-Security. Enable only when CalCraft is served over HTTPS.

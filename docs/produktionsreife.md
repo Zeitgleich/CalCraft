@@ -26,8 +26,8 @@ Legende: ✅ erledigt · 🟡 teilweise · ❌ offen · 👤 braucht reale Gerä
 |---|---|---|
 | Atomare Schreibvorgänge, korrekte Transaktionen | ✅ | `BEGIN IMMEDIATE` für alle Objekt-Schreibvorgänge, PROPPATCH atomar, Änderungsprotokoll in derselben Transaktion. |
 | Keine verlorenen Änderungen bei parallelen Zugriffen | 🟡 | ETag/`If-Match` → 412, UID-Prüfung atomar. **Lücke:** kein Stresstest mit vielen parallelen Schreibern; Verhalten bei `SQLITE_BUSY` unter Last nicht gemessen. |
-| Backups mit dokumentiertem **und getestetem** Restore | 🟡 | Online-Backup per `sqlite3 .backup` und Restore dokumentiert. **Lücke:** kein `calcraft backup`/`restore`-Befehl, kein automatisierter Restore-Test in der CI. |
-| Sichere Datenbankmigrationen inkl. Rollback-Strategie | ❌ | Migrationen laufen beim Start (vorwärts). **Lücke:** kein automatisches Backup vor Migrationen, keine Rollback-Strategie, kein Test „alte DB-Version → neue Version“. |
+| Backups mit dokumentiertem **und getestetem** Restore | ✅ | `calcraft backup` (online per `VACUUM INTO`, verifiziert, atomar, 0600) und `calcraft restore` (nur bei gestopptem Server, erkannt über Dateisperre; verweigert neuere Backups; alte DB bleibt erhalten). Tests: `calcraft-store` `backup/tests.rs`, `calcraft-server/tests/backup.rs`, CI-Job `backup` (`scripts/backup-smoke-test.sh`). Doku: `docs/backup-and-upgrade.md`. |
+| Sichere Datenbankmigrationen inkl. Rollback-Strategie | ✅ | Vor Migrationen verifiziertes Backup `*.pre-migration-<v>-<ts>` (konfigurierbar, letzte N), bei Fehler keine Migration; Migration nur mit exklusiver Sperre; neuere/abgebrochene Schemata und fremde SQLite-Dateien werden abgelehnt. Rollback = Pre-Migration-Backup mit alter Version einspielen. Test „jeder ältere Migrationsstand → aktuell“ (`upgrade_from_every_previous_migration`, auch im CI-Job `backup`). |
 | Korrekte Behandlung von ETags, `If-Match`, Sync-Tokens | ✅ | RFC-konform inkl. Listen und Weak-ETags, Sync-Tokens an Collection gebunden (Salt), abgeschnittene Antworten mit Fortsetzung; Tests. |
 
 ## P1 – Kalenderkompatibilität
@@ -73,8 +73,8 @@ laufen parallel, weil sie für den Pilotbetrieb gebraucht werden.
 - [x] **Autorisierungs-Matrix-Test:** jede DAV-Methode × Ressourcentyp × fremder/eigener Benutzer, plus jeder REST-Endpunkt; der Test schlägt fehl, wenn eine neue Route nicht in der Matrix steht (`crates/calcraft-server/tests/authz_matrix.rs`)
 - [ ] Begrenzung gleichzeitiger Anfragen (global und pro Client-IP, mit Trusted-Proxy-Konfiguration für `X-Forwarded-For`)
 - [ ] Stresstest paralleler Schreiber (keine verlorenen Änderungen, kein 500 bei `SQLITE_BUSY`)
-- [ ] `calcraft backup` / `calcraft restore` mit Integritätsprüfung; Restore-Test in der CI
-- [ ] Automatisches Backup vor jeder Migration, dokumentierte Rollback-Strategie (Restore des Pre-Migration-Backups + alte Version), CI-Test „DB von Release N → N+1“
+- [x] `calcraft backup` / `calcraft restore` mit Integritätsprüfung; Restore-Test in der CI
+- [x] Automatisches Backup vor jeder Migration, dokumentierte Rollback-Strategie (Restore des Pre-Migration-Backups + alte Version), CI-Test „DB von Release N → N+1“
 - [ ] Fehlertests: Datenbank nicht beschreibbar, Platte voll, abgebrochene Uploads
 - [ ] Fuzzing ausbauen (REST-JSON, Pfade/hrefs)
 - [ ] Log-Test: keine Passwörter, Tokens, Codes oder Kalenderinhalte in Logs

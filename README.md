@@ -85,6 +85,19 @@ use HTTP Basic authentication.
 Other user commands: `calcraft user list|passwd|disable|enable|set-admin`
 (`calcraft user add alice --admin` creates an administrator).
 
+### Backups and upgrades
+
+```sh
+calcraft backup /var/backups/calcraft-$(date +%F).db   # online, while the server runs
+calcraft restore --yes /var/backups/calcraft-2026-10-21.db   # server stopped
+```
+
+Before applying database migrations, CalCraft writes a backup
+`calcraft.db.pre-migration-<version>-<timestamp>` next to the database (the last 3
+are kept). Migrations are forward-only; to roll back an upgrade, restore that
+backup with the previous version. Details in
+[`docs/backup-and-upgrade.md`](docs/backup-and-upgrade.md).
+
 ### App passwords and two-factor authentication
 
 Each device should get its own app password (`ccap_…`), created
