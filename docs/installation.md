@@ -659,6 +659,14 @@ volume.
 
    With Docker: `git pull`, rebuild the image, then remove and re-create the
    container with the same `docker run` command (the volume keeps the data).
+
+   With a published release instead: download the archive for your platform
+   and `SHA256SUMS` from the
+   [releases page](https://github.com/Zeitgleich/CalCraft/releases) (or use
+   the image `ghcr.io/zeitgleich/calcraft:<version>`), **verify them** as
+   described in [`release-verification.md`](release-verification.md)
+   (checksums, `gh attestation verify`, `cosign verify` for the image), then
+   install `calcraft` from the archive as above and restart the service.
 3. Database migrations run automatically at startup. Check
    `journalctl -u calcraft` (`wrote pre-migration backup`,
    `database migrations applied`) and `curl -s http://127.0.0.1:5232/readyz`.

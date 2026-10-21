@@ -92,7 +92,7 @@ laufen parallel, weil sie für den Pilotbetrieb gebraucht werden.
 
 ### Phase 4 – Pilotbetrieb und Release (≈ Woche 5–6)
 
-- [ ] Release-Pipeline: signierte Binaries (Linux/macOS/Windows), Prüfsummen, Build-Provenance, signiertes Docker-Image
+- [x] Release-Pipeline (`.github/workflows/release.yml`, Tag `vX.Y.Z`): Binaries für Linux (x86_64/aarch64), macOS (aarch64/x86_64) und Windows (x86_64) mit eingebetteter Web-UI, `SHA256SUMS`, Build-Provenance (Sigstore, keyless) für jedes Archiv und `SHA256SUMS`, Multi-Arch-Docker-Image auf ghcr.io, per Digest mit cosign signiert und attestiert; Prüfanleitung `docs/release-verification.md`, Checkliste `docs/releasing.md`. „Signiert“ heißt hier Sigstore-Attestierung, **keine** Apple-/Microsoft-Codesignatur (offen, siehe Client-Phase C4). **Nachweis offen:** ein echter Tag-Lauf (Attestierung, Push, cosign, Release-Anlage sind nur im Tag-Lauf aktiv; lokal geprüft: actionlint, Release-Build) und der Probelauf per `workflow_dispatch`.
 - [x] Optionaler Update-Hinweis im Admin-Bereich (standardmäßig aus): `[updates] check`, fester GitHub-Endpunkt, `GET /api/v1/admin/update` (`crates/calcraft-server/src/updates.rs`, PLAN.md §12)
 - [ ] `/metrics` (Prometheus) und Beispiel-Alarmregeln
 - [ ] Installation auf frischem System nach `docs/installation.md` reproduzieren
