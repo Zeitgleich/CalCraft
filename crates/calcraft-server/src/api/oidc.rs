@@ -140,7 +140,7 @@ pub async fn callback(
             let reason = match err {
                 OidcError::InvalidState | OidcError::BadCallback => Failure::InvalidRequest,
                 OidcError::IdpError => Failure::Denied,
-                OidcError::Unavailable(_) | OidcError::Busy => Failure::Unavailable,
+                OidcError::Unavailable(_) => Failure::Unavailable,
                 OidcError::Exchange(_) | OidcError::Token(_) => Failure::LoginFailed,
             };
             tracing::warn!(%err, "SSO login rejected");

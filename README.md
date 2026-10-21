@@ -111,21 +111,28 @@ How accounts are matched:
   first login an existing local account with that name is bound to the IdP account.
 - Disabled accounts cannot log in. Accounts created via SSO have no usable password
   until an administrator sets one (`calcraft user passwd`).
+- SSO logins do not ask for the local TOTP code; enforce MFA at the IdP.
 
 The UI learns whether SSO is available from `GET /api/v1/auth/methods`. Errors are
 reported by redirecting to `/?sso_error=<code>`. Discovery, JWKS and token endpoints
 must be https on the issuer's host (`extra_endpoint_hosts` allows more, e.g. Google's
 `www.googleapis.com`); the system trust store is used, `ca_file` adds a private CA.
 
-To try it against a real Keycloak locally:
+To try it against a real Keycloak locally (verified with Keycloak 26.4):
 
 ```sh
-docker run --rm -p 8080:8080 -e KC_BOOTSTRAP_ADMIN_USERNAME=admin \
+docker run --rm --name kc -p 127.0.0.1:8080:8080 -e KC_BOOTSTRAP_ADMIN_USERNAME=admin \
   -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin quay.io/keycloak/keycloak:26.4 start-dev
 ```
 
-Plain-HTTP issuers like `http://localhost:8080/realms/main` need
-`allow_insecure_issuer_for_testing = true` – never use that in production.
+In the admin console (`http://127.0.0.1:8080`, admin/admin) create realm `main`, the
+client as above with redirect URI `http://localhost:5232/api/v1/auth/oidc/callback`,
+and a user. Then run CalCraft with `issuer = "http://127.0.0.1:8080/realms/main"`,
+that redirect URI, `[security] secure_cookies = false` and
+`allow_insecure_issuer_for_testing = true` (plain HTTP – never in production), open
+`http://localhost:5232/api/v1/auth/oidc/login` and log in. Use the same host name for
+the issuer everywhere: Keycloak derives `iss` from the URL it is called with.
+Stop the container with `docker stop kc`.
 
 See [`calcraft.example.toml`](calcraft.example.toml). Every setting can be overridden via
 environment variables with the prefix `CALCRAFT_` and `__` as separator,

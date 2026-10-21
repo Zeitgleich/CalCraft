@@ -72,8 +72,6 @@ pub enum OidcError {
     Exchange(String),
     #[error("ID token rejected: {0}")]
     Token(#[from] TokenError),
-    #[error("too many pending logins")]
-    Busy,
 }
 
 /// Query parameters of the redirect back from the IdP.
@@ -439,25 +437,15 @@ impl Oidc {
         let verifier = random_b64::<32>();
         let binding = random_b64::<32>();
         let challenge = pkce_challenge(&verifier);
-        {
-            let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-            if pending.len() >= MAX_PENDING {
-                let now = Instant::now();
-                pending.retain(|_, p| p.expires > now);
-            }
-            if pending.len() >= MAX_PENDING {
-                return Err(OidcError::Busy);
-            }
-            pending.insert(
-                *blake3::hash(state.as_bytes()).as_bytes(),
-                Pending {
-                    binding: blake3::hash(binding.as_bytes()),
-                    nonce: nonce.clone(),
-                    verifier,
-                    expires: Instant::now() + PENDING_TTL,
-                },
-            );
-        }
+        self.remember_pending(
+            &state,
+            Pending {
+                binding: blake3::hash(binding.as_bytes()),
+                nonce: nonce.clone(),
+                verifier,
+                expires: Instant::now() + PENDING_TTL,
+            },
+        );
         let query = form(&[
             ("response_type", "code"),
             ("client_id", &self.client_id),
@@ -477,6 +465,27 @@ impl Oidc {
             location: format!("{}{separator}{query}", provider.authorization_endpoint),
             binding,
         })
+    }
+
+    /// Stores a pending login under the hash of its state, within
+    /// [`MAX_PENDING`].
+    fn remember_pending(&self, state: &str, entry: Pending) {
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        if pending.len() >= MAX_PENDING {
+            let now = Instant::now();
+            pending.retain(|_, p| p.expires > now);
+        }
+        // Still full (anyone can start logins): drop the oldest entry
+        // rather than refusing all new logins for ten minutes.
+        if pending.len() >= MAX_PENDING
+            && let Some(oldest) = pending
+                .iter()
+                .min_by_key(|(_, p)| p.expires)
+                .map(|(key, _)| *key)
+        {
+            pending.remove(&oldest);
+        }
+        pending.insert(*blake3::hash(state.as_bytes()).as_bytes(), entry);
     }
 
     /// Consumes the pending login of `state` (single use, also on failure)
@@ -812,8 +821,8 @@ mod tests {
     fn pending_logins_are_single_use_and_browser_bound() {
         let rp = oidc(|_| {});
         let insert = |state: &str, binding: &str, ttl: Duration| {
-            rp.pending.lock().unwrap().insert(
-                *blake3::hash(state.as_bytes()).as_bytes(),
+            rp.remember_pending(
+                state,
                 Pending {
                     binding: blake3::hash(binding.as_bytes()),
                     nonce: "n".to_owned(),
@@ -834,5 +843,20 @@ mod tests {
         assert!(rp.take_pending("s3", None).is_err());
         insert("s4", "b4", Duration::ZERO);
         assert!(rp.take_pending("s4", Some("b4")).is_err());
+
+        // A flood of started logins evicts the oldest entries, but the
+        // table stays bounded and new logins keep working.
+        insert("victim", "bv", PENDING_TTL);
+        for i in 0..MAX_PENDING {
+            insert(
+                &format!("flood{i}"),
+                "bf",
+                PENDING_TTL + Duration::from_secs(1),
+            );
+        }
+        assert_eq!(rp.pending.lock().unwrap().len(), MAX_PENDING);
+        assert!(rp.take_pending("victim", Some("bv")).is_err());
+        insert("fresh", "bn", PENDING_TTL * 2);
+        assert!(rp.take_pending("fresh", Some("bn")).is_ok());
     }
 }

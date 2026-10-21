@@ -220,6 +220,9 @@ standardmäßig aus; wird beim Start validiert.
   `calcraft user unbind-sso` setzt zurück. Auto-Anlage nur mit `auto_create_users`
   (Passwort-Hash unbrauchbar). Deaktivierte Konten abgelehnt. Admin-Recht aus Claim nur,
   wenn `admin_claim` gesetzt ist (dann in beide Richtungen synchronisiert).
+- **Bewusst so:** SSO-Login verlangt keine lokale TOTP (MFA ist Sache des IdP). Ein
+  bestehendes lokales Konto wird beim ersten SSO-Login über den Benutzernamen gebunden –
+  der IdP darf daher keine frei wählbaren Benutzernamen erlauben (sonst `required_claim`).
 - **Später:** Backchannel-Logout und RP-initiated Logout, Admin-API zum Lösen von
   SSO-Bindungen, optional Pflicht-SSO (Passwort-Login abschaltbar).
 
