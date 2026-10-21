@@ -183,14 +183,40 @@ fn convert(
         .collect())
 }
 
+/// Replaces control and bidirectional formatting characters, so that
+/// reported UIDs and reasons are safe to print on a terminal or in logs.
+pub fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
+                '\u{fffd}'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 fn reject(report: &mut ImportReport, uid: Option<&str>, reason: &str) {
     report.rejected += 1;
     if report.errors.len() < MAX_REASONS {
         report.errors.push(ImportRejection {
-            uid: uid.map(|u| u.chars().take(MAX_REPORTED_UID).collect()),
-            reason: reason.to_owned(),
+            uid: uid.map(|u| printable(&u.chars().take(MAX_REPORTED_UID).collect::<String>())),
+            reason: printable(reason),
         });
     }
+}
+
+/// Permission to run one import; at most two exist at a time. Callers
+/// acquire it before reading the upload, so waiting imports hold no data.
+pub struct ImportSlot(#[allow(dead_code)] tokio::sync::SemaphorePermit<'static>);
+
+pub async fn import_slot() -> Result<ImportSlot, TransferError> {
+    IMPORTS
+        .acquire()
+        .await
+        .map(ImportSlot)
+        .map_err(|_| TransferError::Invalid("server is shutting down".to_owned()))
 }
 
 /// Imports `data` into a collection the caller has already resolved for
@@ -199,16 +225,13 @@ pub async fn import(
     store: &Store,
     collection: &Collection,
     format: Format,
-    data: Vec<u8>,
+    data: Bytes,
     on_conflict: OnConflict,
+    _slot: ImportSlot,
 ) -> Result<ImportReport, TransferError> {
     if data.len() > MAX_IMPORT_SIZE {
         return Err(TransferError::TooLarge);
     }
-    let _permit = IMPORTS
-        .acquire()
-        .await
-        .map_err(|_| TransferError::Invalid("server is shutting down".to_owned()))?;
     let owned = collection.clone();
     let prepared = tokio::task::spawn_blocking(move || convert(&owned, &data, format))
         .await
@@ -348,6 +371,18 @@ mod tests {
         assert_ne!(uid, new_uid());
         let stamp = dtstamp();
         assert!(calcraft_ical::parse_utc_datetime(&stamp).is_ok(), "{stamp}");
+    }
+
+    #[test]
+    fn reports_are_printable() {
+        assert_eq!(
+            printable("a\u{1b}[31mb\r\n\u{202e}c"),
+            "a\u{fffd}[31mb\u{fffd}\u{fffd}\u{fffd}c"
+        );
+        let mut report = ImportReport::default();
+        reject(&mut report, Some("x\u{7}y"), "bad\u{1b}");
+        assert_eq!(report.errors[0].uid.as_deref(), Some("x\u{fffd}y"));
+        assert_eq!(report.errors[0].reason, "bad\u{fffd}");
     }
 
     #[test]

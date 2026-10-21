@@ -89,7 +89,9 @@ and rejected objects and the reasons for the first 20 rejections.
 Every imported object is validated exactly like a CalDAV/CardDAV upload, and the
 storage quota and object limits apply. Files may have at most 20 MiB and 10 000
 objects; via HTTP the global `server.max_body_bytes` (10 MiB by default) applies
-as well. Events are grouped by UID together with their recurrence overrides, and
+as well, so import larger files with the CLI. The converted objects may take at most
+four times the file size (64 MiB at most), which bounds the copies of time zones.
+Events are grouped by UID together with their recurrence overrides, and
 the referenced time zones are copied into each object. Objects whose UID already
 exists in the collection are skipped unless `on_conflict=replace` is given.
 

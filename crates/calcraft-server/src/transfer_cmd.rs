@@ -106,7 +106,9 @@ pub async fn import(store: &Store, args: ImportArgs) -> anyhow::Result<()> {
     if data.len() > MAX_IMPORT_SIZE {
         bail!("file too large (at most {MAX_IMPORT_SIZE} bytes)");
     }
-    let report = transfer::import(store, &collection, format, data, on_conflict).await?;
+    let slot = transfer::import_slot().await?;
+    let report =
+        transfer::import(store, &collection, format, data.into(), on_conflict, slot).await?;
     println!(
         "created {}, replaced {}, skipped {}, rejected {}",
         report.created, report.replaced, report.skipped, report.rejected
@@ -114,8 +116,8 @@ pub async fn import(store: &Store, args: ImportArgs) -> anyhow::Result<()> {
     for error in &report.errors {
         eprintln!(
             "rejected {}: {}",
-            error.uid.as_deref().unwrap_or("(no UID)"),
-            error.reason
+            transfer::printable(error.uid.as_deref().unwrap_or("(no UID)")),
+            transfer::printable(&error.reason)
         );
     }
     if report.rejected > report.errors.len() as u64 {

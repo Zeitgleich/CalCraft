@@ -140,10 +140,12 @@ vCalendar 1.0 (Import, best effort), Webcal-Abos (eingehend und veröffentlichen
   Komponenten-Set) und durch `put_item` (Quota 512 MiB pro Benutzer, 100 000 Objekte pro Collection).
 - Termine werden nach UID gruppiert (Ausnahmen mit `RECURRENCE-ID` bleiben beim Master), referenzierte
   `VTIMEZONE`s werden in jedes Objekt kopiert, `METHOD` wird entfernt. Objekte ohne UID erhalten eine UUID.
-- Limits: Datei ≤ 20 MiB (per HTTP zusätzlich `server.max_body_bytes`, Standard 10 MiB), ≤ 10 000 Objekte,
-  Objekt ≤ 1 MiB, Parser-Budgets (200 000 Komponenten, 500 000 Properties, JSON-Tiefe/-Wertezahl vorab
-  geprüft, xCal ≤ 1 000 000 Elemente), höchstens 2 Importe gleichzeitig. Ablehnungen werden gezählt,
-  die ersten 20 mit Grund gemeldet.
+- Limits: Datei ≤ 20 MiB (per HTTP zusätzlich `server.max_body_bytes`, Standard 10 MiB – größere Dateien
+  über die CLI), ≤ 10 000 Objekte (schon beim Gruppieren geprüft), Objekt ≤ 1 MiB, erzeugte Objekte
+  zusammen ≤ 4 × Dateigröße (mind. 4 MiB, höchstens 64 MiB; begrenzt kopierte `VTIMEZONE`s), Parser-Budgets (200 000 Komponenten, 500 000 Properties, JSON-Tiefe/-Wertezahl vorab
+  geprüft, xCal ≤ 1 000 000 Elemente), höchstens 2 Importe gleichzeitig (Slot vor dem Lesen des Bodys). Ablehnungen werden
+  gezählt, die ersten 20 mit Grund gemeldet (Steuerzeichen ersetzt). RECUR-, Zahlen-, GEO- und Datumswerte
+  aus jCal/xCal werden gegen ihre Syntax geprüft.
 - UID-Konflikte nur innerhalb der Ziel-Collection: `on_conflict=skip` (Standard) oder `replace`.
 - xCal nutzt den einzigen XML-Parser (`calcraft_ical::xml`, von `calcraft-dav` mitbenutzt): keine DTDs,
   keine Entities.

@@ -379,6 +379,20 @@ async fn foreign_and_unknown_collections_are_not_found() {
 }
 
 #[tokio::test]
+async fn rejection_reports_contain_no_control_characters() {
+    let app = app().await;
+    let alice = login(&app, ALICE).await;
+    let csv = "name,uid\n,\"\u{1b}]0;pwned\u{7}\u{1b}[2J\r\nx\"\n";
+    let report = import(&app, &alice, "addressbook/default", "?format=csv", csv)
+        .await
+        .json();
+    assert_eq!(report["rejected"], 1, "{report}");
+    let uid = report["errors"][0]["uid"].as_str().unwrap();
+    assert!(!uid.chars().any(char::is_control), "{uid:?}");
+    assert!(uid.contains("pwned"));
+}
+
+#[tokio::test]
 async fn import_requires_csrf_header_and_valid_options() {
     let app = app().await;
     let alice = login(&app, ALICE).await;

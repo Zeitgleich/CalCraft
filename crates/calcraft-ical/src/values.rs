@@ -269,17 +269,68 @@ fn parse_recur(value: &str) -> Option<TypedValue> {
     for part in value.split(';') {
         let (key, value) = part.split_once('=')?;
         let key = key.to_ascii_lowercase();
-        if key.is_empty() || !is_name(&key) {
+        // Unknown rule parts make the whole value `unknown` (kept raw).
+        if !is_recur_part(&key) {
             return None;
         }
         let values = if key == "until" {
             vec![ext_until(value)?]
         } else {
-            value.split(',').map(str::to_owned).collect()
+            let values: Vec<String> = value.split(',').map(str::to_owned).collect();
+            if !values.iter().all(|v| is_recur_value(v)) {
+                return None;
+            }
+            values
         };
         parts.push((key, values));
     }
     Some(TypedValue::Recur(parts))
+}
+
+/// Rule parts of RFC 5545 §3.3.10 and RFC 7529 (RSCALE, SKIP).
+fn is_recur_part(key: &str) -> bool {
+    matches!(
+        key,
+        "freq"
+            | "until"
+            | "count"
+            | "interval"
+            | "bysecond"
+            | "byminute"
+            | "byhour"
+            | "byday"
+            | "bymonthday"
+            | "byyearday"
+            | "byweekno"
+            | "bymonth"
+            | "bysetpos"
+            | "wkst"
+            | "rscale"
+            | "skip"
+    )
+}
+
+/// Characters that can occur in a rule part value (`MO`, `-1SU`, `10`,
+/// `GREGORIAN`, `5L`).
+fn is_recur_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'-')
+}
+
+/// Characters of a date, time, offset or duration in basic form.
+fn is_temporal_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.bytes().all(|b| {
+            b.is_ascii_digit()
+                || matches!(
+                    b,
+                    b'T' | b'Z' | b'+' | b'-' | b'P' | b'W' | b'D' | b'H' | b'M' | b'S'
+                )
+        })
 }
 
 /// Rule parts that are numbers in jCal.
@@ -440,28 +491,70 @@ fn checked_name(name: &str) -> Result<String, IcalError> {
     Ok(name.to_ascii_uppercase())
 }
 
-fn recur_to_string(parts: &[(String, Vec<String>)]) -> String {
+const INVALID_VALUE: IcalError = IcalError::Invalid("value does not match its type");
+
+fn recur_to_string(parts: &[(String, Vec<String>)]) -> Result<String, IcalError> {
     let mut parts: Vec<&(String, Vec<String>)> = parts.iter().collect();
     parts.sort_by_key(|(key, _)| recur_rank(key));
-    parts
-        .iter()
-        .map(|(key, values)| {
-            let values: Vec<String> = if key == "until" {
-                values.iter().map(|v| compact(v)).collect()
-            } else {
-                values.clone()
-            };
-            format!("{}={}", key.to_ascii_uppercase(), values.join(","))
-        })
-        .collect::<Vec<_>>()
-        .join(";")
+    let mut out = Vec::with_capacity(parts.len());
+    for (key, values) in parts {
+        let key = key.to_ascii_lowercase();
+        if !is_recur_part(&key) || values.is_empty() {
+            return Err(IcalError::Invalid("invalid RRULE part"));
+        }
+        let values: Vec<String> = if key == "until" {
+            values.iter().map(|v| compact(v)).collect()
+        } else {
+            values.clone()
+        };
+        let valid = if key == "until" {
+            values.len() == 1 && values.iter().all(|v| is_temporal_value(v))
+        } else {
+            values.iter().all(|v| is_recur_value(v))
+        };
+        if !valid {
+            return Err(IcalError::Invalid("invalid RRULE value"));
+        }
+        out.push(format!("{}={}", key.to_ascii_uppercase(), values.join(",")));
+    }
+    Ok(out.join(";"))
 }
 
-fn value_to_string(vtype: &str, value: &TypedValue) -> String {
-    match value {
+fn temporal(value: &str) -> Result<String, IcalError> {
+    checked_temporal(compact(value))
+}
+
+/// The end of a PERIOD: a date-time or a duration.
+fn period_end_value(value: &str) -> Result<String, IcalError> {
+    if period_end(value) {
+        checked_temporal(value.to_owned())
+    } else {
+        temporal(value)
+    }
+}
+
+fn checked_temporal(value: String) -> Result<String, IcalError> {
+    if is_temporal_value(&value) {
+        Ok(value)
+    } else {
+        Err(INVALID_VALUE)
+    }
+}
+
+fn number(value: &str) -> Result<String, IcalError> {
+    if is_number(value) && value.len() <= 64 {
+        Ok(value.to_owned())
+    } else {
+        Err(INVALID_VALUE)
+    }
+}
+
+fn value_to_string(vtype: &str, value: &TypedValue) -> Result<String, IcalError> {
+    Ok(match value {
         TypedValue::Text(text) if vtype == "text" => escape_text(text),
-        TypedValue::Text(text) if is_temporal(vtype) => compact(text),
-        TypedValue::Text(text) | TypedValue::Number(text) => text.clone(),
+        TypedValue::Text(text) if is_temporal(vtype) => temporal(text)?,
+        TypedValue::Number(text) => number(text)?,
+        TypedValue::Text(text) => text.clone(),
         TypedValue::Bool(true) => "TRUE".to_owned(),
         TypedValue::Bool(false) => "FALSE".to_owned(),
         TypedValue::Structured(components) => components
@@ -475,17 +568,12 @@ fn value_to_string(vtype: &str, value: &TypedValue) -> String {
             })
             .collect::<Vec<_>>()
             .join(";"),
-        TypedValue::Recur(parts) => recur_to_string(parts),
+        TypedValue::Recur(parts) => recur_to_string(parts)?,
         TypedValue::Period(start, end) => {
-            let end = if period_end(end) {
-                end.clone()
-            } else {
-                compact(end)
-            };
-            format!("{}/{end}", compact(start))
+            format!("{}/{}", temporal(start)?, period_end_value(end)?)
         }
-        TypedValue::Geo(lat, lon) => format!("{lat};{lon}"),
-    }
+        TypedValue::Geo(lat, lon) => format!("{};{}", number(lat)?, number(lon)?),
+    })
 }
 
 /// Converts a typed property back into a content line property.
@@ -525,7 +613,7 @@ pub(crate) fn from_typed(
         .values
         .iter()
         .map(|v| value_to_string(&vtype, v))
-        .collect::<Vec<_>>()
+        .collect::<Result<Vec<_>, _>>()?
         .join(",");
     Ok(Property {
         name,
@@ -639,6 +727,43 @@ mod tests {
             from_typed(&typed, Dialect::ICal).unwrap().value,
             "x\\nBEGIN:VEVENT"
         );
+    }
+
+    #[test]
+    fn rejects_values_that_do_not_match_their_type() {
+        let bad = |vtype: &str, value: TypedValue| {
+            let typed = TypedProperty {
+                name: "x-test".into(),
+                params: vec![],
+                vtype: vtype.into(),
+                values: vec![value],
+            };
+            from_typed(&typed, Dialect::ICal).is_err()
+        };
+        let recur = |key: &str, value: &str| {
+            TypedValue::Recur(vec![
+                ("freq".into(), vec!["DAILY".into()]),
+                (key.into(), vec![value.into()]),
+            ])
+        };
+        assert!(bad("recur", recur("x-evil", "1")));
+        assert!(bad("recur", recur("count", "1;BYDAY=MO")));
+        assert!(bad("recur", recur("byday", "MO:x")));
+        assert!(bad("recur", recur("until", "2026-10-21;X=1")));
+        assert!(!bad("recur", recur("byday", "-1SU")));
+        assert!(bad("integer", TypedValue::Number("5;X".into())));
+        assert!(bad("float", TypedValue::Geo("1.5".into(), "2;3".into())));
+        assert!(bad(
+            "date-time",
+            TypedValue::Text("2026-10-21T10:00:00;x".into())
+        ));
+        assert!(bad(
+            "period",
+            TypedValue::Period("20261021T100000Z".into(), "P1D,x".into())
+        ));
+        // Unknown rule parts in stored data survive as an `unknown` value.
+        let t = round_trip(Dialect::ICal, "RRULE:FREQ=DAILY;X-NAME=1");
+        assert_eq!(t.vtype, "unknown");
     }
 
     #[test]

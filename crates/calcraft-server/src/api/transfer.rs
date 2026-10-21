@@ -104,17 +104,14 @@ pub async fn import(
         Some(name) => OnConflict::from_name(name)
             .ok_or(ApiError::BadRequest("on_conflict must be skip or replace"))?,
     };
+    // Wait for an import slot before reading the body, so queued imports
+    // do not hold their uploads in memory.
+    let slot = transfer::import_slot().await?;
     let data = to_bytes(body, MAX_IMPORT_SIZE)
         .await
         .map_err(|_| ApiError::TooLarge)?;
-    let report = transfer::import(
-        &state.store,
-        &collection,
-        format,
-        data.to_vec(),
-        on_conflict,
-    )
-    .await?;
+    let report =
+        transfer::import(&state.store, &collection, format, data, on_conflict, slot).await?;
     tracing::info!(
         user = %session.user.username,
         collection = %collection.slug,

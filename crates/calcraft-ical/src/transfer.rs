@@ -35,6 +35,14 @@ const IMPORT_LIMITS: Limits = Limits {
     max_properties: 50 * MAX_IMPORT_OBJECTS,
 };
 
+/// Hard cap for the converted objects of one import. Time zones are
+/// copied into every object that uses them, so the output can be larger
+/// than the input; it may grow to [`EXPANSION`] times the input size, but
+/// never beyond this.
+pub const MAX_IMPORT_OUTPUT: usize = 64 * 1024 * 1024;
+const EXPANSION: usize = 4;
+const MIN_OUTPUT_BUDGET: usize = 4 * 1024 * 1024;
+
 const PRODID: &str = concat!("-//CalCraft//CalCraft ", env!("CARGO_PKG_VERSION"), "//EN");
 
 /// What kind of collection is imported into or exported from.
@@ -181,7 +189,14 @@ pub fn import(
     if !format.supports(target) {
         return Err(IcalError::Invalid("format does not fit the collection"));
     }
-    let mut objects = Vec::new();
+    let mut out = Output {
+        objects: Vec::new(),
+        bytes: 0,
+        budget: data
+            .len()
+            .saturating_mul(EXPANSION)
+            .clamp(MIN_OUTPUT_BUDGET, MAX_IMPORT_OUTPUT),
+    };
     let roots = match format {
         Format::ICalendar | Format::VCard => parse_all(data, &IMPORT_LIMITS)?,
         Format::JCal => jcal::read(data, Dialect::ICal, &IMPORT_LIMITS)?,
@@ -191,19 +206,57 @@ pub fn import(
             let text = std::str::from_utf8(data).map_err(|_| IcalError::Malformed("not UTF-8"))?;
             let rows = csv::parse(text, MAX_IMPORT_OBJECTS + 1)?;
             match target {
-                Target::Calendar => csv_events(&rows, ctx, &mut objects)?,
-                Target::Addressbook => csv_contacts(&rows, ctx, &mut objects)?,
+                Target::Calendar => csv_events(&rows, ctx, &mut out.objects)?,
+                Target::Addressbook => csv_contacts(&rows, ctx, &mut out.objects)?,
             }
         }
     };
     match target {
-        Target::Calendar => split_calendars(roots, ctx, &mut objects),
-        Target::Addressbook => split_cards(roots, ctx, &mut objects),
+        Target::Calendar => split_calendars(roots, ctx, &mut out)?,
+        Target::Addressbook => split_cards(roots, ctx, &mut out)?,
     }
-    if objects.len() > MAX_IMPORT_OBJECTS {
-        return Err(IcalError::Limit("too many objects in import"));
+    if out.objects.len() > MAX_IMPORT_OBJECTS {
+        return Err(TOO_MANY);
     }
-    Ok(objects)
+    Ok(out.objects)
+}
+
+const TOO_MANY: IcalError = IcalError::Limit("too many objects in import");
+const TOO_MUCH: IcalError = IcalError::Limit("import expands to too much data");
+
+/// The objects of an import with the count and size budgets.
+struct Output {
+    objects: Vec<ImportedObject>,
+    /// Bytes of serialised objects so far.
+    bytes: usize,
+    budget: usize,
+}
+
+impl Output {
+    fn push(&mut self, object: ImportedObject) -> Result<(), IcalError> {
+        if self.objects.len() >= MAX_IMPORT_OBJECTS {
+            return Err(TOO_MANY);
+        }
+        if let Ok(data) = &object.data {
+            self.charge(data.len())?;
+        }
+        self.objects.push(object);
+        Ok(())
+    }
+
+    /// Fails if `bytes` more would exceed the budget.
+    fn check(&self, bytes: usize) -> Result<(), IcalError> {
+        if self.bytes.saturating_add(bytes) > self.budget {
+            return Err(TOO_MUCH);
+        }
+        Ok(())
+    }
+
+    fn charge(&mut self, bytes: usize) -> Result<(), IcalError> {
+        self.check(bytes)?;
+        self.bytes += bytes;
+        Ok(())
+    }
 }
 
 /// TZIDs referenced by parameters anywhere in the component.
@@ -222,19 +275,20 @@ fn referenced_tzids(component: &Component, out: &mut HashSet<String>) {
 fn split_calendars(
     roots: Vec<Component>,
     ctx: &mut ImportContext<'_>,
-    objects: &mut Vec<ImportedObject>,
-) {
-    let mut timezones: Vec<(String, Component)> = Vec::new();
+    out: &mut Output,
+) -> Result<(), IcalError> {
+    // TZID -> definition and its serialised size (first definition wins).
+    let mut timezones: HashMap<String, (Component, usize)> = HashMap::new();
     let mut groups: Vec<(String, Vec<Component>)> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
     let mut header: Vec<Property> = Vec::new();
 
     for root in roots {
         if root.name != "VCALENDAR" {
-            objects.push(ImportedObject {
+            out.push(ImportedObject {
                 uid: None,
                 data: Err(IcalError::Invalid("top-level component must be VCALENDAR")),
-            });
+            })?;
             continue;
         }
         if header.is_empty() {
@@ -251,11 +305,14 @@ fn split_calendars(
         for mut component in root.components {
             match component.name.as_str() {
                 "VTIMEZONE" => {
-                    let tzid = component.property("TZID").map(|p| p.value.clone());
-                    if let Some(tzid) = tzid
-                        && !timezones.iter().any(|(t, _)| *t == tzid)
+                    let Some(tzid) = component.property("TZID").map(|p| p.value.clone()) else {
+                        continue;
+                    };
+                    if let std::collections::hash_map::Entry::Vacant(entry) = timezones.entry(tzid)
                     {
-                        timezones.push((tzid, component));
+                        // Unserialisable definitions count as too large.
+                        let size = to_string(&component).map_or(usize::MAX, |t| t.len());
+                        entry.insert((component, size));
                     }
                 }
                 "VEVENT" | "VTODO" | "VJOURNAL" => {
@@ -270,15 +327,19 @@ fn split_calendars(
                     match index.get(&uid) {
                         Some(&i) => groups[i].1.push(component),
                         None => {
+                            // Reject early, before any per-object work.
+                            if groups.len() + out.objects.len() >= MAX_IMPORT_OBJECTS {
+                                return Err(TOO_MANY);
+                            }
                             index.insert(uid.clone(), groups.len());
                             groups.push((uid, vec![component]));
                         }
                     }
                 }
-                _ => objects.push(ImportedObject {
+                _ => out.push(ImportedObject {
                     uid: uid_of(&component),
                     data: Err(IcalError::Invalid("unsupported component type")),
-                }),
+                })?,
             }
         }
     }
@@ -288,10 +349,29 @@ fn split_calendars(
         for component in &components {
             referenced_tzids(component, &mut tzids);
         }
-        let mut children: Vec<Component> = timezones
+        // Sorted by TZID, for stable output.
+        let mut used: Vec<&String> = tzids
             .iter()
-            .filter(|(tzid, _)| tzids.contains(tzid))
-            .map(|(_, tz)| tz.clone())
+            .filter(|t| timezones.contains_key(*t))
+            .collect();
+        used.sort();
+        let tz_bytes = used
+            .iter()
+            .filter_map(|t| timezones.get(*t))
+            .fold(0usize, |sum, (_, size)| sum.saturating_add(*size));
+        // Check the size before copying anything.
+        if tz_bytes > MAX_OBJECT_SIZE {
+            out.push(ImportedObject {
+                uid: Some(uid),
+                data: Err(IcalError::TooLarge),
+            })?;
+            continue;
+        }
+        out.check(tz_bytes)?;
+        let mut children: Vec<Component> = used
+            .iter()
+            .filter_map(|t| timezones.get(*t))
+            .map(|(tz, _)| tz.clone())
             .collect();
         children.extend(components);
         let calendar = Component {
@@ -299,24 +379,25 @@ fn split_calendars(
             properties: header.clone(),
             components: children,
         };
-        objects.push(ImportedObject {
+        out.push(ImportedObject {
             uid: Some(uid),
             data: serialize(&calendar),
-        });
+        })?;
     }
+    Ok(())
 }
 
 fn split_cards(
     roots: Vec<Component>,
     ctx: &mut ImportContext<'_>,
-    objects: &mut Vec<ImportedObject>,
-) {
+    out: &mut Output,
+) -> Result<(), IcalError> {
     for mut card in roots {
         if card.name != "VCARD" {
-            objects.push(ImportedObject {
+            out.push(ImportedObject {
                 uid: None,
                 data: Err(IcalError::Invalid("top-level component must be VCARD")),
-            });
+            })?;
             continue;
         }
         let uid = match uid_of(&card) {
@@ -329,11 +410,12 @@ fn split_cards(
                 uid
             }
         };
-        objects.push(ImportedObject {
+        out.push(ImportedObject {
             uid: Some(uid),
             data: serialize(&card),
-        });
+        })?;
     }
+    Ok(())
 }
 
 /// Column lookup by header name (case-insensitive, `_`/`-`/space ignored).

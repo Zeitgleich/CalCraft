@@ -526,3 +526,72 @@ fn invalid_objects_are_left_to_validation() {
         assert!(CalendarObject::parse(&result.unwrap()).is_err());
     }
 }
+
+fn import_result(data: &str) -> Result<Vec<calcraft_ical::ImportedObject>, IcalError> {
+    let mut new_uid = String::new;
+    let mut ctx = ImportContext {
+        dtstamp: "20261021T120000Z",
+        new_uid: &mut new_uid,
+    };
+    transfer::import(
+        data.as_bytes(),
+        Format::ICalendar,
+        Target::Calendar,
+        &mut ctx,
+    )
+}
+
+#[test]
+fn copied_timezones_cannot_blow_up_memory() {
+    // One ~900 KB VTIMEZONE used by 10 000 events would expand to ~9 GB.
+    let filler = format!("X-FILLER:{}\r\n", "x".repeat(90));
+    let mut data =
+        String::from("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTIMEZONE\r\nTZID:Big\r\n");
+    data.push_str(&filler.repeat(9_000));
+    data.push_str("END:VTIMEZONE\r\n");
+    for i in 0..MAX_IMPORT_OBJECTS {
+        data.push_str(&format!(
+            "BEGIN:VEVENT\r\nUID:{i}\r\nDTSTART;TZID=Big:20261021T100000\r\nEND:VEVENT\r\n"
+        ));
+    }
+    data.push_str("END:VCALENDAR\r\n");
+    assert!(data.len() < 3 * 1024 * 1024);
+    let started = std::time::Instant::now();
+    assert_eq!(
+        import_result(&data),
+        Err(IcalError::Limit("import expands to too much data"))
+    );
+    assert!(started.elapsed().as_secs() < 10);
+}
+
+#[test]
+fn many_timezones_are_handled_in_linear_time() {
+    let mut data = String::from("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n");
+    for i in 0..100_000 {
+        data.push_str(&format!(
+            "BEGIN:VTIMEZONE\r\nTZID:tz{i}\r\nEND:VTIMEZONE\r\n"
+        ));
+    }
+    let events = |n: usize| {
+        (0..n)
+            .map(|i| {
+                format!(
+                    "BEGIN:VEVENT\r\nUID:{i}\r\nDTSTART;TZID=tz{i}:20261021T100000\r\nEND:VEVENT\r\n"
+                )
+            })
+            .collect::<String>()
+    };
+    let started = std::time::Instant::now();
+    let ok = format!("{data}{}END:VCALENDAR\r\n", events(5_000));
+    let objects = import_result(&ok).unwrap();
+    assert_eq!(objects.len(), 5_000);
+    let first = String::from_utf8(objects[0].data.clone().unwrap()).unwrap();
+    assert_eq!(first.matches("BEGIN:VTIMEZONE").count(), 1);
+    // Too many objects is detected while grouping, before serialising.
+    let too_many = format!("{data}{}END:VCALENDAR\r\n", events(MAX_IMPORT_OBJECTS + 1));
+    assert_eq!(
+        import_result(&too_many),
+        Err(IcalError::Limit("too many objects in import"))
+    );
+    assert!(started.elapsed().as_secs() < 20, "{:?}", started.elapsed());
+}

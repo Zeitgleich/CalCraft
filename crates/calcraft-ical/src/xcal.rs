@@ -234,7 +234,7 @@ impl Reader<'_> {
                     values.push(match vtype.as_str() {
                         "integer" | "float" => TypedValue::Number(child.text.trim().to_owned()),
                         "boolean" => TypedValue::Bool(child.text.trim() == "true"),
-                        "date" | "date-time" | "time" | "utc-offset" => {
+                        "date" | "date-time" | "time" | "utc-offset" | "duration" => {
                             TypedValue::Text(child.text.trim().to_owned())
                         }
                         _ => TypedValue::Text(child.text.clone()),
