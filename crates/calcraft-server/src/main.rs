@@ -143,7 +143,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             telemetry::init_cli(&config.logging)?;
             runtime()?.block_on(async {
                 let store = open_store(&config).await?;
-                transfer_cmd::import(&store, args).await
+                transfer_cmd::import(&store, args, config.max_vcard_bytes()).await
             })
         }
     }

@@ -35,6 +35,11 @@ pub use xcal::NS_XCAL;
 /// Largest accepted calendar object in bytes (`CALDAV:max-resource-size`).
 pub const MAX_OBJECT_SIZE: usize = 1024 * 1024;
 
+/// Hard upper bound for one vCard in bytes. vCards carry embedded photos,
+/// so they may be larger than calendar objects; the server's configurable
+/// limit (`CARDDAV:max-resource-size`) can only be lower.
+pub const MAX_VCARD_SIZE: usize = 10 * 1024 * 1024;
+
 /// Errors for malformed or unacceptable iCalendar data.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IcalError {

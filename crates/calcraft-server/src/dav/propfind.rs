@@ -46,7 +46,7 @@ pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
             Err(err) => return store_error(err),
         },
         _ => {
-            let props = properties(&resource, user);
+            let props = properties(&resource, user, ctx.state.max_vcard_bytes);
             responses.push(respond(&href_of(&resource, username), &props, &query));
         }
     }
@@ -57,7 +57,11 @@ pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
                 Ok(collections) => {
                     for collection in collections {
                         let href = collection_href(&collection, username);
-                        let props = properties(&Resource::Collection(collection), user);
+                        let props = properties(
+                            &Resource::Collection(collection),
+                            user,
+                            ctx.state.max_vcard_bytes,
+                        );
                         responses.push(respond(&href, &props, &query));
                     }
                 }

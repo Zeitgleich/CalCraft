@@ -28,12 +28,31 @@ pub(crate) struct Simulation {
     /// 0: never used (hooks do nothing), else `SimulatedFailure` + 1.
     #[cfg(feature = "test-hooks")]
     state: Arc<AtomicU8>,
-    /// Simulated per-user quota in bytes; 0: the real one.
+    /// Storage quota per user in bytes; 0: the real quota.
     #[cfg(feature = "test-hooks")]
     quota: Arc<AtomicI64>,
 }
 
 impl Simulation {
+    /// The storage quota per user, [`crate::items::MAX_BYTES_PER_USER`]
+    /// unless a test lowered it.
+    #[cfg_attr(not(feature = "test-hooks"), allow(clippy::unused_self))]
+    pub(crate) fn quota(&self) -> i64 {
+        #[cfg(feature = "test-hooks")]
+        {
+            let quota = self.quota.load(Ordering::Acquire);
+            if quota > 0 {
+                return quota;
+            }
+        }
+        crate::items::MAX_BYTES_PER_USER
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn set_quota(&self, bytes: i64) {
+        self.quota.store(bytes, Ordering::Release);
+    }
+
     /// Adds the hooks to the pool options.
     #[cfg_attr(not(feature = "test-hooks"), allow(clippy::unused_self))]
     pub(crate) fn hook(&self, options: SqlitePoolOptions) -> SqlitePoolOptions {
@@ -64,24 +83,6 @@ impl Simulation {
             SimulatedFailure::Full => 3,
         };
         self.state.store(state, Ordering::Release);
-    }
-
-    #[cfg(feature = "test-hooks")]
-    pub(crate) fn set_quota(&self, bytes: i64) {
-        self.quota.store(bytes, Ordering::Release);
-    }
-
-    /// The simulated quota, if one is set.
-    #[cfg_attr(not(feature = "test-hooks"), allow(clippy::unused_self))]
-    pub(crate) fn quota(&self) -> Option<i64> {
-        #[cfg(feature = "test-hooks")]
-        {
-            let bytes = self.quota.load(Ordering::Acquire);
-            if bytes > 0 {
-                return Some(bytes);
-            }
-        }
-        None
     }
 }
 

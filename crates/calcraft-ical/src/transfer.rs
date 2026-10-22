@@ -13,7 +13,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    Component, IcalError, MAX_OBJECT_SIZE, Parameter, Property, csv,
+    Component, IcalError, MAX_OBJECT_SIZE, MAX_VCARD_SIZE, Parameter, Property, csv,
     datetime::{DateTime, parse_date_or_datetime, parse_duration},
     jcal, parse,
     parser::{Limits, parse_all},
@@ -163,9 +163,10 @@ fn uid_of(component: &Component) -> Option<String> {
     component.property("UID").map(|p| p.value.clone())
 }
 
-fn serialize(component: &Component) -> Result<Vec<u8>, IcalError> {
+/// Serializes one object of at most `max_size` bytes.
+fn serialize(component: &Component, max_size: usize) -> Result<Vec<u8>, IcalError> {
     let text = to_string(component)?;
-    if text.len() > MAX_OBJECT_SIZE {
+    if text.len() > max_size {
         return Err(IcalError::TooLarge);
     }
     Ok(text.into_bytes())
@@ -381,7 +382,7 @@ fn split_calendars(
         };
         out.push(ImportedObject {
             uid: Some(uid),
-            data: serialize(&calendar),
+            data: serialize(&calendar, MAX_OBJECT_SIZE),
         })?;
     }
     Ok(())
@@ -412,7 +413,7 @@ fn split_cards(
         };
         out.push(ImportedObject {
             uid: Some(uid),
-            data: serialize(&card),
+            data: serialize(&card, MAX_VCARD_SIZE),
         })?;
     }
     Ok(())

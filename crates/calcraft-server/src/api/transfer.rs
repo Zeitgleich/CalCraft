@@ -110,8 +110,16 @@ pub async fn import(
     let data = to_bytes(body, MAX_IMPORT_SIZE)
         .await
         .map_err(|_| ApiError::TooLarge)?;
-    let report =
-        transfer::import(&state.store, &collection, format, data, on_conflict, slot).await?;
+    let report = transfer::import(
+        &state.store,
+        &collection,
+        format,
+        data,
+        on_conflict,
+        state.max_vcard_bytes,
+        slot,
+    )
+    .await?;
     tracing::info!(
         user = %session.user.username,
         collection = %collection.slug,

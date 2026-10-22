@@ -17,7 +17,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use calcraft_core::CollectionKind;
-use calcraft_ical::MAX_OBJECT_SIZE;
 use calcraft_store::{StoreError, Transfer};
 
 use super::{
@@ -120,7 +119,8 @@ pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request, mode: Mo
         return dav_error(StatusCode::FORBIDDEN, condition);
     }
     let prefix = ns(target.kind);
-    if usize::try_from(meta.size).is_ok_and(|size| size > MAX_OBJECT_SIZE) {
+    let limit = super::objects::max_object_size(target.kind, ctx.state.max_vcard_bytes);
+    if usize::try_from(meta.size).is_ok_and(|size| size > limit) {
         return dav_error(
             StatusCode::FORBIDDEN,
             &format!("<{prefix}:max-resource-size/>"),

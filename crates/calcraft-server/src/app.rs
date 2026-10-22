@@ -35,6 +35,8 @@ pub struct AppState {
     /// Update check, if enabled (`[updates] check`).
     #[cfg(feature = "update-check")]
     pub updates: Option<Arc<crate::updates::UpdateCheck>>,
+    /// Largest accepted vCard; [`router`] sets it from `storage.max_vcard_bytes`.
+    pub max_vcard_bytes: usize,
 }
 
 impl AppState {
@@ -47,12 +49,14 @@ impl AppState {
             oidc: None,
             #[cfg(feature = "update-check")]
             updates: None,
+            max_vcard_bytes: crate::config::DEFAULT_MAX_VCARD_BYTES,
         })
     }
 }
 
 /// Builds the complete application router for the given configuration.
-pub fn router(config: &Config, state: AppState) -> Router {
+pub fn router(config: &Config, mut state: AppState) -> Router {
+    state.max_vcard_bytes = config.max_vcard_bytes();
     let web_ui = config.web_ui.enabled && cfg!(feature = "web-ui");
     let app = Router::new()
         // GET / shows the web UI; DAV clients configured with the bare

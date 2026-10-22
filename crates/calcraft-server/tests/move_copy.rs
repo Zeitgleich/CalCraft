@@ -443,7 +443,7 @@ async fn copy_counts_against_the_quota_move_does_not() {
     put(&app, &source, &body).await;
     let size = i64::try_from(body.len()).unwrap();
     // Room for the object once, not twice.
-    store.simulate_quota(size * 3 / 2);
+    store.set_quota_for_tests(size * 3 / 2);
     let reply = transfer(&app, "COPY", &source, &format!("{WORK}copy.ics"), &[]).await;
     assert_eq!(reply.status, StatusCode::INSUFFICIENT_STORAGE);
     assert_eq!(
@@ -452,7 +452,7 @@ async fn copy_counts_against_the_quota_move_does_not() {
     );
     let reply = transfer(&app, "MOVE", &source, &format!("{WORK}moved.ics"), &[]).await;
     assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
-    store.simulate_quota(0);
+    store.set_quota_for_tests(0);
     let reply = transfer(&app, "COPY", &format!("{WORK}moved.ics"), &source, &[]).await;
     assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
 }
@@ -539,4 +539,39 @@ async fn parallel_moves_of_one_object() {
         let in_work = response_for(&changes.body, winner).is_some();
         assert_eq!(in_work, winner.starts_with(WORK), "{}", changes.body);
     }
+}
+
+/// Contacts may be larger than calendar objects (`storage.max_vcard_bytes`);
+/// moving one with a big photo must use the address book limit.
+#[tokio::test]
+async fn move_a_contact_larger_than_a_calendar_object() {
+    use base64::Engine as _;
+    let (app, _store) = app().await;
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.resize(1_100_000, 0);
+    let data = base64::engine::general_purpose::STANDARD.encode(&png);
+    let line = format!("PHOTO:data:image/png;base64,{data}");
+    // Fold at 75 octets (RFC 6350 §3.2).
+    let mut folded = String::new();
+    for (i, chunk) in line.as_bytes().chunks(74).enumerate() {
+        if i > 0 {
+            folded.push_str("\r\n ");
+        }
+        folded.push_str(std::str::from_utf8(chunk).unwrap());
+    }
+    let card = format!(
+        "BEGIN:VCARD\r\nVERSION:4.0\r\nUID:big-photo\r\nFN:Big Photo\r\n{folded}\r\nEND:VCARD\r\n"
+    );
+    assert!(card.len() > calcraft_ical::MAX_OBJECT_SIZE);
+    let source = format!("{BOOK}big.vcf");
+    put(&app, &source, &card).await;
+
+    let mkcol = r#"<d:mkcol xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav"><d:set><d:prop><d:resourcetype><d:collection/><card:addressbook/></d:resourcetype></d:prop></d:set></d:mkcol>"#;
+    let book2 = "/dav/addressbooks/alice/second/";
+    let reply = send(&app, ALICE, "MKCOL", book2, &[], mkcol).await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    let moved = format!("{book2}big.vcf");
+    let reply = transfer(&app, "MOVE", &source, &moved, &[]).await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    assert_eq!(get(&app, &moved).await.body, card);
 }

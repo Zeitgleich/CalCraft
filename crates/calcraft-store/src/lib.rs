@@ -256,16 +256,11 @@ impl Store {
         self.simulation.set(failure);
     }
 
-    /// Lowers the per-user storage quota (bytes; `0` restores
-    /// [`items::MAX_BYTES_PER_USER`]) for quota tests (feature `test-hooks`).
+    /// Lowers the storage quota per user to `bytes` (0: the real quota),
+    /// so quota tests need not write 512 MiB (feature `test-hooks`).
     #[cfg(feature = "test-hooks")]
-    pub fn simulate_quota(&self, bytes: i64) {
+    pub fn set_quota_for_tests(&self, bytes: i64) {
         self.simulation.set_quota(bytes);
-    }
-
-    /// Storage quota per user for object content.
-    pub(crate) fn quota_bytes(&self) -> i64 {
-        self.simulation.quota().unwrap_or(items::MAX_BYTES_PER_USER)
     }
 
     /// Creates a user with a default calendar and address book.
