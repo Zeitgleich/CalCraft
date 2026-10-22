@@ -179,6 +179,9 @@ are kept). Migrations are forward-only; to roll back an upgrade, restore that
 backup with the previous version. Details in
 [`docs/backup-and-upgrade.md`](docs/backup-and-upgrade.md).
 
+Time-range queries, recurrence and time zones (what is exact, what is
+conservative, budgets): [`docs/caldav.md`](docs/caldav.md).
+
 Optionally, the admin area shows a notice when a new release is out:
 
 ```toml
