@@ -231,10 +231,10 @@ Der Client-Track startet nach M4 (wenn Web-UI-Komponenten existieren).
 | **M1** ✅ | WebDAV-Kern: OPTIONS, PROPFIND (Depth 0/1), Principal Discovery, Basic Auth, Storage (SQLite) |
 | **M2** ✅ | CalDAV: MKCALENDAR, PUT/GET/DELETE mit Preconditions, calendar-query, calendar-multiget; Parser-Limits + Fuzzing |
 | **M3** ✅ | sync-collection, CardDAV |
-| **M4** | **M4a** ✅ REST-API + OpenAPI, Sessions, 2FA (TOTP + Wiederherstellungscodes), App-Passwörter, Admin · **M4b** ✅ Web-UI Stufe 1 · **M4c** Web-UI Stufe 2 |
+| **M4** | **M4a** ✅ REST-API + OpenAPI, Sessions, 2FA (TOTP + Wiederherstellungscodes), App-Passwörter, Admin · **M4b** ✅ Web-UI Stufe 1 · **M4c** 🟡 SSO-Login in der Web-UI ✅, Logo/Favicon/Design-System ✅, Termin- und Kontaktansichten offen |
 | **M5** | **M5a** ✅ OIDC/SSO (Keycloak & Co.) · Freigaben, Gruppen, Erinnerungen (SMTP), Web-UI Stufe 3–4 |
-| **M6** | **M6a** ✅ Import/Export aller Formate (REST + CLI) · **M6b** Webcal mit SSRF-Schutz · Backup/Restore, Migration aus Radicale/Baïkal |
-| **M7** | Externes Security-Review, Doku, Paketierung, Release v1.0 |
+| **M6** | **M6a** ✅ Import/Export aller Formate (REST + CLI) · Backup/Restore + Pre-Migration-Backups ✅ · **M6b** Webcal mit SSRF-Schutz · Migration aus Radicale/Baïkal |
+| **M7** | Release-Pipeline ✅ (signierte Artefakte, Provenance, GHCR), Update-Hinweis ✅ · externes Security-Review, Release v1.0 |
 
 ## 10. Weitere Anforderungen
 
