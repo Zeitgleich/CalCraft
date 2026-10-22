@@ -79,7 +79,15 @@ fn check_data_uri(uri: &str) -> Result<(), IcalError> {
             return Err(invalid);
         }
     }
-    if !base64 || !is_allowed_image_type(media_type) || !is_base64(data) {
+    let is_image = media_type
+        .get(..6)
+        .is_some_and(|p| p.eq_ignore_ascii_case("image/"));
+    if !base64
+        || !is_image
+        || !is_allowed_image_type(media_type)
+        || !is_base64(data)
+        || !has_image_magic(data)
+    {
         return Err(invalid);
     }
     Ok(())
@@ -117,23 +125,56 @@ fn has_image_magic(data: &str) -> bool {
         || (head.starts_with(b"RIFF") && head.get(8..12) == Some(b"WEBP"))
 }
 
+/// All values of a parameter, over repeated occurrences and comma lists.
+fn parameter_values<'a>(property: &'a Property, name: &str) -> Vec<&'a str> {
+    property
+        .parameters
+        .iter()
+        .filter(|p| p.name == name)
+        .flat_map(|p| p.values.iter())
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+        .collect()
+}
+
 /// Checks a `PHOTO` or `LOGO` property (RFC 6350 §6.2.4, RFC 2426 §3.1.4).
 fn check_image(property: &Property) -> Result<(), IcalError> {
+    let invalid = IcalError::Invalid("unsupported embedded image");
     let value = property.value.as_str();
+    let encodings = parameter_values(property, "ENCODING");
+    // Every ENCODING must mean base64 (`b` and `BASE64` are synonyms).
+    if !encodings
+        .iter()
+        .all(|e| e.eq_ignore_ascii_case("b") || e.eq_ignore_ascii_case("base64"))
+    {
+        return Err(invalid);
+    }
+    let embedded = !encodings.is_empty();
+    // VALUE must be unambiguous and fit the encoding: `binary` for inline
+    // data, `uri` otherwise.
+    let expected = if embedded { "binary" } else { "uri" };
+    if !parameter_values(property, "VALUE")
+        .iter()
+        .all(|v| v.eq_ignore_ascii_case(expected))
+    {
+        return Err(IcalError::Invalid("conflicting VALUE parameter"));
+    }
+    // Every declared TYPE counts: clients may read any of them.
+    if !parameter_values(property, "TYPE")
+        .iter()
+        .all(|t| is_allowed_image_type(t))
+    {
+        return Err(invalid);
+    }
     // Exports (iOS, Android, Synology) contain empty photos; harmless.
     if value.is_empty() {
         return Ok(());
     }
-    if let Some(encoding) = property.parameter("ENCODING") {
-        // vCard 3.0 inline binary: `ENCODING=b;TYPE=JPEG:<base64>`. Without
-        // TYPE, the magic number must show an allowed image type.
-        let base64 = matches!(encoding.values.as_slice(), [e] if e.eq_ignore_ascii_case("b") || e.eq_ignore_ascii_case("base64"));
-        let type_ok = match property.parameter("TYPE").map(|t| t.values.as_slice()) {
-            Some(types) if !types.is_empty() => types.iter().all(|t| is_allowed_image_type(t)),
-            _ => has_image_magic(value),
-        };
-        if !base64 || !is_base64(value) || !type_ok {
-            return Err(IcalError::Invalid("unsupported embedded image"));
+    if embedded {
+        // vCard 3.0 inline binary: `ENCODING=b;TYPE=JPEG:<base64>`. The magic
+        // number must show an allowed image type, declared or not.
+        if !is_base64(value) || !has_image_magic(value) {
+            return Err(invalid);
         }
         return Ok(());
     }
@@ -264,10 +305,14 @@ mod tests {
     fn accepts_photos_and_logos() {
         for photo in [
             "PHOTO;ENCODING=b;TYPE=JPEG:/9j/4AAQ\r\n",
-            "PHOTO;ENCODING=BASE64;TYPE=image/png:iVBORw0K\r\n",
+            "PHOTO;ENCODING=BASE64;TYPE=image/png:iVBORw0KGgo=\r\n",
             "PHOTO;ENCODING=b;TYPE=JPEG;X-ABCROP-RECTANGLE=ABClipRect_1&0&0&1&1:/9j/4AAQ\r\n",
             "LOGO;ENCODING=b;TYPE=GIF:R0lGODlh\r\n",
             "PHOTO;VALUE=uri:https://example.com/a.jpg\r\n",
+            "PHOTO;ENCODING=b;VALUE=binary;TYPE=JPEG,image/jpeg:/9j/4AAQ\r\n",
+            "PHOTO;ENCODING=b;ENCODING=BASE64;TYPE=PNG:iVBORw0KGgo=\r\n",
+            // A mislabelled but allowed image type is fine.
+            "PHOTO;ENCODING=b;TYPE=JPEG:iVBORw0KGgo=\r\n",
             "PHOTO;ENCODING=b;TYPE=JPEG:/9j/\r\n 4AAQ\r\n",
             // Untyped, recognised by the magic number.
             "PHOTO;ENCODING=b:/9j/4AAQSkZJRg==\r\n",
@@ -283,7 +328,7 @@ mod tests {
         }
         for photo in [
             "PHOTO:data:image/jpeg;base64,/9j/4AAQ\r\n",
-            "PHOTO;MEDIATYPE=image/webp:DATA:image/webp;base64,UklGRg==\r\n",
+            "PHOTO;MEDIATYPE=image/webp:DATA:image/webp;base64,UklGRiQAAABXRUJQVlA4IA==\r\n",
             "PHOTO:data:image/jpeg\\;base64\\,/9j/4AAQ\r\n",
             "LOGO:http://example.com/logo.png\r\n",
         ] {
@@ -298,6 +343,19 @@ mod tests {
             "PHOTO;ENCODING=b;TYPE=SVG:PHN2Zz4=\r\n",
             "PHOTO;ENCODING=b:PHN2Zz4=\r\n",
             "PHOTO;ENCODING=b:AAAAAAAA\r\n",
+            // Every TYPE counts, also later ones and lists.
+            "PHOTO;ENCODING=b;TYPE=JPEG;TYPE=SVG+XML:/9j/4AAQ\r\n",
+            "PHOTO;ENCODING=b;TYPE=JPEG,image/svg+xml:/9j/4AAQ\r\n",
+            "PHOTO;ENCODING=b;TYPE=\"JPEG,SVG\":/9j/4AAQ\r\n",
+            // Conflicting or duplicate ENCODING/VALUE.
+            "PHOTO;ENCODING=b;ENCODING=8bit;TYPE=JPEG:/9j/4AAQ\r\n",
+            "PHOTO;ENCODING=b;VALUE=uri;TYPE=JPEG:/9j/4AAQ\r\n",
+            "PHOTO;VALUE=uri;VALUE=binary:https://example.com/a.jpg\r\n",
+            "PHOTO;VALUE=binary:https://example.com/a.jpg\r\n",
+            // The declared type does not override the magic number.
+            "PHOTO;ENCODING=b;TYPE=JPEG:PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+\r\n",
+            "PHOTO:data:image/jpeg;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+\r\n",
+            "PHOTO:data:jpeg;base64,/9j/4AAQ\r\n",
             "PHOTO;ENCODING=QUOTED-PRINTABLE;TYPE=JPEG:abc\r\n",
             "PHOTO:data:image/svg+xml;base64,PHN2Zz4=\r\n",
             "PHOTO:data:text/html;base64,PGI+\r\n",
@@ -338,7 +396,7 @@ mod tests {
 
     #[test]
     fn size_limit_is_larger_than_for_calendars() {
-        let photo = "A".repeat(crate::MAX_OBJECT_SIZE);
+        let photo = format!("/9j/{}", "A".repeat(crate::MAX_OBJECT_SIZE));
         card(&format!(
             "VERSION:3.0\r\nUID:1\r\nFN:x\r\nPHOTO;ENCODING=b;TYPE=JPEG:{photo}\r\n"
         ))

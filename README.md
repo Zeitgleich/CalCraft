@@ -153,10 +153,11 @@ must allow at least `server.max_body_bytes` (see `docs/installation.md`).
 
 Photos and logos (`PHOTO`, `LOGO`) are accepted embedded – vCard 3.0
 `ENCODING=b;TYPE=JPEG:<base64>` (also `ENCODING=BASE64`), vCard 4.0
-`data:image/…;base64,…` – if the base64 is syntactically valid and the type is
-JPEG, PNG, GIF or WebP (vCard 3.0 without `TYPE`: the magic number of the first
-bytes must match one of them); or as an `http`/`https` URI, which is stored but
-never fetched. Empty values are accepted, as they occur in exports. Anything else
+`data:image/…;base64,…` – if the base64 is syntactically valid, every declared
+type (all `TYPE` values, the `data:` media type) is JPEG, PNG, GIF or WebP, and
+the magic number of the first (at most 12) decoded bytes is one of them, with or
+without a declared type; `ENCODING`/`VALUE` must not contradict each other. Or as
+an `http`/`https` URI, which is stored but never fetched. Empty values are accepted, as they occur in exports. Anything else
 (`javascript:`, `file:`, SVG, invalid base64) is rejected with
 `CARDDAV:valid-address-data`. Apart from that magic number, image bytes are never
 decoded or interpreted, and photos are never served as `image/*`.

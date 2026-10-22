@@ -17,7 +17,7 @@ const ALICE: (&str, &str) = ("alice", "alice password 123");
 const BOOK: &str = "/dav/addressbooks/alice/default/";
 const MIB: usize = 1024 * 1024;
 
-async fn app_with(config: &Config) -> Router {
+async fn store_and_app(config: &Config) -> (Store, Router) {
     let store = Store::in_memory().await.unwrap();
     let (user, password) = ALICE;
     let hash = hash_password(password).unwrap();
@@ -25,7 +25,12 @@ async fn app_with(config: &Config) -> Router {
         .create_user(&user.parse().unwrap(), &hash, None)
         .await
         .unwrap();
-    router(config, AppState::new(store).unwrap())
+    let app = router(config, AppState::new(store.clone()).unwrap());
+    (store, app)
+}
+
+async fn app_with(config: &Config) -> Router {
+    store_and_app(config).await.1
 }
 
 async fn app() -> Router {
@@ -87,16 +92,16 @@ async fn get(app: &Router, uri: &str) -> Reply {
 }
 
 /// `len` bytes of deterministic pseudo-random "image" data, base64-encoded.
+/// It starts with the JPEG magic number, which the server checks.
 fn photo_base64(len: usize) -> String {
     let mut state = 0x2545_f491_u32;
-    let bytes: Vec<u8> = (0..len)
-        .map(|_| {
-            state ^= state << 13;
-            state ^= state >> 17;
-            state ^= state << 5;
-            state.to_le_bytes()[0]
-        })
-        .collect();
+    let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xE0];
+    bytes.extend((4..len).map(|_| {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        state.to_le_bytes()[0]
+    }));
     STANDARD.encode(bytes)
 }
 
@@ -123,7 +128,10 @@ fn v3_with_photo(uid: &str, photo: &str) -> String {
     )
 }
 
-/// A vCard 3.0 with an unfolded photo of exactly `size` bytes.
+/// Base64 of the PNG signature plus one zero byte (12 characters).
+const PNG_MAGIC: &str = "iVBORw0KGgoA";
+
+/// A vCard 3.0 with an unfolded PNG photo of exactly `size` bytes.
 fn card_of_size(uid: &str, size: usize) -> String {
     let head = format!("BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Big\r\nUID:{uid}\r\nNOTE:");
     let photo = "\r\nPHOTO;ENCODING=b;TYPE=PNG:";
@@ -131,9 +139,9 @@ fn card_of_size(uid: &str, size: usize) -> String {
     let room = size - head.len() - photo.len() - tail.len();
     let data = room - room % 4;
     let card = format!(
-        "{head}{}{photo}{}{tail}",
+        "{head}{}{photo}{PNG_MAGIC}{}{tail}",
         "x".repeat(room - data),
-        "A".repeat(data)
+        "A".repeat(data - PNG_MAGIC.len())
     );
     assert_eq!(card.len(), size);
     card
@@ -278,6 +286,23 @@ async fn invalid_or_unsafe_photos_are_rejected() {
         ("4.0", "PHOTO:javascript:alert(document.cookie)"),
         ("4.0", "PHOTO:file:///etc/passwd"),
         ("4.0", "LOGO:ftp://example.com/logo.png"),
+        // Every TYPE counts, and the declared type never overrides the bytes.
+        ("3.0", "PHOTO;ENCODING=b;TYPE=JPEG;TYPE=SVG+XML:/9j/4AAQ"),
+        ("3.0", "PHOTO;ENCODING=b;TYPE=JPEG,SVG:/9j/4AAQ"),
+        (
+            "3.0",
+            "PHOTO;ENCODING=b;TYPE=JPEG:PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+",
+        ),
+        (
+            "3.0",
+            "PHOTO;ENCODING=b;ENCODING=QUOTED-PRINTABLE;TYPE=JPEG:/9j/4AAQ",
+        ),
+        ("3.0", "PHOTO;ENCODING=b;VALUE=uri;TYPE=JPEG:/9j/4AAQ"),
+        (
+            "4.0",
+            "PHOTO:data:image/jpeg;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+",
+        ),
+        ("4.0", "PHOTO:data:jpeg;base64,/9j/4AAQ"),
     ] {
         let card = format!(
             "BEGIN:VCARD\r\nVERSION:{version}\r\nUID:bad\r\nFN:Bad\r\n{photo}\r\nEND:VCARD\r\n"
@@ -447,17 +472,19 @@ async fn groups_round_trip_and_sync() {
     assert!(is_forbidden_with(&reply, "<card:valid-address-data/>"));
 }
 
-/// Replacing a contact's photo frees the old one's quota: the stored size
-/// of an object counts once, however often it is replaced.
+/// The quota counts the stored bytes, base64 photos included. A replaced
+/// photo counts once, however often it is replaced; distinct large
+/// contacts do run into the quota (507). The quota is lowered to 3 MiB via
+/// the store's test hook, so the test need not write 512 MiB.
 #[tokio::test]
-async fn replaced_photos_do_not_use_up_the_quota() {
-    let mut config = Config::default();
-    config.storage.max_vcard_bytes = Some(10 * MIB);
-    let app = app_with(&config).await;
+async fn photos_count_towards_the_quota() {
+    let (store, app) = store_and_app(&Config::default()).await;
+    store.set_quota_for_tests(i64::try_from(3 * MIB).unwrap());
+
     let uri = format!("{BOOK}portrait.vcf");
-    let card = card_of_size("portrait", 10 * MIB);
-    // 53 × 10 MiB written in total, more than the 512 MiB quota.
-    for round in 0..53 {
+    let card = card_of_size("portrait", 2 * MIB);
+    // 10 × 2 MiB written in total, far more than the quota.
+    for round in 0..10 {
         let reply = put_card(&app, &uri, &card).await;
         assert!(reply.status.is_success(), "round {round}: {}", reply.status);
     }
@@ -466,16 +493,37 @@ async fn replaced_photos_do_not_use_up_the_quota() {
     assert!(
         reply
             .body
-            .contains(&format!("<d:getcontentlength>{}<", 10 * MIB)),
+            .contains(&format!("<d:getcontentlength>{}<", 2 * MIB)),
         "{}",
         reply.body
     );
-    // Another contact still fits.
-    let other = v3_with_photo("other", &photo_base64(1024));
+
+    // Negative control: a second large contact one byte beyond the quota
+    // is refused and not stored; exactly up to the quota fits.
+    let second = format!("{BOOK}second.vcf");
+    let reply = put_card(&app, &second, &card_of_size("second", MIB + 1)).await;
+    assert_eq!(reply.status, StatusCode::INSUFFICIENT_STORAGE);
+    assert_eq!(get(&app, &second).await.status, StatusCode::NOT_FOUND);
+    let reply = put_card(&app, &second, &card_of_size("second", MIB)).await;
+    assert_eq!(reply.status, StatusCode::CREATED);
+    let reply = put_card(
+        &app,
+        &format!("{BOOK}third.vcf"),
+        &v3_with_photo("third", &photo_base64(16)),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::INSUFFICIENT_STORAGE);
+
+    // Deleting frees the space again.
     assert_eq!(
-        put_card(&app, &format!("{BOOK}other.vcf"), &other)
-            .await
-            .status,
-        StatusCode::CREATED
+        send(&app, "DELETE", &uri, &[], "").await.status,
+        StatusCode::NO_CONTENT
     );
+    let reply = put_card(
+        &app,
+        &format!("{BOOK}third.vcf"),
+        &v3_with_photo("third", &photo_base64(16)),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::CREATED);
 }

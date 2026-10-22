@@ -364,7 +364,7 @@ impl Store {
         .await?
         .try_get("used")?;
         let size = i64::try_from(item.content.len()).unwrap_or(i64::MAX);
-        if used.saturating_add(size) > MAX_BYTES_PER_USER {
+        if used.saturating_add(size) > self.simulation.quota() {
             return Err(StoreError::Limit("storage quota exceeded"));
         }
 
