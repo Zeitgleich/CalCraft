@@ -71,6 +71,21 @@ follow [Semantic Versioning](https://semver.org/). Release process:
   `systemd-analyze security` exposure level.
 - `calcraft check-config --quiet` validates without printing the effective
   configuration.
+- `calcraft migrate`: copies calendars, task lists and address books of one
+  account from another CalDAV/CardDAV server (Synology Calendar/Contacts,
+  Radicale, Baïkal, Nextcloud, …) into a local user. Discovery via
+  `.well-known`, `current-user-principal` and home sets; collections keep name,
+  color, description and component set; objects are fetched with multiget in
+  batches (GET fallback) and validated like `calcraft import`, keeping UIDs.
+  `--dry-run`, `--only`, `--map`, `--on-conflict skip|replace`,
+  `--include-shared`; idempotent with `skip`. Password from a prompt,
+  `--password-file` (regular file, mode 600) or `CALCRAFT_MIGRATE_PASSWORD`,
+  never from the command line, zeroized after use. HTTPS only (`--ca-file` for
+  self-signed certificates, `--allow-http` with a warning), redirects only
+  within the origin or from http to https on the same host and port (80 to
+  443). Fetching stops once the quota or object limit is reached. New Cargo
+  feature `migrate` (default on; uses `zeroize`, already a dependency of
+  argon2 and rustls).
 
 ### Changed
 

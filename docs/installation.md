@@ -456,6 +456,16 @@ Further users can be created in the web UI (admin page) or with the same
 command without `--admin`. Other commands: `calcraft user list`,
 `passwd`, `disable`, `enable`, `set-admin`.
 
+Coming from Synology Calendar/Contacts, Radicale, Baïkal or Nextcloud? Copy a
+user's calendars and address books with `calcraft migrate` (try `--dry-run`
+first), see [Migrating from another server](../README.md#migrating-from-another-server):
+
+```bash
+sudo -u calcraft env CALCRAFT_CONFIG=/etc/calcraft/calcraft.toml calcraft migrate \
+    --from https://nas.example.com:5001/caldav/ --carddav-from https://nas.example.com:5001/carddav/ \
+    --source-user alice --user alice --dry-run
+```
+
 ## 8. TLS certificate
 
 With certbot (Let's Encrypt). Install the plugin for your web server and

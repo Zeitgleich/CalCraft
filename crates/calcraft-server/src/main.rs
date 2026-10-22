@@ -1,4 +1,6 @@
 mod backup_cmd;
+#[cfg(feature = "migrate")]
+mod migrate_cmd;
 mod transfer_cmd;
 mod users;
 
@@ -56,6 +58,15 @@ enum Command {
         config: ConfigArgs,
         #[command(flatten)]
         args: transfer_cmd::ImportArgs,
+    },
+    /// Copy calendars, task lists and address books from another
+    /// CalDAV/CardDAV server (Synology, Radicale, Baïkal, Nextcloud, …).
+    #[cfg(feature = "migrate")]
+    Migrate {
+        #[command(flatten)]
+        config: ConfigArgs,
+        #[command(flatten)]
+        args: migrate_cmd::MigrateArgs,
     },
 }
 
@@ -156,6 +167,15 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             runtime()?.block_on(async {
                 let store = open_store(&config).await?;
                 transfer_cmd::import(&store, args, config.max_vcard_bytes()).await
+            })
+        }
+        #[cfg(feature = "migrate")]
+        Command::Migrate { config, args } => {
+            let config = Config::load(config.config.as_deref())?;
+            telemetry::init_cli(&config.logging)?;
+            runtime()?.block_on(async {
+                let store = open_store(&config).await?;
+                migrate_cmd::run(&store, args, config.max_vcard_bytes()).await
             })
         }
     }
