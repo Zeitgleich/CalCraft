@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/logo-wordmark-dark.svg">
+    <img src="assets/brand/logo-wordmark.svg" alt="CalCraft logo: a blue calendar page with a white spark" width="320">
+  </picture>
+</p>
+
 # CalCraft
 
 Self-hosted CalDAV/CardDAV server written in Rust, with an optional web interface.
@@ -63,6 +70,7 @@ JavaScript tooling is needed.
 The UI covers login (with two-factor codes), calendars and address books, account
 settings (password, TOTP), app passwords and user administration. Disable it at
 runtime with `web_ui.enabled = false` or `calcraft serve --no-web-ui`.
+Logo, icons and colours: [docs/brand.md](docs/brand.md).
 
 Minimal DAV-only build:
 

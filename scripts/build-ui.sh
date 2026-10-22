@@ -31,6 +31,11 @@ mkdir -p "$dist"
 "$wasm_bindgen" --target web --no-typescript --out-dir "$dist" --out-name app \
     "$target_dir/wasm32-unknown-unknown/wasm-release/calcraft-ui.wasm"
 cp "$ui/style.css" "$dist/style.css"
+# Icons and favicon (sources and exports: assets/brand/, see docs/brand.md).
+brand="$root/assets/brand"
+cp "$brand/favicon.svg" "$brand/favicon.ico" "$brand/apple-touch-icon.png" "$dist/"
+cp "$brand/logo-192.png" "$dist/icon-192.png"
+cp "$brand/logo-512.png" "$dist/icon-512.png"
 
 echo "web UI assets written to $dist:"
 ls -l "$dist"

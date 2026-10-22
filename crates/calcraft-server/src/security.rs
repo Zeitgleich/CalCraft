@@ -15,11 +15,12 @@ use axum::{
 
 /// Content Security Policy for all responses.
 ///
-/// `'wasm-unsafe-eval'` is required for the Leptos (WebAssembly) web UI.
+/// `'wasm-unsafe-eval'` is required for the Leptos (WebAssembly) web UI,
+/// `manifest-src 'self'` for its web app manifest (home screen icon).
 /// Inline scripts and styles are never allowed.
 pub const CSP: &str = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; \
     style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; \
-    form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+    manifest-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
 const HSTS: &str = "max-age=63072000; includeSubDomains";
 
@@ -58,4 +59,27 @@ pub async fn headers(State(hsts): State<bool>, request: Request, next: Next) -> 
             .or_insert(HeaderValue::from_static(HSTS));
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CSP;
+
+    #[test]
+    fn csp_is_same_origin_only() {
+        let directives: Vec<&str> = CSP.split("; ").collect();
+        for expected in [
+            "default-src 'none'",
+            "script-src 'self' 'wasm-unsafe-eval'",
+            "style-src 'self'",
+            "img-src 'self' data:",
+            "manifest-src 'self'",
+            "frame-ancestors 'none'",
+        ] {
+            assert!(directives.contains(&expected), "{expected}");
+        }
+        assert!(!CSP.contains("unsafe-inline"));
+        assert!(!CSP.contains("http"), "no external origins");
+        assert!(!CSP.contains('*'), "no wildcards");
+    }
 }

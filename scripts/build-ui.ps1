@@ -24,6 +24,13 @@ New-Item -ItemType Directory -Path $dist | Out-Null
     (Join-Path $targetDir 'wasm32-unknown-unknown/wasm-release/calcraft-ui.wasm')
 if ($LASTEXITCODE -ne 0) { throw 'wasm-bindgen failed' }
 Copy-Item (Join-Path $ui 'style.css') (Join-Path $dist 'style.css')
+# Icons and favicon (sources and exports: assets/brand/, see docs/brand.md).
+$brand = Join-Path $root 'assets/brand'
+foreach ($file in 'favicon.svg', 'favicon.ico', 'apple-touch-icon.png') {
+    Copy-Item (Join-Path $brand $file) (Join-Path $dist $file)
+}
+Copy-Item (Join-Path $brand 'logo-192.png') (Join-Path $dist 'icon-192.png')
+Copy-Item (Join-Path $brand 'logo-512.png') (Join-Path $dist 'icon-512.png')
 
 Write-Output "web UI assets written to ${dist}:"
 Get-ChildItem $dist

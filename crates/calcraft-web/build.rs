@@ -16,12 +16,27 @@ use std::{
 };
 
 /// Files produced by the UI build: (file in dist, published stem,
-/// extension, content type).
-const FILES: [(&str, &str, &str, &str); 3] = [
+/// extension, content type). The icons are copied from `assets/brand/`.
+const FILES: [(&str, &str, &str, &str); 8] = [
     ("app.js", "app", "js", "text/javascript; charset=utf-8"),
     ("app_bg.wasm", "app", "wasm", "application/wasm"),
     ("style.css", "style", "css", "text/css; charset=utf-8"),
+    ("favicon.svg", "favicon", "svg", "image/svg+xml"),
+    ("favicon.ico", "favicon", "ico", "image/x-icon"),
+    (
+        "apple-touch-icon.png",
+        "apple-touch-icon",
+        "png",
+        "image/png",
+    ),
+    ("icon-192.png", "icon-192", "png", "image/png"),
+    ("icon-512.png", "icon-512", "png", "image/png"),
 ];
+
+/// Theme and background color of the installed app (brand blue, light
+/// page background).
+const THEME_COLOR: &str = "#2563eb";
+const BACKGROUND_COLOR: &str = "#f8fafc";
 
 /// 64-bit FNV-1a. The hash only makes cached file names change with their
 /// content; it does not need to be cryptographic.
@@ -81,7 +96,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         add_asset(&mut code, &name, content_type, &source)?;
         names.push(name);
     }
-    let [js, wasm, css] = <[String; 3]>::try_from(names).map_err(|_| "asset count")?;
+    let [
+        js,
+        wasm,
+        css,
+        favicon_svg,
+        favicon_ico,
+        touch_icon,
+        icon_192,
+        icon_512,
+    ] = <[String; 8]>::try_from(names).map_err(|_| "asset count")?;
 
     // Bootstrap module: loads the wasm-bindgen glue and the module under
     // their hashed names (an external file, inline scripts are blocked by
@@ -104,9 +128,43 @@ fn main() -> Result<(), Box<dyn Error>> {
         "text/javascript; charset=utf-8",
         &boot_path,
     )?;
+
+    // Web app manifest (home screen name and icons), relative to /assets/.
+    let manifest = format!(
+        "{{\n\
+         \x20 \"name\": \"CalCraft\",\n\
+         \x20 \"short_name\": \"CalCraft\",\n\
+         \x20 \"start_url\": \"/\",\n\
+         \x20 \"scope\": \"/\",\n\
+         \x20 \"display\": \"standalone\",\n\
+         \x20 \"theme_color\": \"{THEME_COLOR}\",\n\
+         \x20 \"background_color\": \"{BACKGROUND_COLOR}\",\n\
+         \x20 \"icons\": [\n\
+         \x20   {{ \"src\": \"./{icon_192}\", \"sizes\": \"192x192\", \"type\": \"image/png\" }},\n\
+         \x20   {{ \"src\": \"./{icon_512}\", \"sizes\": \"512x512\", \"type\": \"image/png\" }}\n\
+         \x20 ]\n\
+         }}\n"
+    );
+    let manifest_name = hashed_name("manifest", "webmanifest", manifest.as_bytes());
+    let manifest_path = out_dir.join("manifest.webmanifest");
+    fs::write(&manifest_path, &manifest)?;
+    add_asset(
+        &mut code,
+        &manifest_name,
+        "application/manifest+json",
+        &manifest_path,
+    )?;
     code.push_str("];\n");
-    writeln!(code, "pub const STYLESHEET: &str = {css:?};")?;
-    writeln!(code, "pub const SCRIPT: &str = {boot_name:?};")?;
+    for (constant, value) in [
+        ("STYLESHEET", &css),
+        ("SCRIPT", &boot_name),
+        ("FAVICON_SVG", &favicon_svg),
+        ("FAVICON_ICO", &favicon_ico),
+        ("APPLE_TOUCH_ICON", &touch_icon),
+        ("MANIFEST", &manifest_name),
+    ] {
+        writeln!(code, "pub const {constant}: &str = {value:?};")?;
+    }
 
     fs::write(out_dir.join("assets.rs"), code)?;
     println!("cargo::rustc-cfg=calcraft_ui_assets");

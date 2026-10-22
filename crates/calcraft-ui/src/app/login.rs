@@ -5,7 +5,7 @@ use calcraft_core::api::{AuthMethods, LoginRequest, Me};
 use calcraft_ui::{sso, text as t, validate::clean_code};
 use leptos::{prelude::*, task::spawn_local};
 
-use super::{Ctx, ErrorText, Session, api, submit};
+use super::{Ctx, ErrorText, Logo, Session, api, submit};
 
 #[component]
 pub fn Login() -> impl IntoView {
@@ -24,7 +24,11 @@ pub fn Login() -> impl IntoView {
     });
 
     view! {
-        <main class="narrow">
+        <main class="narrow login">
+            <div class="login-brand">
+                <Logo />
+                <span class="login-name">{calcraft_core::NAME}</span>
+            </div>
             <h1>{t::LOGIN_TITLE}</h1>
             {move || ctx.notice.get().map(|notice| view! { <p class="success" role="status">{notice}</p> })}
             {move || ctx.sso_error.get().map(|message| view! { <p class="error" role="alert">{message}</p> })}
