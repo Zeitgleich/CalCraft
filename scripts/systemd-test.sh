@@ -224,7 +224,7 @@ user_exists || fail "user alice lost after stop/start"
 
 step "broken configuration -> failed, no endless loop"
 systemctl reset-failed "$unit"
-cp "$config" "$config.good"
+cp -p "$config" "$config.good"  # keep root:calcraft 0640
 echo 'not_a_key = 1' >>"$config"
 systemctl restart "$unit" && fail "restart with a broken configuration succeeded"
 # systemd either does not restart a unit whose ExecStartPre (check-config)
