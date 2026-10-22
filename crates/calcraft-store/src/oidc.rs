@@ -56,39 +56,44 @@ impl Store {
         subject: &str,
         now: i64,
     ) -> Result<OidcBinding> {
-        let inserted = sqlx::query(
-            "INSERT INTO oidc_identities (user_id, issuer, subject, created_at, last_login_at) \
-             VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+        self.observe(
+            async {
+                let inserted = sqlx::query(
+                    "INSERT INTO oidc_identities (user_id, issuer, subject, created_at, last_login_at) \
+                     VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                )
+                .bind(user_id)
+                .bind(issuer)
+                .bind(subject)
+                .bind(now)
+                .bind(now)
+                .execute(&self.writer)
+                .await?
+                .rows_affected()
+                    == 1;
+                if inserted {
+                    return Ok(OidcBinding::Bound);
+                }
+                let updated = sqlx::query(
+                    "UPDATE oidc_identities SET last_login_at = ? \
+                     WHERE user_id = ? AND issuer = ? AND subject = ?",
+                )
+                .bind(now)
+                .bind(user_id)
+                .bind(issuer)
+                .bind(subject)
+                .execute(&self.writer)
+                .await?
+                .rows_affected()
+                    == 1;
+                Ok(if updated {
+                    OidcBinding::Matches
+                } else {
+                    OidcBinding::Mismatch
+                })
+            }
+            .await,
         )
-        .bind(user_id)
-        .bind(issuer)
-        .bind(subject)
-        .bind(now)
-        .bind(now)
-        .execute(&self.writer)
-        .await?
-        .rows_affected()
-            == 1;
-        if inserted {
-            return Ok(OidcBinding::Bound);
-        }
-        let updated = sqlx::query(
-            "UPDATE oidc_identities SET last_login_at = ? \
-             WHERE user_id = ? AND issuer = ? AND subject = ?",
-        )
-        .bind(now)
-        .bind(user_id)
-        .bind(issuer)
-        .bind(subject)
-        .execute(&self.writer)
-        .await?
-        .rows_affected()
-            == 1;
-        Ok(if updated {
-            OidcBinding::Matches
-        } else {
-            OidcBinding::Mismatch
-        })
     }
 
     /// Whether the user is already bound to an identity of this issuer.
@@ -110,18 +115,23 @@ impl Store {
         subject: &str,
         expires_at: i64,
     ) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO oidc_link_approvals (user_id, issuer, subject, expires_at) VALUES (?, ?, ?, ?) \
-             ON CONFLICT (user_id) DO UPDATE SET issuer = excluded.issuer, \
-             subject = excluded.subject, expires_at = excluded.expires_at",
+        self.observe(
+            async {
+                sqlx::query(
+                    "INSERT INTO oidc_link_approvals (user_id, issuer, subject, expires_at) VALUES (?, ?, ?, ?) \
+                     ON CONFLICT (user_id) DO UPDATE SET issuer = excluded.issuer, \
+                     subject = excluded.subject, expires_at = excluded.expires_at",
+                )
+                .bind(user_id)
+                .bind(issuer)
+                .bind(subject)
+                .bind(expires_at)
+                .execute(&self.writer)
+                .await?;
+                Ok(())
+            }
+            .await,
         )
-        .bind(user_id)
-        .bind(issuer)
-        .bind(subject)
-        .bind(expires_at)
-        .execute(&self.writer)
-        .await?;
-        Ok(())
     }
 
     /// Binds an existing, not yet bound account if an unexpired approval
@@ -135,54 +145,64 @@ impl Store {
         subject: &str,
         now: i64,
     ) -> Result<ApprovedBinding> {
-        // Write transactions start IMMEDIATE (see `put_item`): a deferred one that
-        // reads first fails with SQLITE_BUSY instead of waiting when another
-        // writer commits in between.
-        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-        let consumed = sqlx::query(
-            "DELETE FROM oidc_link_approvals \
-             WHERE user_id = ? AND issuer = ? AND subject = ? AND expires_at > ?",
+        self.observe(
+            async {
+                // Write transactions start IMMEDIATE (see `put_item`): a deferred one that
+                // reads first fails with SQLITE_BUSY instead of waiting when another
+                // writer commits in between.
+                let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                let consumed = sqlx::query(
+                    "DELETE FROM oidc_link_approvals \
+                     WHERE user_id = ? AND issuer = ? AND subject = ? AND expires_at > ?",
+                )
+                .bind(user_id)
+                .bind(issuer)
+                .bind(subject)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                    == 1;
+                if !consumed {
+                    return Ok(ApprovedBinding::NotApproved);
+                }
+                let inserted = sqlx::query(
+                    "INSERT INTO oidc_identities (user_id, issuer, subject, created_at, last_login_at) \
+                     VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                )
+                .bind(user_id)
+                .bind(issuer)
+                .bind(subject)
+                .bind(now)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                    == 1;
+                if !inserted {
+                    // Rolled back on drop: the approval stays.
+                    return Ok(ApprovedBinding::Mismatch);
+                }
+                tx.commit().await?;
+                Ok(ApprovedBinding::Bound)
+            }
+            .await,
         )
-        .bind(user_id)
-        .bind(issuer)
-        .bind(subject)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected()
-            == 1;
-        if !consumed {
-            return Ok(ApprovedBinding::NotApproved);
-        }
-        let inserted = sqlx::query(
-            "INSERT INTO oidc_identities (user_id, issuer, subject, created_at, last_login_at) \
-             VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-        )
-        .bind(user_id)
-        .bind(issuer)
-        .bind(subject)
-        .bind(now)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected()
-            == 1;
-        if !inserted {
-            // Rolled back on drop: the approval stays.
-            return Ok(ApprovedBinding::Mismatch);
-        }
-        tx.commit().await?;
-        Ok(ApprovedBinding::Bound)
     }
 
     /// Removes all SSO bindings of a user (e.g. after the IdP account was
     /// recreated). The next SSO login binds again. Returns the number removed.
     pub async fn unbind_oidc_identities(&self, user_id: i64) -> Result<u64> {
-        let result = sqlx::query("DELETE FROM oidc_identities WHERE user_id = ?")
-            .bind(user_id)
-            .execute(&self.writer)
-            .await?;
-        Ok(result.rows_affected())
+        self.observe(
+            async {
+                let result = sqlx::query("DELETE FROM oidc_identities WHERE user_id = ?")
+                    .bind(user_id)
+                    .execute(&self.writer)
+                    .await?;
+                Ok(result.rows_affected())
+            }
+            .await,
+        )
     }
 }
 

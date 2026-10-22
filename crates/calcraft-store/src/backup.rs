@@ -361,6 +361,7 @@ impl Store {
                     path: Some(Arc::new(path.to_path_buf())),
                     simulation,
                     settings: crate::Settings::new(options.trash_retention_days),
+                    health: Arc::default(),
                 });
             }
             pool.close().await;
@@ -381,6 +382,7 @@ impl Store {
                 path: Some(Arc::new(path.to_path_buf())),
                 simulation: simulation.clone(),
                 settings: crate::Settings::new(options.trash_retention_days),
+                health: Arc::default(),
             };
             let result = store.migrate(path, options).await;
             store.pool.close().await;

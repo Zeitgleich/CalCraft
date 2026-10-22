@@ -22,7 +22,7 @@ pub mod trash;
 pub mod updates;
 pub mod validate;
 
-pub use app::{AppState, router};
+pub use app::{AppState, READINESS_TTL, ReadinessCache, router};
 pub use config::Config;
 
 /// Whether the web UI is compiled into this binary.

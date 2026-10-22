@@ -20,8 +20,8 @@ use axum::{
     http::{Method, Request, StatusCode, header},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use calcraft_server::{AppState, Config, auth::hash_password, router};
-use calcraft_store::{SimulatedFailure, Store};
+use calcraft_server::{AppState, Config, ReadinessCache, auth::hash_password, router};
+use calcraft_store::{Readiness, SimulatedFailure, Store};
 use http_body_util::BodyExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tower::ServiceExt;
@@ -106,6 +106,12 @@ impl Drop for TempDir {
 }
 
 async fn setup(dir: &TempDir) -> (Store, Router) {
+    setup_with_readiness_ttl(dir, Duration::ZERO).await
+}
+
+/// Like [`setup`]; `ttl` is how long `/readyz` reuses a result (zero: a new
+/// probe on every request).
+async fn setup_with_readiness_ttl(dir: &TempDir, ttl: Duration) -> (Store, Router) {
     logs();
     let store = Store::open(&dir.db()).await.unwrap();
     let hash = hash_password(ALICE.1).unwrap();
@@ -113,7 +119,9 @@ async fn setup(dir: &TempDir) -> (Store, Router) {
         .create_user(&ALICE.0.parse().unwrap(), &hash, None)
         .await
         .unwrap();
-    let app = router(&Config::default(), AppState::new(store.clone()).unwrap());
+    let mut state = AppState::new(store.clone()).unwrap();
+    state.readiness = Arc::new(ReadinessCache::new(ttl));
+    let app = router(&Config::default(), state);
     (store, app)
 }
 
@@ -180,6 +188,26 @@ async fn status(app: &Router, uri: &str) -> StatusCode {
     app.clone().oneshot(request).await.unwrap().status()
 }
 
+/// `/readyz`: status and body; a 503 must carry `Retry-After`.
+async fn ready(app: &Router) -> (StatusCode, String) {
+    let request = Request::get("/readyz").body(Body::empty()).unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    if status == StatusCode::SERVICE_UNAVAILABLE {
+        assert!(response.headers().contains_key(header::RETRY_AFTER));
+    }
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8(body.to_vec()).unwrap())
+}
+
+fn not_ready(reason: &str) -> (StatusCode, String) {
+    (StatusCode::SERVICE_UNAVAILABLE, reason.to_owned())
+}
+
+fn ready_ok() -> (StatusCode, String) {
+    (StatusCode::OK, "ok".to_owned())
+}
+
 /// Current sync token of the default calendar and the objects changed since `token`.
 async fn sync(app: &Router, token: &str) -> (String, usize) {
     let body = format!(
@@ -242,8 +270,12 @@ async fn full_disk_answers_507_without_partial_state_and_recovers() {
     );
     let before = send(&app, "GET", &small, &[], "").await.body;
     let (token, _) = sync(&app, "").await;
+    assert_eq!(ready(&app).await, ready_ok());
 
     store.simulate_failure(SimulatedFailure::Full);
+    // The probe's in-place update fits into existing pages: until a write
+    // fails for lack of space, a full disk does not show.
+    assert_eq!(ready(&app).await, ready_ok());
     let big = format!("{CAL}big.ics");
     let reply = put(&app, &big, &event("big", 300_000)).await;
     assert_eq!(reply.status, StatusCode::INSUFFICIENT_STORAGE);
@@ -265,11 +297,18 @@ async fn full_disk_answers_507_without_partial_state_and_recovers() {
         StatusCode::NOT_FOUND
     );
     assert_eq!(sync(&app, &token).await, (token.clone(), 0));
-    assert_eq!(status(&app, "/readyz").await, StatusCode::OK);
+    // Not ready (writes fail), also on repeated probes: the probe's own
+    // write needs new pages and fails as long as there is no room.
+    assert_eq!(ready(&app).await, not_ready("storage full"));
+    assert_eq!(ready(&app).await, not_ready("storage full"));
+    // /healthz is liveness only.
+    assert_eq!(status(&app, "/healthz").await, StatusCode::OK);
 
-    // Space freed: writes work again without a restart, on every pooled
-    // connection (SQLite rolled the failed transactions back by itself).
+    // Space freed: the probe's write succeeds, the instance is ready again,
+    // and writes work again without a restart, on every pooled connection
+    // (SQLite rolled the failed transactions back by itself).
     store.simulate_failure(SimulatedFailure::None);
+    assert_eq!(ready(&app).await, ready_ok());
     assert_eq!(
         put(&app, &big, &event("big", 300_000)).await.status,
         StatusCode::CREATED
@@ -347,10 +386,13 @@ async fn read_only_database_fails_writes_cleanly_and_recovers() {
     assert_eq!(listing.status, StatusCode::MULTI_STATUS);
     assert!(!listing.body.contains("new.ics"));
     assert_eq!(sync(&app, &token).await, (token.clone(), 0));
-    // The database answers, so the instance stays ready (it can serve reads).
-    assert_eq!(status(&app, "/readyz").await, StatusCode::OK);
+    // Reads work, writes do not: not ready; /healthz is liveness only.
+    assert_eq!(ready(&app).await, not_ready("database not writable"));
+    assert_eq!(status(&app, "/healthz").await, StatusCode::OK);
 
+    // Writable again: ready without a restart (the probe proves it).
     store.simulate_failure(SimulatedFailure::None);
+    assert_eq!(ready(&app).await, ready_ok());
     assert_eq!(
         put(&app, &format!("{CAL}new.ics"), &event("new", 10))
             .await
@@ -496,4 +538,73 @@ async fn aborted_uploads_leave_no_trace() {
     assert!(answer.starts_with("HTTP/1.1 201"), "{answer}");
     assert_eq!(sync(&app, &token).await.1, 1);
     assert_logs_clean("aborted.ics");
+}
+
+/// Sizes of the database file and its WAL.
+fn file_sizes(dir: &TempDir) -> (u64, u64) {
+    let size = |suffix: &str| {
+        let mut path = dir.db().into_os_string();
+        path.push(suffix);
+        std::fs::metadata(path).map_or(0, |meta| meta.len())
+    };
+    (size(""), size("-wal"))
+}
+
+#[tokio::test]
+async fn readiness_probe_changes_nothing_and_does_not_grow_the_file() {
+    let dir = TempDir::new("probe");
+    let (store, app) = setup(&dir).await;
+    assert_eq!(
+        put(&app, &format!("{CAL}kept.ics"), &event("kept", 10))
+            .await
+            .status,
+        StatusCode::CREATED
+    );
+    let (token, _) = sync(&app, "").await;
+    let listing = send(&app, "PROPFIND", CAL, &[("depth", "1")], "").await;
+    let sizes = file_sizes(&dir);
+
+    // Directly: the per-client request rate limit applies to /readyz.
+    for _ in 0..500 {
+        assert_eq!(store.readiness().await, Readiness::Ready);
+    }
+    assert_eq!(ready(&app).await, ready_ok());
+
+    assert_eq!(sync(&app, &token).await, (token.clone(), 0));
+    let after = send(&app, "PROPFIND", CAL, &[("depth", "1")], "").await;
+    assert_eq!(after.body, listing.body);
+    assert_eq!(file_sizes(&dir), sizes);
+}
+
+#[tokio::test]
+async fn readiness_probe_detects_a_read_only_database_without_writes() {
+    let dir = TempDir::new("probe-readonly");
+    let (store, app) = setup(&dir).await;
+    assert_eq!(ready(&app).await, ready_ok());
+    store.simulate_failure(SimulatedFailure::ReadOnly);
+    assert_eq!(ready(&app).await, not_ready("database not writable"));
+    store.simulate_failure(SimulatedFailure::None);
+    assert_eq!(ready(&app).await, ready_ok());
+}
+
+#[tokio::test]
+async fn readiness_is_cached_until_a_write_fails() {
+    let dir = TempDir::new("probe-cache");
+    let (store, app) = setup_with_readiness_ttl(&dir, Duration::from_secs(3600)).await;
+    assert_eq!(ready(&app).await, ready_ok());
+
+    // Within the cache time a new state shows only after a failed write.
+    store.simulate_failure(SimulatedFailure::ReadOnly);
+    assert_eq!(ready(&app).await, ready_ok());
+    assert_eq!(
+        put(&app, &format!("{CAL}new.ics"), &event("new", 10))
+            .await
+            .status,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(ready(&app).await, not_ready("database not writable"));
+
+    // The failure result is cached as well.
+    store.simulate_failure(SimulatedFailure::None);
+    assert_eq!(ready(&app).await, not_ready("database not writable"));
 }
