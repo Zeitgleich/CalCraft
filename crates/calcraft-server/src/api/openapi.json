@@ -1572,6 +1572,13 @@
           },
           "href": {
             "type": "string"
+          },
+          "order": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Position set by clients (Apple's calendar-order); calendars are listed by it, then by name"
           }
         },
         "required": [

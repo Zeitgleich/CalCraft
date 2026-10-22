@@ -5,6 +5,7 @@
 //! hard resource limits and response serialisation. Routing, authentication
 //! and storage access live in the server.
 
+pub mod dead;
 mod depth;
 mod multistatus;
 mod propfind;
@@ -13,6 +14,7 @@ mod report;
 pub mod tree;
 pub mod xml;
 
+pub use dead::XmlFragment;
 pub use depth::Depth;
 pub use multistatus::{Element, Multistatus, PropValue, Response};
 pub use propfind::{MAX_PROPFIND_BODY, PropName, Propfind};

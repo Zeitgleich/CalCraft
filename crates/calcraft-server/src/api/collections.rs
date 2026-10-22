@@ -14,10 +14,11 @@ use calcraft_store::{Collection, User};
 use super::{ApiError, ApiJson, SessionUser};
 use crate::{
     app::{AppState, DAV_ROOT},
+    dav::calendar_order,
     validate::{MAX_DESCRIPTION, MAX_DISPLAY_NAME, clean_color, clean_text},
 };
 
-fn info(collection: Collection, user: &User) -> CollectionInfo {
+fn info(collection: Collection, user: &User, order: Option<i64>) -> CollectionInfo {
     let home = match collection.kind {
         CollectionKind::Calendar => "calendars",
         CollectionKind::Addressbook => "addressbooks",
@@ -39,6 +40,7 @@ fn info(collection: Collection, user: &User) -> CollectionInfo {
         description: collection.description,
         color: collection.color,
         components,
+        order,
     }
 }
 
@@ -74,9 +76,25 @@ pub async fn list(
     let user = &session.user;
     let mut result = Vec::new();
     for kind in [CollectionKind::Calendar, CollectionKind::Addressbook] {
-        for collection in state.store.collections(user.id, kind).await? {
-            result.push(info(collection, user));
-        }
+        let properties = state.store.dead_properties_of_owner(user.id, kind).await?;
+        let mut infos: Vec<CollectionInfo> = state
+            .store
+            .collections(user.id, kind)
+            .await?
+            .into_iter()
+            .map(|collection| {
+                let id = collection.id;
+                let order =
+                    calendar_order(properties.iter().filter(|(c, _)| *c == id).map(|(_, p)| p));
+                info(collection, user, order)
+            })
+            .collect();
+        // Clients' order first (unordered ones last), then by name.
+        infos.sort_by_cached_key(|info| {
+            let name = info.display_name.as_deref().unwrap_or(&info.slug);
+            (info.order.is_none(), info.order, name.to_lowercase())
+        });
+        result.extend(infos);
     }
     Ok(Json(result))
 }
@@ -110,7 +128,7 @@ pub async fn create(
             components,
         )
         .await?;
-    Ok((StatusCode::CREATED, Json(info(collection, user))))
+    Ok((StatusCode::CREATED, Json(info(collection, user, None))))
 }
 
 /// Resolves a collection of the logged-in user from path segments. Unknown

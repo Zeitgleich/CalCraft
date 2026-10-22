@@ -43,7 +43,7 @@ use calcraft_server::{
     router,
     secrets::{hash_secret, random_token},
 };
-use calcraft_store::{Collection, NewItem, Precondition, Store, User};
+use calcraft_store::{Collection, NewItem, Precondition, PropertyChange, Store, User};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -155,8 +155,16 @@ async fn seed(store: &Store, user: &User, n: &Names) {
             CollectionKind::Calendar => "VEVENT,VTODO",
             CollectionKind::Addressbook => "VCARD",
         };
+        // A dead property in every collection (bob's carry the marker).
+        let dead_name = format!("{p}-deadprop");
+        let dead_value = format!(r#"<v xmlns="urn:x-seed">{p}-{label}deadvalue</v>"#);
+        let dead = [PropertyChange {
+            namespace: "urn:x-seed",
+            name: &dead_name,
+            value: Some(&dead_value),
+        }];
         store
-            .create_collection(
+            .create_collection_with_properties(
                 user.id,
                 kind,
                 &slug.parse().unwrap(),
@@ -164,6 +172,7 @@ async fn seed(store: &Store, user: &User, n: &Names) {
                 Some(&format!("{p}-{label}desc")),
                 Some("#112233"),
                 components,
+                &dead,
             )
             .await
             .unwrap()
@@ -215,6 +224,10 @@ async fn snapshot(store: &Store, user: &User, session: &str) -> String {
     for kind in KINDS {
         for collection in store.collections(user.id, kind).await.unwrap() {
             out += &format!("{collection:?}\n");
+            out += &format!(
+                "{:?}\n",
+                store.dead_properties(collection.id).await.unwrap()
+            );
             for meta in store.items(collection.id).await.unwrap() {
                 let item = store.item(collection.id, &meta.name).await.unwrap();
                 out += &format!("{item:?}\n");
@@ -613,6 +626,8 @@ enum Case {
     PropfindD1,
     PropfindAllpropD1,
     Proppatch,
+    /// PROPPATCH that sets a dead property and removes bob's seeded one.
+    ProppatchDead,
     CalMultiget,
     CalQuery,
     AbMultiget,
@@ -768,6 +783,7 @@ const WRITE_CASES: &[Case] = &[
     Case::Delete,
     Case::DeleteIfMatch,
     Case::Proppatch,
+    Case::ProppatchDead,
     Case::Mkcalendar,
     Case::MkcolExtended,
     Case::MkcolPlain,
@@ -844,7 +860,7 @@ impl Case {
             Self::Put | Self::PutIfNoneMatch => "PUT",
             Self::Delete | Self::DeleteIfMatch => "DELETE",
             Self::PropfindD0 | Self::PropfindD1 | Self::PropfindAllpropD1 => "PROPFIND",
-            Self::Proppatch => "PROPPATCH",
+            Self::Proppatch | Self::ProppatchDead => "PROPPATCH",
             Self::CalMultiget
             | Self::CalQuery
             | Self::AbMultiget
@@ -938,6 +954,12 @@ impl Case {
                     "<d:propertyupdate {NS}><d:set><d:prop><d:displayname>zzattack</d:displayname></d:prop></d:set></d:propertyupdate>"
                 ),
             ),
+            Self::ProppatchDead => (
+                h(&[xml]),
+                format!(
+                    r#"<d:propertyupdate {NS} xmlns:s="urn:x-seed"><d:set><d:prop><s:zzattack><s:v a="zzattack">zzattack</s:v></s:zzattack></d:prop></d:set><d:remove><d:prop><s:zqbobmark-deadprop/></d:prop></d:remove></d:propertyupdate>"#
+                ),
+            ),
             Self::CalMultiget => (
                 h(&[("depth", "1"), xml]),
                 format!(
@@ -1023,7 +1045,7 @@ impl Case {
             Self::PropfindD0 | Self::PropfindD1 | Self::PropfindAllpropD1 => {
                 if missing || unmapped { 404 } else { 207 }
             }
-            Self::Proppatch => {
+            Self::Proppatch | Self::ProppatchDead => {
                 if collection {
                     207
                 } else {

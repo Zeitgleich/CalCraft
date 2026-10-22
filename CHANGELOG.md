@@ -7,6 +7,33 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 
 ## [Unreleased]
 
+### Added
+
+- Dead properties (RFC 4918 §4) on calendars and address books: PROPPATCH,
+  MKCALENDAR and extended MKCOL store client-defined properties, PROPFIND
+  returns them (explicitly, with `allprop` and `propname`), PROPPATCH
+  `remove` deletes them. Apple Calendar keeps its calendar order
+  (`{http://apple.com/ns/ical/}calendar-order`, an integer) and settings such
+  as `CALDAV:calendar-timezone` and `CALDAV:schedule-calendar-transp`.
+  Values are stored as canonical XML re-serialised from the parsed request,
+  never as the bytes sent. Limits: 64 properties per collection, namespace
+  256 / local name 128 bytes, 16 KiB per value and 64 KiB per collection
+  (507 Insufficient Storage); namespaces must be absolute URIs or empty
+  (403). They survive restarts, are part of backups and are restored with a
+  collection from the trash. Migration `0010_dead_properties`.
+- The web UI and `GET /api/v1/collections` list calendars by
+  `calendar-order`, then by name; `CollectionInfo` has a new field `order`.
+  Reordering in the web UI itself is not available yet.
+
+### Changed
+
+- PROPPATCH answers protected properties (everything else in the `DAV:`,
+  CalDAV and CardDAV namespaces, e.g. `resourcetype`, `getetag`,
+  `sync-token`, `owner`, `current-user-privilege-set`,
+  `supported-calendar-component-set`, quota properties, and
+  `getctag`) with 403 and `DAV:cannot-modify-protected-property`; the whole
+  request still fails atomically (424 for the other properties).
+
 ## [0.1.0-alpha.1] – 2026-10-22
 
 First pre-release, for testing only – not for production use (open points:

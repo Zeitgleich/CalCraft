@@ -333,7 +333,10 @@ Der ausgehende HTTPS-Client liegt jetzt in `src/https.rs` (internes Feature
 - `prop-filter`, `param-filter` und `text-match` werden mit `CALDAV:supported-filter` (403) abgelehnt
   statt stillschweigend ignoriert.
 - `calendar-data` liefert immer das ganze Objekt (keine Teilabfrage, kein `expand`/`limit-recurrence-set`).
-- Unbekannte Properties bei MKCALENDAR (z. B. `calendar-order`) werden nicht gespeichert.
+- Dead Properties (z. B. `calendar-order`) nur auf Collections, nicht auf einzelnen Objekten; höchstens
+  64 pro Collection, 16 KiB pro Wert, 64 KiB insgesamt. Werte werden als kanonisch neu serialisiertes
+  XML gespeichert: Kommentare, präfixierte Attribute, Attribute des Property-Elements selbst und die
+  Position von Text zwischen Kindelementen gehen verloren. Details: `docs/caldav.md`.
 - `addressbook-query` unterstützt nur einen leeren Filter (alle Kontakte); Filter werden mit
   `CARDDAV:supported-filter` abgelehnt.
 - `sync-collection` nur mit `sync-level` 1. Große Ergebnisse werden abgeschnitten (507-Eintrag) und

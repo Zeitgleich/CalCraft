@@ -24,6 +24,7 @@ mod accounts;
 mod backup;
 mod items;
 mod oidc;
+mod properties;
 mod test_hooks;
 mod trash;
 
@@ -40,6 +41,7 @@ pub use items::{
 };
 pub use items::{MAX_BYTES_PER_USER, MAX_ITEMS_PER_COLLECTION};
 pub use oidc::{ApprovedBinding, OidcBinding};
+pub use properties::{DeadProperty, MAX_DEAD_PROPERTIES, MAX_DEAD_PROPERTY_BYTES, PropertyChange};
 #[cfg(feature = "test-hooks")]
 pub use test_hooks::SimulatedFailure;
 pub use trash::{

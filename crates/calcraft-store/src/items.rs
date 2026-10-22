@@ -7,7 +7,7 @@
 use calcraft_core::{CollectionKind, Slug};
 use sqlx::{Row, sqlite::SqliteRow};
 
-use crate::{Collection, Result, Store, StoreError, collection_from_row};
+use crate::{Collection, PropertyChange, Result, Store, StoreError, collection_from_row};
 
 /// Maximum number of calendars plus address books per user.
 pub const MAX_COLLECTIONS_PER_USER: i64 = 100;
@@ -174,6 +174,33 @@ impl Store {
         color: Option<&str>,
         components: &str,
     ) -> Result<Collection> {
+        self.create_collection_with_properties(
+            owner_id,
+            kind,
+            slug,
+            display_name,
+            description,
+            color,
+            components,
+            &[],
+        )
+        .await
+    }
+
+    /// [`Store::create_collection`] that also sets dead properties, in the
+    /// same transaction (see [`Store::update_collection_with_properties`]).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_collection_with_properties(
+        &self,
+        owner_id: i64,
+        kind: CollectionKind,
+        slug: &Slug,
+        display_name: Option<&str>,
+        description: Option<&str>,
+        color: Option<&str>,
+        components: &str,
+        properties: &[PropertyChange<'_>],
+    ) -> Result<Collection> {
         // Write transactions start IMMEDIATE (see `put_item`): a deferred one that
         // reads first fails with SQLITE_BUSY instead of waiting when another
         // writer commits in between.
@@ -208,6 +235,7 @@ impl Store {
             Err(err) => return Err(err.into()),
         };
         let collection = collection_from_row(&row)?;
+        crate::properties::apply(&mut tx, collection.id, properties).await?;
         tx.commit().await?;
         Ok(collection)
     }
@@ -229,6 +257,27 @@ impl Store {
         display_name: Option<Option<&str>>,
         description: Option<Option<&str>>,
         color: Option<Option<&str>>,
+    ) -> Result<()> {
+        self.update_collection_with_properties(collection_id, display_name, description, color, &[])
+            .await
+    }
+
+    /// [`Store::update_collection`] that also sets or removes dead
+    /// properties, all in one transaction. Fails with [`StoreError::Limit`]
+    /// (and changes nothing) if the collection would end up with more than
+    /// [`MAX_DEAD_PROPERTIES`](crate::MAX_DEAD_PROPERTIES) or
+    /// [`MAX_DEAD_PROPERTY_BYTES`](crate::MAX_DEAD_PROPERTY_BYTES).
+    ///
+    /// Like the other properties they bump the collection's revision
+    /// (`getctag`), which tells clients to read the properties again; no
+    /// object changes are recorded, so a sync report stays empty.
+    pub async fn update_collection_with_properties(
+        &self,
+        collection_id: i64,
+        display_name: Option<Option<&str>>,
+        description: Option<Option<&str>>,
+        color: Option<Option<&str>>,
+        properties: &[PropertyChange<'_>],
     ) -> Result<()> {
         // Write transactions start IMMEDIATE (see `put_item`): a deferred one that
         // reads first fails with SQLITE_BUSY instead of waiting when another
@@ -252,6 +301,7 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
         }
+        crate::properties::apply(&mut tx, collection_id, properties).await?;
         sqlx::query("UPDATE collections SET sync_revision = sync_revision + 1 WHERE id = ?")
             .bind(collection_id)
             .execute(&mut *tx)

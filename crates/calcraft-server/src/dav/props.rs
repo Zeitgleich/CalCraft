@@ -1,12 +1,12 @@
-//! Live properties of DAV resources.
+//! Live and dead properties of DAV resources.
 
 use calcraft_core::CollectionKind;
 use calcraft_dav::{
-    Element, PropName, PropValue, Propfind, Response as DavResponse,
+    Element, PropName, PropValue, Propfind, Response as DavResponse, XmlFragment,
     xml::{NS_APPLE_ICAL, NS_CALDAV, NS_CALENDARSERVER, NS_CARDDAV, NS_DAV},
 };
 use calcraft_ical::MAX_OBJECT_SIZE;
-use calcraft_store::{Collection, User};
+use calcraft_store::{Collection, DeadProperty, User};
 
 use super::paths::{Resource, home_href, principal_href};
 
@@ -48,6 +48,40 @@ pub const WRITABLE: [(&str, &str); 4] = [
     (NS_CARDDAV, "addressbook-description"),
     (NS_APPLE_ICAL, "calendar-color"),
 ];
+
+/// Apple's calendar order: a dead property with an integer value, also
+/// used to sort calendars in the web UI.
+pub const CALENDAR_ORDER: (&str, &str) = (NS_APPLE_ICAL, "calendar-order");
+
+/// Stored dead properties as response properties. Values are re-validated
+/// ([`XmlFragment::from_stored`]); one that fails is left out.
+pub fn dead_properties<'a>(
+    stored: impl IntoIterator<Item = &'a DeadProperty>,
+) -> impl Iterator<Item = (PropName, PropValue)> {
+    stored.into_iter().filter_map(|property| {
+        let Some(value) = XmlFragment::from_stored(&property.value) else {
+            tracing::warn!(
+                namespace = property.namespace,
+                name = property.name,
+                "stored dead property is not valid XML: left out"
+            );
+            return None;
+        };
+        Some((
+            PropName::new(&property.namespace, &property.name),
+            PropValue::Xml(value),
+        ))
+    })
+}
+
+/// The `calendar-order` among a collection's dead properties.
+#[cfg(feature = "api")]
+pub fn calendar_order<'a>(stored: impl IntoIterator<Item = &'a DeadProperty>) -> Option<i64> {
+    stored
+        .into_iter()
+        .find(|p| p.namespace == CALENDAR_ORDER.0 && p.name == CALENDAR_ORDER.1)
+        .and_then(|p| p.value.trim().parse().ok())
+}
 
 /// Filters the available properties according to the request.
 pub fn respond(href: &str, available: &[(PropName, PropValue)], query: &Propfind) -> DavResponse {

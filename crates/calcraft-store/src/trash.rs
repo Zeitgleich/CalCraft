@@ -411,6 +411,7 @@ impl Store {
             .fetch_one(&mut *tx)
             .await?
             .try_get("id")?;
+            crate::properties::to_trash(&mut tx, collection_id, entry).await?;
             sqlx::query(
                 "INSERT INTO trash (owner_id, entry_kind, parent_id, collection_kind, \
                    collection_slug, name, uid, etag, component, range_start, range_end, content, \
@@ -808,6 +809,7 @@ async fn restore_collection(
         }
         Err(err) => return Err(err.into()),
     };
+    crate::properties::from_trash(tx, entry_id, collection_id).await?;
     // Every object gets its own revision, in the order they were changed.
     let restored = sqlx::query(
         "INSERT INTO items (collection_id, name, uid, etag, component, range_start, range_end, content, revision, modified_at) \

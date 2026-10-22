@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 
 use crate::{
     PropName,
+    dead::XmlFragment,
     xml::{escape_text, prefix_for, root_namespaces},
 };
 
@@ -19,6 +20,9 @@ pub enum PropValue {
     /// Child elements in known namespaces, e.g. `resourcetype` or
     /// `supported-calendar-component-set`.
     Elements(Vec<Element>),
+    /// The value of a dead property, written as it is: a canonical,
+    /// self-contained fragment (see [`XmlFragment`]).
+    Xml(XmlFragment),
 }
 
 /// An empty child element with optional attributes, e.g. `<c:comp name="VEVENT"/>`.
@@ -60,8 +64,10 @@ pub struct Response {
     pub status: Option<u16>,
     pub found: Vec<(PropName, PropValue)>,
     pub not_found: Vec<PropName>,
-    /// Properties that could not be changed, with their status code.
-    pub failed: Vec<(PropName, u16)>,
+    /// Properties that could not be changed, with their status code and
+    /// an optional precondition element in the `DAV:` namespace (e.g.
+    /// `cannot-modify-protected-property`, RFC 4918 §16).
+    pub failed: Vec<(PropName, u16, Option<&'static str>)>,
 }
 
 impl Response {
@@ -128,19 +134,31 @@ impl Multistatus {
                 }
                 out.push_str("</d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat>");
             }
-            let mut codes: Vec<u16> = response.failed.iter().map(|(_, code)| *code).collect();
-            codes.sort_unstable();
-            codes.dedup();
-            for code in codes {
+            let mut groups: Vec<(u16, Option<&str>)> = response
+                .failed
+                .iter()
+                .map(|(_, code, error)| (*code, *error))
+                .collect();
+            groups.sort_unstable();
+            groups.dedup();
+            for group in groups {
                 out.push_str("<d:propstat><d:prop>");
-                for (name, _) in response.failed.iter().filter(|(_, c)| *c == code) {
+                for (name, ..) in response
+                    .failed
+                    .iter()
+                    .filter(|(_, code, error)| (*code, *error) == group)
+                {
                     write_prop(&mut out, name, &PropValue::Empty);
                 }
                 let _ = write!(
                     out,
-                    "</d:prop><d:status>{}</d:status></d:propstat>",
-                    status_line(code)
+                    "</d:prop><d:status>{}</d:status>",
+                    status_line(group.0)
                 );
+                if let Some(error) = group.1 {
+                    let _ = write!(out, "<d:error><d:{error}/></d:error>");
+                }
+                out.push_str("</d:propstat>");
             }
             out.push_str("</d:response>");
         }
@@ -190,6 +208,9 @@ fn write_prop(out: &mut String, name: &PropName, value: &PropValue) {
                 write_element(out, element);
             }
             let _ = write!(out, "</{close}>");
+        }
+        PropValue::Xml(fragment) => {
+            let _ = write!(out, "<{open}>{}</{close}>", fragment.as_str());
         }
     }
 }

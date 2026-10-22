@@ -64,6 +64,10 @@ pub struct CollectionInfo {
     pub components: Vec<String>,
     /// DAV URL of the collection, for client setup.
     pub href: String,
+    /// Position set by clients (Apple's `calendar-order`); calendars are
+    /// listed by it, then by name.
+    #[serde(default)]
+    pub order: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -29,6 +29,8 @@ use crate::{app::AppState, auth::AuthOutcome, net::ClientKey};
 
 pub(crate) use objects::{Rejection, Validated, check_object, etag};
 pub use paths::valid_item_name;
+#[cfg(feature = "api")]
+pub(crate) use props::calendar_order;
 
 /// Methods the DAV handler routes, as advertised in `Allow`. The
 /// authorization matrix test (`tests/authz_matrix.rs`) fails for any method
