@@ -17,7 +17,7 @@ use crate::{
     validate::{MAX_DESCRIPTION, MAX_DISPLAY_NAME, clean_color, clean_text},
 };
 
-fn info(collection: Collection, user: &User) -> CollectionInfo {
+pub(super) fn info(collection: Collection, user: &User) -> CollectionInfo {
     let home = match collection.kind {
         CollectionKind::Calendar => "calendars",
         CollectionKind::Addressbook => "addressbooks",
@@ -39,6 +39,7 @@ fn info(collection: Collection, user: &User) -> CollectionInfo {
         description: collection.description,
         color: collection.color,
         components,
+        read_only: collection.read_only,
     }
 }
 
@@ -137,6 +138,10 @@ pub async fn update(
     ApiJson(request): ApiJson<UpdateCollection>,
 ) -> Result<StatusCode, ApiError> {
     let collection = own_collection(&state, &session.user, &kind, &slug).await?;
+    // A subscription can be renamed and recoloured, nothing else.
+    if collection.read_only && request.description.is_some() {
+        return Err(ApiError::ReadOnly);
+    }
     let display_name = text_field(request.display_name.as_deref(), MAX_DISPLAY_NAME)?;
     let description = text_field(request.description.as_deref(), MAX_DESCRIPTION)?;
     let color = color_field(request.color.as_deref())?;

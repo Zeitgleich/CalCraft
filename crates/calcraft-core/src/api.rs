@@ -84,6 +84,10 @@ pub struct CollectionInfo {
     pub components: Vec<String>,
     /// DAV URL of the collection, for client setup.
     pub href: String,
+    /// A calendar subscription: its objects come from a feed and cannot be
+    /// changed (see `/api/v1/subscriptions`).
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -306,6 +310,69 @@ pub struct RestoredTrashEntry {
     pub etag: Option<String>,
     /// DAV URL of the restored object or collection.
     pub href: String,
+}
+
+/// A calendar subscription (webcal/ICS feed) of the logged-in user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscriptionInfo {
+    /// Slug of the read-only calendar holding the feed's events.
+    pub slug: String,
+    /// DAV URL of that calendar.
+    pub href: String,
+    /// Feed URL. May contain a secret token; only ever shown to the owner.
+    pub url: String,
+    pub display_name: Option<String>,
+    pub color: Option<String>,
+    /// Interval chosen by the owner in minutes; `None`: automatic (the
+    /// feed's own interval, else the server default).
+    pub refresh_minutes: Option<u32>,
+    /// Interval in effect, in minutes.
+    pub effective_refresh_minutes: u32,
+    /// Events and to-dos stored.
+    pub objects: u32,
+    /// Objects of the last good feed that were invalid and left out.
+    pub skipped: u32,
+    /// Unix seconds.
+    pub last_attempt_at: Option<i64>,
+    pub last_success_at: Option<i64>,
+    pub next_refresh_at: i64,
+    /// Error code of the last refresh (`fetch_failed`, `not_icalendar`, …);
+    /// `None` after a success. The last good content stays available.
+    pub last_error: Option<String>,
+    /// Readable text for `last_error`.
+    pub last_error_message: Option<String>,
+}
+
+/// `POST /api/v1/subscriptions`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateSubscription {
+    /// `https://` or `webcal://` URL of an iCalendar feed.
+    pub url: String,
+    /// Slug of the new calendar; random if absent.
+    #[serde(default)]
+    pub slug: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    /// 15 to 10080 minutes; absent or 0: automatic.
+    #[serde(default)]
+    pub refresh_minutes: Option<u32>,
+}
+
+/// `PATCH /api/v1/subscriptions/{slug}`: fields that are present are
+/// changed; an empty string clears a value, `refresh_minutes: 0` means
+/// automatic.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateSubscription {
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub refresh_minutes: Option<u32>,
 }
 
 #[cfg(test)]

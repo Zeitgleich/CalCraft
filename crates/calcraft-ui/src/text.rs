@@ -79,6 +79,54 @@ pub const COLOR: &str = "Color";
 pub const USE_COLOR: &str = "Use a color";
 pub const DELETE_CONFIRM: &str = "Delete permanently";
 
+pub const READ_ONLY_SUBSCRIPTION: &str = "Subscription (read-only)";
+
+// Subscriptions
+pub const SUBSCRIPTIONS: &str = "Subscribed calendars";
+pub const SUBSCRIPTIONS_HINT: &str = "The server fetches these calendars (webcal or https links, e.g. holidays or a sports schedule) and keeps them up to date. Your apps see them as read-only calendars. Links with secret tokens are only shown to you.";
+pub const NO_SUBSCRIPTIONS: &str = "No subscriptions yet.";
+pub const SUBSCRIBE: &str = "Subscribe to calendar";
+pub const SUBSCRIBE_BUTTON: &str = "Subscribe";
+pub const FEED_URL: &str = "Calendar link (https:// or webcal://)";
+pub const REFRESH_INTERVAL: &str = "Refresh";
+pub const REFRESH_AUTOMATIC: &str = "Automatic";
+pub const REFRESH_NOW: &str = "Refresh now";
+pub const REFRESH_DONE: &str = "Refreshed.";
+pub const LAST_REFRESH: &str = "Last refreshed:";
+pub const UNSUBSCRIBE: &str = "Unsubscribe";
+pub const FEED_LINK: &str = "Link:";
+
+/// `(minutes, label)`; 0 means automatic.
+pub const REFRESH_CHOICES: [(u32, &str); 6] = [
+    (0, REFRESH_AUTOMATIC),
+    (15, "Every 15 minutes"),
+    (60, "Every hour"),
+    (360, "Every 6 hours"),
+    (1440, "Daily"),
+    (10080, "Weekly"),
+];
+
+pub fn subscription_status(last: &str, objects: u32, every_minutes: u32) -> String {
+    let every = if every_minutes.is_multiple_of(1440) {
+        format!("{} d", every_minutes / 1440)
+    } else if every_minutes.is_multiple_of(60) {
+        format!("{} h", every_minutes / 60)
+    } else {
+        format!("{every_minutes} min")
+    };
+    format!("{LAST_REFRESH} {last} · {objects} entries · every {every}")
+}
+
+pub fn subscription_skipped(count: u32) -> String {
+    format!("{count} invalid entries of the feed were left out.")
+}
+
+pub fn confirm_unsubscribe(name: &str) -> String {
+    format!(
+        "Unsubscribe from “{name}”? The calendar is removed from all your apps (not kept in the trash); you can subscribe again at any time."
+    )
+}
+
 pub fn confirm_delete_collection(name: &str) -> String {
     format!(
         "Delete “{name}” with all its entries? Unless the trash is disabled on this server, you can restore it from the trash."
@@ -254,3 +302,5 @@ pub const ERR_NAME_REQUIRED: &str = "Please enter a name.";
 pub const ERR_NAME_TOO_LONG: &str = "The name is too long (at most 64 characters).";
 pub const ERR_TEXT_TOO_LONG: &str = "The text is too long.";
 pub const ERR_COLOR_INVALID: &str = "The color must have the form #RRGGBB.";
+pub const ERR_FEED_URL_INVALID: &str =
+    "Please enter a calendar link starting with https:// or webcal://.";

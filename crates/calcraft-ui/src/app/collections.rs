@@ -13,10 +13,10 @@ use calcraft_ui::{
 };
 use leptos::prelude::*;
 
-use super::{Ctx, ErrorText, api, submit};
+use super::{Ctx, ErrorText, api, submit, subscriptions::Subscriptions};
 
 /// Default color for new calendars.
-const DEFAULT_COLOR: &str = "#3a7bd5";
+pub(super) const DEFAULT_COLOR: &str = "#3a7bd5";
 
 fn origin() -> String {
     window().location().origin().unwrap_or_default()
@@ -84,6 +84,7 @@ pub fn Overview() -> impl IntoView {
         </p>
         <ErrorText error />
         {section(CollectionKind::Calendar, t::CALENDARS, t::NO_CALENDARS)}
+        <Subscriptions on_change=reload />
         {section(CollectionKind::Addressbook, t::ADDRESS_BOOKS, t::NO_ADDRESS_BOOKS)}
         <CreateForm on_created=reload />
     }
@@ -92,7 +93,7 @@ pub fn Overview() -> impl IntoView {
 /// Color accent along the left edge of the card, drawn as SVG so that no
 /// `style` attribute is needed (the shape comes from the stylesheet).
 #[component]
-fn Swatch(color: Option<String>) -> impl IntoView {
+pub(super) fn Swatch(color: Option<String>) -> impl IntoView {
     let color = color.filter(|c| is_valid_color(c));
     let class = if color.is_some() {
         "swatch"
@@ -126,6 +127,8 @@ fn CollectionRow(info: CollectionInfo, on_change: Callback<()>) -> impl IntoView
     };
     let url = format!("{}{}", origin(), info.href);
     let components = info.components.join(", ");
+    // Subscriptions: name and color only; the content comes from the feed.
+    let read_only = info.read_only;
 
     // Edit form state, initialised from the current values.
     let display_name = RwSignal::new(info.display_name.clone().unwrap_or_default());
@@ -152,7 +155,8 @@ fn CollectionRow(info: CollectionInfo, on_change: Callback<()>) -> impl IntoView
             move || async move {
                 let update = UpdateCollection {
                     display_name: Some(display_name.get_untracked().trim().to_owned()),
-                    description: Some(description.get_untracked().trim().to_owned()),
+                    description: (!read_only)
+                        .then(|| description.get_untracked().trim().to_owned()),
                     color: Some(if has_color.get_untracked() {
                         color.get_untracked()
                     } else {
@@ -186,9 +190,18 @@ fn CollectionRow(info: CollectionInfo, on_change: Callback<()>) -> impl IntoView
         });
     };
 
+    let kind_label = if read_only {
+        t::READ_ONLY_SUBSCRIPTION
+    } else {
+        kind_label
+    };
     let slug_line = format!("{kind_label} · {}", info.slug);
     let description_text = info.description.clone().unwrap_or_default();
-    let confirm_text = t::confirm_delete_collection(&title);
+    let confirm_text = if read_only {
+        t::confirm_unsubscribe(&title)
+    } else {
+        t::confirm_delete_collection(&title)
+    };
 
     view! {
         <li class="item">
@@ -245,10 +258,15 @@ fn CollectionRow(info: CollectionInfo, on_change: Callback<()>) -> impl IntoView
                         {t::DISPLAY_NAME}
                         <input type="text" maxlength=MAX_DISPLAY_NAME bind:value=display_name />
                     </label>
-                    <label>
-                        {t::DESCRIPTION}
-                        <textarea rows="2" maxlength=MAX_DESCRIPTION bind:value=description></textarea>
-                    </label>
+                    {(!read_only)
+                        .then(|| {
+                            view! {
+                                <label>
+                                    {t::DESCRIPTION}
+                                    <textarea rows="2" maxlength=MAX_DESCRIPTION bind:value=description></textarea>
+                                </label>
+                            }
+                        })}
                     <ColorField has_color color />
                     <button type="submit" disabled=move || busy.get()>
                         {t::SAVE}
@@ -262,7 +280,7 @@ fn CollectionRow(info: CollectionInfo, on_change: Callback<()>) -> impl IntoView
 
 /// Color picker with a "no color" option.
 #[component]
-fn ColorField(has_color: RwSignal<bool>, color: RwSignal<String>) -> impl IntoView {
+pub(super) fn ColorField(has_color: RwSignal<bool>, color: RwSignal<String>) -> impl IntoView {
     view! {
         <fieldset class="color-field">
             <legend>{t::COLOR}</legend>

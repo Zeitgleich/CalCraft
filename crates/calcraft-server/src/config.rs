@@ -33,6 +33,7 @@ pub struct Config {
     pub api: ApiConfig,
     pub oidc: OidcConfig,
     pub updates: UpdatesConfig,
+    pub subscriptions: SubscriptionsConfig,
     pub logging: LoggingConfig,
 }
 
@@ -497,6 +498,167 @@ impl UpdatesConfig {
     }
 }
 
+/// Shortest refresh interval of a subscription (15 minutes).
+pub const MIN_SUBSCRIPTION_REFRESH_SECS: i64 = 15 * 60;
+/// Longest refresh interval of a subscription (7 days).
+pub const MAX_SUBSCRIPTION_REFRESH_SECS: i64 = 7 * 86_400;
+/// Bounds of `subscriptions.max_bytes`: at most the import limit.
+pub const SUBSCRIPTION_MAX_BYTES: std::ops::RangeInclusive<usize> =
+    64 * 1024..=calcraft_ical::MAX_IMPORT_SIZE;
+/// Bounds of `subscriptions.max_per_user`.
+pub const SUBSCRIPTIONS_PER_USER: std::ops::RangeInclusive<u32> = 1..=100;
+/// Bounds of `subscriptions.max_concurrent_fetches`.
+pub const SUBSCRIPTION_FETCHES: std::ops::RangeInclusive<usize> = 1..=16;
+/// Bounds of `subscriptions.timeout_secs`.
+pub const SUBSCRIPTION_TIMEOUT_SECS: std::ops::RangeInclusive<u64> = 5..=120;
+/// Most redirects `subscriptions.max_redirects` may allow.
+pub const MAX_SUBSCRIPTION_REDIRECTS: u8 = 5;
+
+/// Calendar subscriptions (webcal/ICS feeds fetched by the server).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SubscriptionsConfig {
+    /// Let users subscribe to calendar feeds. Off by default: the server
+    /// then makes outbound requests to addresses its users choose (public
+    /// addresses only, see README).
+    pub enabled: bool,
+    /// Also allow `http://` feeds (unencrypted). `webcal://` always means
+    /// https.
+    pub allow_http: bool,
+    /// Ports feeds may use. Empty: 443, plus 80 if `allow_http`.
+    pub allowed_ports: Vec<u16>,
+    /// If not empty, only these hosts may be subscribed to (also after
+    /// redirects). `example.com` matches exactly, `*.example.com` any
+    /// subdomain.
+    pub allowed_hosts: Vec<String>,
+    /// Hosts that may never be subscribed to (same syntax).
+    pub denied_hosts: Vec<String>,
+    /// Largest accepted feed in bytes (64 KiB to 20 MiB).
+    pub max_bytes: usize,
+    /// Subscriptions per user (1 to 100).
+    pub max_per_user: u32,
+    /// Refresh interval when neither the user nor the feed sets one, in
+    /// minutes (15 to 10080).
+    pub default_refresh_minutes: u64,
+    /// Feeds fetched at the same time (1 to 16).
+    pub max_concurrent_fetches: usize,
+    /// Deadline for one fetch including redirects and the body, in seconds
+    /// (5 to 120).
+    pub timeout_secs: u64,
+    /// Redirects followed per fetch (0 to 5); every hop is checked again.
+    pub max_redirects: u8,
+}
+
+impl Default for SubscriptionsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allow_http: false,
+            allowed_ports: Vec::new(),
+            allowed_hosts: Vec::new(),
+            denied_hosts: Vec::new(),
+            max_bytes: 10 * 1024 * 1024,
+            max_per_user: 20,
+            default_refresh_minutes: 360,
+            max_concurrent_fetches: 2,
+            timeout_secs: 30,
+            max_redirects: 3,
+        }
+    }
+}
+
+/// `example.com`, `*.example.com` or `.example.com`: lower-case
+/// letters, digits, `-` and `.`, no empty labels.
+fn valid_host_pattern(pattern: &str) -> bool {
+    let name = pattern
+        .strip_prefix("*.")
+        .or_else(|| pattern.strip_prefix('.'))
+        .unwrap_or(pattern);
+    !name.is_empty()
+        && name.len() <= 253
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+}
+
+impl SubscriptionsConfig {
+    /// Ports feeds may use.
+    pub fn ports(&self) -> Vec<u16> {
+        if !self.allowed_ports.is_empty() {
+            return self.allowed_ports.clone();
+        }
+        if self.allow_http {
+            vec![443, 80]
+        } else {
+            vec![443]
+        }
+    }
+
+    pub fn default_refresh_secs(&self) -> i64 {
+        i64::try_from(self.default_refresh_minutes.saturating_mul(60)).unwrap_or(i64::MAX)
+    }
+
+    pub fn timeout(&self) -> Duration {
+        Duration::from_secs(self.timeout_secs)
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !SUBSCRIPTION_MAX_BYTES.contains(&self.max_bytes) {
+            return Err(ConfigError::Invalid(
+                "subscriptions.max_bytes must be between 65536 (64 KiB) and 20971520 (20 MiB)",
+            ));
+        }
+        if !SUBSCRIPTIONS_PER_USER.contains(&self.max_per_user) {
+            return Err(ConfigError::Invalid(
+                "subscriptions.max_per_user must be between 1 and 100",
+            ));
+        }
+        let minutes = i64::try_from(self.default_refresh_minutes).unwrap_or(i64::MAX);
+        if !(MIN_SUBSCRIPTION_REFRESH_SECS / 60..=MAX_SUBSCRIPTION_REFRESH_SECS / 60)
+            .contains(&minutes)
+        {
+            return Err(ConfigError::Invalid(
+                "subscriptions.default_refresh_minutes must be between 15 and 10080 (7 days)",
+            ));
+        }
+        if !SUBSCRIPTION_FETCHES.contains(&self.max_concurrent_fetches) {
+            return Err(ConfigError::Invalid(
+                "subscriptions.max_concurrent_fetches must be between 1 and 16",
+            ));
+        }
+        if !SUBSCRIPTION_TIMEOUT_SECS.contains(&self.timeout_secs) {
+            return Err(ConfigError::Invalid(
+                "subscriptions.timeout_secs must be between 5 and 120",
+            ));
+        }
+        if self.max_redirects > MAX_SUBSCRIPTION_REDIRECTS {
+            return Err(ConfigError::Invalid(
+                "subscriptions.max_redirects must be at most 5",
+            ));
+        }
+        if self.allowed_ports.contains(&0) {
+            return Err(ConfigError::Invalid(
+                "subscriptions.allowed_ports must not contain 0",
+            ));
+        }
+        if !self
+            .allowed_hosts
+            .iter()
+            .chain(&self.denied_hosts)
+            .all(|h| valid_host_pattern(h))
+        {
+            return Err(ConfigError::Invalid(
+                "subscriptions.allowed_hosts/denied_hosts: use lower-case host names like example.com or *.example.com",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
@@ -643,6 +805,7 @@ impl Config {
                 "updates.interval_hours must be between 1 and 168",
             ));
         }
+        self.subscriptions.validate()?;
         self.oidc.validate()
     }
 }

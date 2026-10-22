@@ -12,6 +12,7 @@ mod api;
 mod app_passwords;
 mod collections;
 mod login;
+mod subscriptions;
 mod trash;
 
 use calcraft_core::api::Me;
