@@ -730,3 +730,46 @@ async fn lock_is_held_after_migrating() {
     restore_database(&db, &backup).await.unwrap();
     assert_eq!(version_of(&db).await, 3);
 }
+
+#[tokio::test]
+async fn backup_and_restore_include_the_trash() {
+    let dir = TempDir::new("trash");
+    let db = dir.join("calcraft.db");
+    let store = Store::open(&db).await.unwrap();
+    let collection = user_calendar(&store, "alice").await;
+    put(&store, collection, "a.ics", "\"a1\"").await;
+    store
+        .delete_item_to_trash(collection, "a.ics", &Precondition::None, 1_000, |_| {
+            Some("Dentist".to_owned())
+        })
+        .await
+        .unwrap();
+    let owner = store.list_users().await.unwrap()[0].id;
+    let before = store.trash_entries(owner, 10, 0).await.unwrap();
+    assert_eq!(before.total, 1);
+    let backup = dir.join("backup.db");
+    store.backup(&backup, false).await.unwrap();
+    store.empty_trash(owner).await.unwrap();
+    store.close().await;
+
+    restore_database(&db, &backup).await.unwrap();
+    let store = Store::open(&db).await.unwrap();
+    let after = store.trash_entries(owner, 10, 0).await.unwrap();
+    assert_eq!(after, before);
+    let restored = store
+        .restore_trash_entry(owner, &after.entries[0].id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.etag.as_deref(), Some("\"a1\""));
+    assert_eq!(
+        store
+            .item(collection, "a.ics")
+            .await
+            .unwrap()
+            .unwrap()
+            .content,
+        event("a")
+    );
+    store.close().await;
+}

@@ -11,6 +11,7 @@ mod collections;
 #[cfg(feature = "oidc")]
 mod oidc;
 mod transfer;
+mod trash;
 
 use axum::{
     Json, Router,
@@ -58,6 +59,10 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("delete", "/v1/collections/{kind}/{slug}"),
     ("get", "/v1/collections/{kind}/{slug}/export"),
     ("post", "/v1/collections/{kind}/{slug}/import"),
+    ("get", "/v1/trash"),
+    ("delete", "/v1/trash"),
+    ("post", "/v1/trash/{id}/restore"),
+    ("delete", "/v1/trash/{id}"),
     ("get", "/v1/admin/users"),
     ("post", "/v1/admin/users"),
     ("patch", "/v1/admin/users/{username}"),
@@ -101,6 +106,9 @@ pub fn router() -> Router<AppState> {
             "/v1/collections/{kind}/{slug}/import",
             post(transfer::import),
         )
+        .route("/v1/trash", get(trash::list).delete(trash::empty))
+        .route("/v1/trash/{id}/restore", post(trash::restore))
+        .route("/v1/trash/{id}", delete(trash::delete_entry))
         .route("/v1/admin/users", get(admin::list).post(admin::create))
         .route("/v1/admin/users/{username}", patch(admin::update))
         .route("/v1/admin/update", get(admin::update_check));
@@ -163,6 +171,8 @@ pub enum ApiError {
     Csrf,
     NotFound,
     Conflict(&'static str),
+    /// A trash entry cannot be restored; the code says why.
+    RestoreConflict(calcraft_store::TrashConflict),
     Limit(&'static str),
     TooLarge,
     /// An uploaded file that cannot be used, with the reason.
@@ -208,6 +218,11 @@ impl IntoResponse for ApiError {
             ),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found", "not found".to_owned()),
             Self::Conflict(message) => (StatusCode::CONFLICT, "conflict", message.to_owned()),
+            Self::RestoreConflict(conflict) => (
+                StatusCode::CONFLICT,
+                conflict.code(),
+                conflict.message().to_owned(),
+            ),
             Self::Limit(message) => (
                 StatusCode::INSUFFICIENT_STORAGE,
                 "limit",
@@ -254,6 +269,7 @@ impl From<StoreError> for ApiError {
                 Self::Limit("storage is full")
             }
             StoreError::CollectionExists => Self::Conflict("collection already exists"),
+            StoreError::TrashConflict(conflict) => Self::RestoreConflict(conflict),
             StoreError::UserExists(_) => Self::Conflict("user already exists"),
             StoreError::Busy => {
                 tracing::error!("storage busy: database stayed locked");

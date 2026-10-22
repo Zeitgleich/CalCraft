@@ -13,7 +13,7 @@ use crate::{Collection, Result, Store, StoreError, collection_from_row};
 pub const MAX_COLLECTIONS_PER_USER: i64 = 100;
 /// Maximum number of objects per collection.
 pub const MAX_ITEMS_PER_COLLECTION: i64 = 100_000;
-/// Storage quota per user for object content.
+/// Storage quota per user for object content, including the trash.
 pub const MAX_BYTES_PER_USER: i64 = 512 * 1024 * 1024;
 /// Tombstones kept per collection; older ones are pruned and raise the
 /// collection's sync floor, so clients with older tokens resynchronise.
@@ -77,7 +77,7 @@ pub enum PutOutcome {
     Updated,
 }
 
-fn check(precondition: &Precondition, existing: Option<&str>) -> Result<()> {
+pub(crate) fn check(precondition: &Precondition, existing: Option<&str>) -> Result<()> {
     let ok = match precondition {
         Precondition::None => true,
         Precondition::MustNotExist => existing.is_none(),
@@ -352,11 +352,16 @@ impl Store {
             }
         }
 
+        // The trash counts towards the quota: deleting does not free space
+        // until the trash is emptied or its entries expire.
         let used: i64 = sqlx::query(
-            "SELECT COALESCE(SUM(length(i.content)), 0) AS used FROM items i \
-             JOIN collections c ON c.id = i.collection_id \
-             WHERE c.owner_id = (SELECT owner_id FROM collections WHERE id = ?1) \
-               AND NOT (i.collection_id = ?1 AND i.name = ?2)",
+            "SELECT (SELECT COALESCE(SUM(length(i.content)), 0) FROM items i \
+               JOIN collections c ON c.id = i.collection_id \
+               WHERE c.owner_id = (SELECT owner_id FROM collections WHERE id = ?1) \
+                 AND NOT (i.collection_id = ?1 AND i.name = ?2)) \
+             + (SELECT COALESCE(SUM(size), 0) FROM trash \
+               WHERE owner_id = (SELECT owner_id FROM collections WHERE id = ?1) \
+                 AND entry_kind = 'item') AS used",
         )
         .bind(collection_id)
         .bind(name)
@@ -364,7 +369,7 @@ impl Store {
         .await?
         .try_get("used")?;
         let size = i64::try_from(item.content.len()).unwrap_or(i64::MAX);
-        if used.saturating_add(size) > MAX_BYTES_PER_USER {
+        if used.saturating_add(size) > self.settings.quota_bytes() {
             return Err(StoreError::Limit("storage quota exceeded"));
         }
 
@@ -517,7 +522,7 @@ impl Store {
     }
 }
 
-async fn record_change(
+pub(crate) async fn record_change(
     tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
     collection_id: i64,
     revision: i64,

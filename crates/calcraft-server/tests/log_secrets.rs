@@ -1,6 +1,7 @@
 //! The JSON logs, at the most verbose level, contain no passwords, app
 //! passwords, TOTP secrets or codes, recovery codes, session tokens,
-//! credentials headers, query strings or calendar and contact contents.
+//! credentials headers, query strings or calendar and contact contents
+//! (also not when they are moved into the trash and restored).
 //!
 //! This binary holds a single test because it installs the global
 //! subscriber (the same one `logging.format = "json"` uses), which also
@@ -192,6 +193,15 @@ async fn dav_flows(app: &Router, auth: &str, secrets: &mut Vec<String>) {
     ] {
         dav(app, auth, "GET", &uri, "text/plain", String::new()).await;
     }
+
+    // Deleting moves the objects into the trash, with their contents.
+    for uri in [
+        "/dav/calendars/alice/default/marked.ics",
+        "/dav/addressbooks/alice/default/marked.vcf",
+    ] {
+        let reply = dav(app, auth, "DELETE", uri, "text/plain", String::new()).await;
+        assert_eq!(reply.status, StatusCode::NO_CONTENT);
+    }
     secrets.push(MARKER.to_owned());
 }
 
@@ -259,6 +269,37 @@ mod api {
         )
         .await;
         assert_eq!(me.status, StatusCode::OK);
+
+        // The trash (filled by the DAV flows): list, restore, delete, empty.
+        let (list, trash) = call(app, "GET", "/api/v1/trash", Some(&session), Value::Null).await;
+        assert_eq!(list.status, StatusCode::OK);
+        let ids: Vec<String> = trash["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(ids.len(), 2, "{trash}");
+        let (restored, _) = call(
+            app,
+            "POST",
+            &format!("/api/v1/trash/{}/restore", ids[0]),
+            Some(&session),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(restored.status, StatusCode::OK);
+        let (deleted, _) = call(
+            app,
+            "DELETE",
+            &format!("/api/v1/trash/{}", ids[1]),
+            Some(&session),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+        let (emptied, _) = call(app, "DELETE", "/api/v1/trash", Some(&session), Value::Null).await;
+        assert_eq!(emptied.status, StatusCode::NO_CONTENT);
 
         let (created, json) = call(
             app,
@@ -493,6 +534,7 @@ async fn logs_contain_no_secrets_or_contents() {
     // The capture works and is verbose: requests and SQL statements are in it.
     assert!(logs.contains("finished processing request"), "{logs}");
     assert!(logs.contains("INSERT INTO items"), "{logs}");
+    assert!(logs.contains("INSERT INTO trash"), "{logs}");
     assert!(logs.contains("account locked after repeated failed logins"));
     assert!(logs.lines().count() > 50);
     assert_absent(&logs, &secrets);

@@ -54,6 +54,12 @@ database = "calcraft.db"
 pre_migration_backup = true
 # Number of pre-migration backups to keep (older ones are deleted).
 pre_migration_backups_keep = 3
+# Days deleted calendar objects, contacts and whole collections stay in the
+# owner's trash (web UI "Trash", REST /api/v1/trash) before they are purged
+# for good. Trash entries count towards the user's storage quota. 0 disables
+# the trash: deletions are final, and entries left from before are purged.
+# At most 3650.
+trash_retention_days = 30
 
 [security]
 # Send Strict-Transport-Security. Enable only when CalCraft is served over HTTPS.

@@ -224,6 +224,67 @@ pub struct ImportRejection {
     pub reason: String,
 }
 
+/// What a trash entry holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrashKind {
+    /// A calendar object or vCard.
+    Item,
+    /// A calendar or address book with its objects.
+    Collection,
+}
+
+/// One entry of the trash (`GET /api/v1/trash`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrashEntryInfo {
+    /// Opaque identifier for restore and delete.
+    pub id: String,
+    pub kind: TrashKind,
+    /// Kind of the collection the entry belongs to (or is).
+    pub collection_kind: CollectionKind,
+    /// Short name of that collection.
+    pub collection: String,
+    /// Resource name of an object; `None` for collections.
+    pub name: Option<String>,
+    /// SUMMARY / FN / collection display name, if any (plain text).
+    pub summary: Option<String>,
+    /// Bytes of content.
+    pub size: i64,
+    /// Objects in a collection entry (0 for objects).
+    pub items: i64,
+    /// Unix seconds.
+    pub deleted_at: i64,
+    /// When the entry is purged (Unix seconds).
+    pub expires_at: i64,
+}
+
+/// A page of the trash, newest entries first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrashList {
+    pub entries: Vec<TrashEntryInfo>,
+    /// Entries in total (all pages).
+    pub total: i64,
+    /// Bytes in the trash; they count towards the storage quota.
+    pub bytes: i64,
+    /// Days entries are kept; 0 means the trash is disabled.
+    pub retention_days: u32,
+    pub offset: u32,
+    pub limit: u32,
+}
+
+/// Result of `POST /api/v1/trash/{id}/restore`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestoredTrashEntry {
+    pub kind: TrashKind,
+    pub collection_kind: CollectionKind,
+    pub collection: String,
+    pub name: Option<String>,
+    /// Entity tag of a restored object (unchanged).
+    pub etag: Option<String>,
+    /// DAV URL of the restored object or collection.
+    pub href: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

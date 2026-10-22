@@ -158,6 +158,9 @@ pub async fn delete(
     Path((kind, slug)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     let collection = own_collection(&state, &session.user, &kind, &slug).await?;
-    state.store.delete_collection(collection.id).await?;
+    state
+        .store
+        .delete_collection_to_trash(collection.id, crate::auth::now())
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }

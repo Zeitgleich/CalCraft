@@ -77,6 +77,11 @@ impl ApiFailure {
             "csrf" => text::ERR_CSRF.to_owned(),
             "network" => text::ERR_NETWORK.to_owned(),
             "not_found" if self.status == 404 => text::ERR_NOT_FOUND.to_owned(),
+            "name_taken" => text::ERR_RESTORE_NAME_TAKEN.to_owned(),
+            "uid_taken" => text::ERR_RESTORE_UID_TAKEN.to_owned(),
+            "collection_exists" => text::ERR_RESTORE_COLLECTION_EXISTS.to_owned(),
+            "collection_in_trash" => text::ERR_RESTORE_COLLECTION_IN_TRASH.to_owned(),
+            "collection_deleted" => text::ERR_RESTORE_COLLECTION_DELETED.to_owned(),
             _ if self.message.is_empty() => text::ERR_UNKNOWN.to_owned(),
             _ => capitalize(&self.message),
         }
@@ -119,6 +124,24 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (year, month.unsigned_abs() as u32, day.unsigned_abs() as u32)
 }
 
+/// Formats a byte count for display (`512 B`, `1.5 kB`, `2.0 MB`).
+pub fn format_size(bytes: i64) -> String {
+    const KB: i64 = 1000;
+    const MB: i64 = 1000 * KB;
+    let bytes = bytes.max(0);
+    // Tenths, rounded; exact in integers.
+    let tenths = |unit: i64| (bytes.saturating_mul(10) + unit / 2) / unit;
+    if bytes < KB {
+        format!("{bytes} B")
+    } else if bytes < MB {
+        let t = tenths(KB);
+        format!("{}.{} kB", t / 10, t % 10)
+    } else {
+        let t = tenths(MB);
+        format!("{}.{} MB", t / 10, t % 10)
+    }
+}
+
 /// Splits a secret into groups of four for easier manual entry.
 pub fn group_secret(secret: &str) -> String {
     secret
@@ -135,14 +158,16 @@ pub enum Page {
     Overview,
     Settings,
     AppPasswords,
+    Trash,
     Admin,
 }
 
 impl Page {
-    pub const ALL: [Page; 4] = [
+    pub const ALL: [Page; 5] = [
         Page::Overview,
         Page::Settings,
         Page::AppPasswords,
+        Page::Trash,
         Page::Admin,
     ];
 
@@ -151,6 +176,7 @@ impl Page {
         match hash.trim_start_matches('#').trim_start_matches('/') {
             "settings" => Self::Settings,
             "app-passwords" => Self::AppPasswords,
+            "trash" => Self::Trash,
             "admin" => Self::Admin,
             _ => Self::Overview,
         }
@@ -161,6 +187,7 @@ impl Page {
             Self::Overview => "#/",
             Self::Settings => "#/settings",
             Self::AppPasswords => "#/app-passwords",
+            Self::Trash => "#/trash",
             Self::Admin => "#/admin",
         }
     }
@@ -170,6 +197,7 @@ impl Page {
             Self::Overview => text::NAV_OVERVIEW,
             Self::Settings => text::NAV_SETTINGS,
             Self::AppPasswords => text::NAV_APP_PASSWORDS,
+            Self::Trash => text::NAV_TRASH,
             Self::Admin => text::NAV_ADMIN,
         }
     }
@@ -218,6 +246,32 @@ mod tests {
         assert_eq!(format_timestamp(951_782_400), "2000-02-29 00:00 UTC");
         assert_eq!(format_timestamp(1_792_581_240), "2026-10-21 11:14 UTC");
         assert_eq!(format_timestamp(-60), "1969-12-31 23:59 UTC");
+    }
+
+    #[test]
+    fn formats_sizes() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(999), "999 B");
+        assert_eq!(format_size(1000), "1.0 kB");
+        assert_eq!(format_size(1549), "1.5 kB");
+        assert_eq!(format_size(999_949), "999.9 kB");
+        assert_eq!(format_size(2_500_000), "2.5 MB");
+        assert_eq!(format_size(-5), "0 B");
+    }
+
+    #[test]
+    fn restore_conflicts_have_texts() {
+        for code in [
+            "name_taken",
+            "uid_taken",
+            "collection_exists",
+            "collection_in_trash",
+            "collection_deleted",
+        ] {
+            let body = format!(r#"{{"error":"{code}","message":"x"}}"#);
+            let failure = ApiFailure::from_response(409, &body);
+            assert_ne!(failure.user_message(), "X", "{code}");
+        }
     }
 
     #[test]

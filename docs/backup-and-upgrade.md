@@ -1,7 +1,7 @@
 # Backups, restore and upgrades
 
 All CalCraft data – accounts, password hashes, calendars, address books,
-sync state – lives in one SQLite database (`storage.database`, default
+sync state, the trash – lives in one SQLite database (`storage.database`, default
 `calcraft.db`). This document describes how to back it up, how to restore it
 and how upgrades and rollbacks work. Commands use the paths of
 [`installation.md`](installation.md) (`/etc/calcraft/calcraft.toml`,
@@ -31,6 +31,12 @@ backup written to /var/lib/calcraft/backups/calcraft-2026-10-21.db (245760 bytes
   only then renamed to the target name. An interrupted backup never leaves a
   truncated file under the target name.
 - **Self-contained:** the backup is a single file (no `-wal`/`-shm`).
+- **Includes the trash:** deleted objects and collections that are still in
+  the trash (`storage.trash_retention_days`) are part of the backup with their
+  full content, and a restore brings them back as they were at backup time.
+  Entries whose retention has passed by then are purged at the next start.
+  A backup therefore also contains data that users have deleted but not yet
+  purged; empty the trash (or set a short retention) if that matters.
 - An existing file is not replaced unless `--force` is given.
 - `calcraft backup` never migrates the database, so a newer binary can back
   up the database of an older running server.
@@ -152,6 +158,10 @@ Configuration (`[storage]`):
 |---|---|---|
 | `pre_migration_backup` | `true` | Write the backup before migrating. Only disable this if you take your own backup before every update. |
 | `pre_migration_backups_keep` | `3` | Number of pre-migration backups to keep (at least 1). |
+
+Migration `0006_trash` adds the `trash` table; it changes no existing data,
+so rolling back to an older version with the pre-migration backup only loses
+the trash entries created since the upgrade (and everything else written since).
 
 Pre-migration backups are a safety net for rollbacks, not a replacement for
 regular backups: they are on the same disk as the database.
