@@ -1,0 +1,5 @@
+# sysusers.d(5): system user and group for the CalCraft service.
+# Install as /etc/sysusers.d/calcraft.conf (packages: /usr/lib/sysusers.d/),
+# then run `systemd-sysusers`. The shell "-" is the distribution's nologin.
+#Type Name     ID GECOS                            Home directory     Shell
+u     calcraft -  "CalCraft CalDAV/CardDAV server" /var/lib/calcraft  -

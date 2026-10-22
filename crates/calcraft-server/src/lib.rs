@@ -13,6 +13,7 @@ pub mod net;
 #[cfg(feature = "oidc")]
 pub mod oidc;
 pub mod reindex;
+pub mod sd_notify;
 pub mod secrets;
 pub mod security;
 pub mod telemetry;

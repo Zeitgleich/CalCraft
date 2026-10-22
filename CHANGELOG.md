@@ -7,6 +7,30 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 
 ## [Unreleased]
 
+### Added
+
+- systemd integration shipped in `contrib/systemd/` (and in the Linux release
+  archives): `calcraft.service`, `calcraft.sysusers` and `calcraft.tmpfiles`.
+  The unit uses `Type=notify` – CalCraft sends `READY=1` after the database
+  is open (migrations applied) and the listener is bound, `STOPPING=1` on
+  graceful shutdown, a status line and watchdog keep-alives
+  (`WatchdogSec=30s`), implemented without new dependencies; outside
+  systemd (no `NOTIFY_SOCKET`) nothing changes. It checks the configuration
+  before starting (`ExecStartPre=calcraft check-config --quiet`), restarts
+  on failure, stops restarting after 5 failed starts in 5 minutes and keeps
+  the existing hardening and resource limits. A CI job installs the files on
+  a real systemd and tests readiness, automatic restart after `SIGKILL`,
+  graceful restart, persistence, the start limit and the
+  `systemd-analyze security` exposure level.
+- `calcraft check-config --quiet` validates without printing the effective
+  configuration.
+
+### Changed
+
+- `docs/installation.md` sections 4a and 6 install the shipped systemd files
+  instead of copy-pasted ones and explain readiness, the start limit and how
+  to check the service after a reboot.
+
 ## [0.1.0-alpha.1] – 2026-10-22
 
 First pre-release, for testing only – not for production use (open points:

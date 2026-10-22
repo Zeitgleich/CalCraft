@@ -12,7 +12,7 @@ Ein Release enthält:
 
 | Datei | Inhalt |
 |---|---|
-| `calcraft-<version>-<target>.tar.gz` | Linux und macOS: `calcraft`, `LICENSE`, `README.md`, `calcraft.example.toml` |
+| `calcraft-<version>-<target>.tar.gz` | Linux und macOS: `calcraft`, `LICENSE`, `README.md`, `calcraft.example.toml`; Linux zusätzlich `contrib/systemd/` (Unit, sysusers.d, tmpfiles.d) |
 | `calcraft-<version>-x86_64-pc-windows-msvc.zip` | Windows: `calcraft.exe` und dieselben Dateien |
 | `SHA256SUMS` | SHA-256 aller Archive |
 | `ghcr.io/zeitgleich/calcraft:<version>` | Docker-Image für `linux/amd64` und `linux/arm64` |

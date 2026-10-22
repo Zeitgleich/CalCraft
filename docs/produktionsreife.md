@@ -53,7 +53,7 @@ Legende: ✅ erledigt · 🟡 teilweise · ❌ offen · 👤 braucht reale Gerä
 | Alarmierung | ❌ | Keine Doku/Beispielregeln (abhängig von Metriken). |
 | Graceful Shutdown | ✅ | SIGTERM/Ctrl+C, laufende Anfragen werden beendet. |
 | Verhalten bei Datenbankausfällen | 🟡 | Nicht beschreibbar → Start verweigert bzw. 500 ohne Details, Lesen geht weiter; Platte voll → 507 ohne Teilzustand; Erholung ohne Neustart; abgebrochene Uploads ohne Spuren (`tests/failures.rs`). **Lücke:** `/readyz` bleibt 200, solange gelesen werden kann. |
-| Begrenzung von Speicher, CPU, Anfragen, Verbindungen | 🟡 | Globale und Client-Limits (s. P0), Argon2 auf 4 gleichzeitige Berechnungen begrenzt (auch bei Abbruch), systemd-Grenzen (`LimitNOFILE`, `MemoryMax`, `TasksMax`) in `docs/installation.md`. **Lücke:** Keep-alive-Verbindungen nur über `LimitNOFILE` begrenzt. |
+| Begrenzung von Speicher, CPU, Anfragen, Verbindungen | 🟡 | Globale und Client-Limits (s. P0), Argon2 auf 4 gleichzeitige Berechnungen begrenzt (auch bei Abbruch), systemd-Grenzen (`LimitNOFILE`, `MemoryMax`, `TasksMax`) in `contrib/systemd/calcraft.service` (in CI auf echtem systemd getestet). **Lücke:** Keep-alive-Verbindungen nur über `LimitNOFILE` begrenzt. |
 | Dokumentierte Installation, Updates, Wiederherstellung | ✅ | `docs/installation.md`, `docs/backup-and-upgrade.md`, `docs/release-verification.md`; Proxy-Konfigurationen und Restore getestet. |
 
 ## Fahrplan zur Freigabe
