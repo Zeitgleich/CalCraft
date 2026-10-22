@@ -597,3 +597,33 @@ fn dense_timezones_are_not_evaluated() {
         Some(utc("20261021T100000Z") - SLACK)
     );
 }
+
+/// Daily three-day instances; from the one spanning 3 January on, all are
+/// moved nine days earlier.
+const LONG_SHIFTED: &str = "BEGIN:VEVENT\r\nUID:e\r\nDTSTART:20260101T000000Z\r\nDTEND:20260104T000000Z\r\nRRULE:FREQ=DAILY\r\nEND:VEVENT\r\n\
+BEGIN:VEVENT\r\nUID:e\r\nRECURRENCE-ID;RANGE=THISANDFUTURE:20260103T000000Z\r\nDTSTART:20251225T000000Z\r\nDTEND:20251228T000000Z\r\nEND:VEVENT\r\n";
+
+#[test]
+fn shifted_long_instances_stay_inside_the_index() {
+    // The 1 January instance spans the RID and may move to 23 December.
+    let indexed = object(LONG_SHIFTED);
+    assert!(indexed.range.start.unwrap() <= utc("20251223T000000Z"));
+    assert!(
+        indexed
+            .range
+            .overlaps(Some(utc("20251223T050000Z")), Some(utc("20251223T060000Z")))
+    );
+    assert!(matches(
+        LONG_SHIFTED,
+        "20251223T050000Z",
+        "20251223T060000Z"
+    ));
+}
+
+#[test]
+fn unsupported_rules_with_repeated_until_stay_open() {
+    let body = event(
+        "DTSTART:20261021T100000Z\r\nRRULE:FREQ=DAILY;UNTIL=20261101T000000Z;UNTIL=20261025T000000Z\r\n",
+    );
+    assert_eq!(object(&body).range.end, None);
+}

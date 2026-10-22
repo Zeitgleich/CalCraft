@@ -519,14 +519,14 @@ impl Series {
                     && rule.until.is_none() =>
             {
                 // Open-ended: the span starts at DTSTART and never ends.
+                // A shift applies to every instance that reaches the RID,
+                // which may start anywhere from DTSTART on (long instances
+                // span the RID), so it can move the start as far as
+                // DTSTART + delta.
                 let first = self.instance(zones, self.start, None);
                 let lo = shifts
                     .iter()
-                    .map(|s| {
-                        s.rid_lo
-                            .saturating_add(s.delta_lo)
-                            .saturating_sub(2 * SLACK + 1)
-                    })
+                    .map(|s| first.lo.saturating_add(s.delta_lo.min(0)))
                     .fold(first.lo, i64::min);
                 if visit(Span { lo, hi: i64::MAX }) {
                     return Ok(true);
@@ -564,6 +564,7 @@ impl Series {
                         naive,
                         ..self.start
                     };
+                    budget.charge(INSTANCE_COST)?;
                     let span = self.instance(zones, value, None);
                     // UNTIL is inclusive: instances certainly after it are dropped.
                     if until_utc.is_some_and(|until| span.lo > until.saturating_add(1)) {

@@ -204,8 +204,11 @@ fn duration(component: &Component) -> Result<Option<i64>, IcalError> {
 
 /// Validates an RRULE (with the parser expansion uses) and returns its
 /// UNTIL, if any.
+/// UNTIL is only trusted for supported rules: an irregular rule (e.g. with
+/// repeated UNTIL parts) stays open-ended.
 fn rrule_until(rule: &str) -> Result<Option<DateTime>, IcalError> {
-    Ok(parse_rule(rule)?.until)
+    let rule = parse_rule(rule)?;
+    Ok(rule.until.filter(|_| rule.supported))
 }
 
 /// Conservative span of one component, used when exact evaluation is not

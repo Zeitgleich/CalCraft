@@ -388,3 +388,30 @@ async fn odd_rules_sync_and_shifted_series_are_found() {
             .contains(&"moved.ics".to_owned())
     );
 }
+
+#[tokio::test]
+async fn shifted_long_instances_pass_the_index() {
+    let app = app(store().await);
+    // Three-day daily instances; THISANDFUTURE from 3 January moves them
+    // nine days earlier, so the 1 January instance may start 23 December.
+    put(
+        &app,
+        "long.ics",
+        &format!(
+            "{}{}",
+            event(
+                "long",
+                "DTSTART:20260101T000000Z\r\nDTEND:20260104T000000Z\r\nRRULE:FREQ=DAILY\r\n"
+            ),
+            event(
+                "long",
+                "RECURRENCE-ID;RANGE=THISANDFUTURE:20260103T000000Z\r\nDTSTART:20251225T000000Z\r\nDTEND:20251228T000000Z\r\n"
+            )
+        ),
+    )
+    .await;
+    assert_eq!(
+        query(&app, "20251223T050000Z", "20251223T060000Z").await,
+        ["long.ics"]
+    );
+}
