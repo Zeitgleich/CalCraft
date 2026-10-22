@@ -40,6 +40,12 @@ follow [Semantic Versioning](https://semver.org/). Release process:
   credentials no longer get 401: app passwords and cached passwords need no
   login attempt slot, and other requests wait (at most 8 per account name,
   5 s) for running attempts instead of counting as a lockout.
+- Login attempts cancelled while credentials are compared (client hangs
+  up, request timeout) count as failures; cancelled while still waiting
+  for a hash permit or the database, they count for nothing, so others
+  cannot lock an account by keeping the server busy. Database overload
+  during login answers 503 with `Retry-After`; pool waits end after at most
+  10 s (half the request timeout if that is shorter).
 - Cancelled requests keep their Argon2 permit until hashing ends, so no
   more than four password hashes run at once.
 - Creating or renaming collections, creating users and OIDC link approvals

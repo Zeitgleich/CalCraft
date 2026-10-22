@@ -33,7 +33,7 @@ use argon2::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use calcraft_core::Username;
-use calcraft_store::{Store, User};
+use calcraft_store::{Store, StoreError, User};
 
 use crate::{
     limits::FailureTable,
@@ -134,6 +134,19 @@ pub enum AuthOutcome {
     LockedOut,
     /// Storage or hashing failure.
     Error,
+    /// The database is busy (transient): answer 503 with `Retry-After`.
+    Busy,
+}
+
+/// Outcome for a storage error during authentication (logged, no details).
+fn storage_outcome(err: &StoreError, what: &'static str) -> AuthOutcome {
+    if matches!(err, StoreError::Busy) {
+        tracing::error!("storage busy during authentication");
+        AuthOutcome::Busy
+    } else {
+        tracing::error!(%err, sqlite_code = err.sqlite_code(), "{what}");
+        AuthOutcome::Error
+    }
 }
 
 /// Parsed `Authorization: Basic` credentials.
@@ -346,7 +359,9 @@ impl Authenticator {
             if self.client_blocked(client) {
                 return Err(Refusal::Client);
             }
-            let released = {
+            let released: Arc<Notify>;
+            let mut notified;
+            {
                 let Ok(mut failures) = self.failures.lock() else {
                     return Err(Refusal::Account);
                 };
@@ -371,21 +386,21 @@ impl Authenticator {
                         });
                     }
                     Reservation::Full => return Err(Refusal::Account),
-                    Reservation::Busy(released) => released,
+                    Reservation::Busy(notify) => released = notify,
                 }
-            };
+                // Registered while the lock is held: neither a release
+                // (`notify_one`) nor a lockout (`notify_waiters`) after the
+                // decision can be missed.
+                notified = Box::pin(released.notified());
+                notified.as_mut().enable();
+            }
             if waiter.is_none() {
                 waiter = Some(Waiter {
                     auth: self,
                     username: username.clone(),
                 });
             }
-            // `notify_one` keeps a wake-up for the next waiter if nobody
-            // waits yet, so a release right here is not missed.
-            if tokio::time::timeout_at(deadline, released.notified())
-                .await
-                .is_err()
-            {
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
                 return Err(Refusal::Account);
             }
         }
@@ -458,22 +473,17 @@ impl Authenticator {
     }
 
     /// The enabled owner of a valid app password sent with `username`, and
-    /// records its use. `Err` on storage errors (logged).
+    /// records its use.
     async fn app_password_user(
         &self,
         id: i64,
         secret: &str,
         username: &Username,
-    ) -> Result<Option<User>, ()> {
-        let stored = self.store.app_password_secret(id).await.map_err(|err| {
-            tracing::error!(%err, "failed to load app password");
-        })?;
-        let Some((user_id, hash)) = stored else {
+    ) -> Result<Option<User>, StoreError> {
+        let Some((user_id, hash)) = self.store.app_password_secret(id).await? else {
             return Ok(None);
         };
-        let user = self.store.user_by_id(user_id).await.map_err(|err| {
-            tracing::error!(%err, "failed to load user");
-        })?;
+        let user = self.store.user_by_id(user_id).await?;
         // The app password must belong to the user name it is sent with.
         let user = user.filter(|user| {
             hashes_equal(&hash_secret(secret), &hash)
@@ -497,9 +507,9 @@ impl Authenticator {
     ) -> AuthOutcome {
         let username = &attempt.username;
         match self.app_password_user(id, secret, username).await {
-            Err(()) => {
+            Err(err) => {
                 attempt.settle();
-                AuthOutcome::Error
+                storage_outcome(&err, "failed to check app password")
             }
             Ok(Some(user)) => {
                 self.clear_failures(username);
@@ -507,6 +517,8 @@ impl Authenticator {
                 AuthOutcome::Authenticated(user)
             }
             Ok(None) => {
+                // Compared and wrong: from here on even a cancelled request counts.
+                attempt.arm();
                 // Count only for existing accounts (see `check_first_factor_reserved`).
                 if matches!(self.store.user_credentials(username).await, Ok(Some(_))) {
                     attempt.mark_known();
@@ -532,13 +544,12 @@ impl Authenticator {
         let record = match self.store.user_credentials(&username).await {
             Ok(record) => record,
             Err(err) => {
-                tracing::error!(%err, "failed to load user");
                 attempt.settle();
-                return AuthOutcome::Error;
+                return storage_outcome(&err, "failed to load user");
             }
         };
         if record.is_some() {
-            // From here on, a cancelled request counts for the account too.
+            // Failures count for the account, too (once armed, see below).
             attempt.mark_known();
         }
 
@@ -570,6 +581,10 @@ impl Authenticator {
             attempt.settle();
             return AuthOutcome::Error;
         };
+        // Only now is a password compared: a request cancelled from here on
+        // counts as a failure. Waiting for a permit (which others can keep
+        // busy) must not, or timeouts would lock out legitimate users.
+        attempt.arm();
         let password = password.to_owned();
         let valid = match tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -785,14 +800,19 @@ pub enum Refusal {
 ///
 /// Its outcome is recorded even if the request is cancelled (client hangs
 /// up, request timeout) while the password is being verified: an attempt
-/// dropped without [`Attempt::settle`] or [`Attempt::fail`] counts as a
-/// failure, for the client and, once known to exist, for the account.
+/// dropped without [`Attempt::settle`] or [`Attempt::fail`] after it was
+/// armed ([`Attempt::arm`], right before credentials are compared) counts
+/// as a failure, for the client and, once known to exist, for the account.
 /// Otherwise hanging up early would allow guessing without a lockout.
+/// Before arming (waiting for a hash permit or the database) a cancelled
+/// request counts for nothing, so others cannot cause failures for it.
 pub struct Attempt<'a> {
     auth: &'a Authenticator,
     username: Username,
     client: Option<ClientKey>,
     settled: AtomicBool,
+    /// A comparison runs or ran: dropping now counts as a failure.
+    armed: AtomicBool,
     /// The account exists (failures are only counted for existing accounts).
     known: AtomicBool,
 }
@@ -804,6 +824,7 @@ impl<'a> Attempt<'a> {
             username: username.clone(),
             client,
             settled: AtomicBool::new(false),
+            armed: AtomicBool::new(false),
             known: AtomicBool::new(false),
         }
     }
@@ -819,6 +840,18 @@ impl<'a> Attempt<'a> {
     /// The account exists: failures from now on count for it, too.
     pub fn mark_known(&self) {
         self.known.store(true, Ordering::Release);
+    }
+
+    /// Credentials are about to be compared: from now on a cancelled
+    /// request counts as a failure.
+    pub fn arm(&self) {
+        self.armed.store(true, Ordering::Release);
+    }
+
+    /// Back to not counting a cancellation, e.g. after a correct first
+    /// factor while the second factor is loaded.
+    pub fn disarm(&self) {
+        self.armed.store(false, Ordering::Release);
     }
 
     /// Ends the attempt without a failure (success, or not a guess).
@@ -840,7 +873,9 @@ impl<'a> Attempt<'a> {
 impl Drop for Attempt<'_> {
     fn drop(&mut self) {
         // Recorded before the slot is freed, so no other attempt slips in.
-        self.fail();
+        if self.armed.load(Ordering::Acquire) {
+            self.fail();
+        }
         self.auth.release(&self.username);
     }
 }

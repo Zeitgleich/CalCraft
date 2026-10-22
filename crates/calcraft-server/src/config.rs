@@ -126,6 +126,7 @@ impl StorageConfig {
         calcraft_store::StoreOptions {
             pre_migration_backup: self.pre_migration_backup,
             pre_migration_backups_keep: self.pre_migration_backups_keep,
+            ..calcraft_store::StoreOptions::default()
         }
     }
 }

@@ -498,3 +498,53 @@ async fn every_freed_slot_wakes_a_waiter() {
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_while_waiting_for_a_hash_permit_counts_for_nothing() {
+    let auth = setup().await;
+    auth.set_client_failure_limit(1, 100);
+    let alice: Username = "alice".parse().unwrap();
+    // Others keep all hash permits busy.
+    let busy = auth
+        .hashing
+        .clone()
+        .acquire_many_owned(u32::try_from(MAX_CONCURRENT_HASHES).unwrap())
+        .await
+        .unwrap();
+    let wrong = basic("alice", "wrong password!!");
+    for _ in 0..MAX_FAILURES + 1 {
+        let task = {
+            let (auth, wrong) = (auth.clone(), wrong.clone());
+            tokio::spawn(async move { auth.authenticate(Some(wrong.as_bytes()), client(3)).await })
+        };
+        // The request has its slot and waits for a permit; then it times
+        // out. (Bounded: a refused request finishes without taking a slot.)
+        let start = Instant::now();
+        while !task.is_finished()
+            && start.elapsed() < Duration::from_secs(5)
+            && auth
+                .failures
+                .lock()
+                .unwrap()
+                .get(&alice)
+                .is_none_or(|entry| entry.in_flight == 0)
+        {
+            tokio::task::yield_now().await;
+        }
+        // Past the user lookup, now queued for a permit.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!task.is_finished(), "the request was refused");
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+    }
+    // No password was compared: neither the account nor the client counts it.
+    assert!(!auth.is_locked(&alice));
+    assert!(auth.failures.lock().unwrap().get(&alice).is_none());
+    assert!(!auth.client_blocked(client(3)));
+    drop(busy);
+    let good = basic("alice", "correct horse battery");
+    assert!(matches!(
+        auth.authenticate(Some(good.as_bytes()), client(3)).await,
+        AuthOutcome::Authenticated(_)
+    ));
+}

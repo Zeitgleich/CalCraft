@@ -174,6 +174,7 @@ pub enum ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let retry = matches!(self, Self::Unavailable);
         let (status, code, message) = match self {
             Self::BadRequest(message) => {
                 (StatusCode::BAD_REQUEST, "bad_request", message.to_owned())
@@ -233,7 +234,14 @@ impl IntoResponse for ApiError {
             error: code.to_owned(),
             message,
         };
-        (status, Json(body)).into_response()
+        let mut response = (status, Json(body)).into_response();
+        if retry {
+            response.headers_mut().insert(
+                header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("1"),
+            );
+        }
+        response
     }
 }
 

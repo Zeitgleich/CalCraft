@@ -20,8 +20,8 @@ mod test_hooks;
 
 pub use accounts::{AppPassword, MAX_APP_PASSWORDS, RECOVERY_CODES, Session, TotpState};
 pub use backup::{
-    BackupInfo, RestoreInfo, StoreOptions, backup_database, latest_migration,
-    pre_migration_backups, restore_database,
+    BackupInfo, DEFAULT_ACQUIRE_TIMEOUT, RestoreInfo, StoreOptions, backup_database,
+    latest_migration, pre_migration_backups, restore_database,
 };
 pub use items::{Change, Item, ItemMeta, NewItem, Precondition, PutOutcome};
 pub use oidc::{ApprovedBinding, OidcBinding};
@@ -210,7 +210,11 @@ impl Store {
         // A single connection, because every connection gets its own in-memory database.
         let simulation = test_hooks::Simulation::default();
         let pool = simulation
-            .hook(SqlitePoolOptions::new().max_connections(1))
+            .hook(
+                SqlitePoolOptions::new()
+                    .max_connections(1)
+                    .acquire_timeout(DEFAULT_ACQUIRE_TIMEOUT),
+            )
             .connect_with(options)
             .await?;
         MIGRATOR.run(&pool).await?;
@@ -584,6 +588,37 @@ mod tests {
             let mode = std::fs::metadata(&file).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600, "{}", file.display());
         }
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_busy_writer_fails_with_busy_after_the_acquire_timeout() {
+        let dir = std::env::temp_dir().join(format!("calcraft-busy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let options = StoreOptions {
+            acquire_timeout: std::time::Duration::from_millis(50),
+            ..StoreOptions::default()
+        };
+        let store = Store::open_with(&dir.join("test.db"), &options)
+            .await
+            .unwrap();
+        // Someone holds the single write connection for too long.
+        let held = store.writer.acquire().await.unwrap();
+        let start = std::time::Instant::now();
+        let err = store
+            .create_user(&name("waiting"), "hash", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Busy), "{err:?}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        // Reads do not need the writer.
+        assert!(store.list_users().await.unwrap().is_empty());
+        drop(held);
+        store
+            .create_user(&name("waiting"), "hash", None)
+            .await
+            .unwrap();
         drop(store);
         std::fs::remove_dir_all(&dir).unwrap();
     }

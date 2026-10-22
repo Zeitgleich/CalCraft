@@ -738,3 +738,32 @@ async fn totp_enable_guesses_use_the_account_lockout() {
     assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
     assert_eq!(reply.json["error"], "invalid_credentials");
 }
+
+#[tokio::test]
+async fn double_submitted_totp_enable_is_a_conflict_not_a_failure() {
+    let app = app().await;
+    let cookie = cookie_of(&login(&app, ALICE, None).await);
+    let setup = call(
+        &app,
+        Method::POST,
+        "/api/v1/me/totp/setup",
+        Some(&cookie),
+        None,
+    )
+    .await;
+    let secret = base32_decode(setup.json["secret"].as_str().unwrap()).unwrap();
+    let code = totp_code(&secret, now() / TOTP_STEP);
+    let enable = || {
+        call(
+            &app,
+            Method::POST,
+            "/api/v1/me/totp/enable",
+            Some(&cookie),
+            Some(json!({"code": code})),
+        )
+    };
+    let (first, second) = tokio::join!(enable(), enable());
+    let mut statuses = [first.status, second.status];
+    statuses.sort();
+    assert_eq!(statuses, [StatusCode::OK, StatusCode::CONFLICT]);
+}
