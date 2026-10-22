@@ -785,6 +785,20 @@ main > .warning {
     flex: 1 1 14rem;
 }
 
+.trash-target select {
+    flex: 1 1 12rem;
+    width: auto;
+}
+
+.trash-more {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2) var(--space-3);
+    margin-top: var(--space-3);
+}
+
 /* Empty lists: an outlined placeholder instead of a lone line of text. */
 .empty {
     border: 1px dashed var(--border-strong);

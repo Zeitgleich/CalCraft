@@ -10,7 +10,7 @@ use std::{
     str::FromStr,
     sync::{
         Arc,
-        atomic::{AtomicI64, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering},
     },
 };
 
@@ -40,8 +40,8 @@ pub use oidc::{ApprovedBinding, OidcBinding};
 #[cfg(feature = "test-hooks")]
 pub use test_hooks::SimulatedFailure;
 pub use trash::{
-    DEFAULT_TRASH_RETENTION_DAYS, MAX_TRASH_ROWS_PER_USER, RestoredEntry, TrashConflict,
-    TrashEntry, TrashEntryKind, TrashPage,
+    DEFAULT_TRASH_RETENTION_DAYS, MAX_EVICT_ROWS, MAX_TRASH_ROWS_PER_USER, RestoredEntry,
+    TrashConflict, TrashEntry, TrashEntryKind, TrashPage,
 };
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
@@ -227,6 +227,10 @@ pub(crate) struct Settings {
     quota_bytes: AtomicI64,
     /// Rows (objects and collections) in the trash per user.
     max_trash_rows: AtomicI64,
+    /// Rows one delete may remove synchronously from a full trash.
+    max_evict_rows: AtomicI64,
+    /// Entries were hidden for the purge; run it soon.
+    purge_requested: AtomicBool,
 }
 
 impl Settings {
@@ -235,6 +239,8 @@ impl Settings {
             trash_retention_days: AtomicU32::new(trash_retention_days),
             quota_bytes: AtomicI64::new(items::MAX_BYTES_PER_USER),
             max_trash_rows: AtomicI64::new(trash::MAX_TRASH_ROWS_PER_USER),
+            max_evict_rows: AtomicI64::new(trash::MAX_EVICT_ROWS),
+            purge_requested: AtomicBool::new(false),
         })
     }
 
@@ -248,6 +254,18 @@ impl Settings {
 
     pub(crate) fn max_trash_rows(&self) -> i64 {
         self.max_trash_rows.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn max_evict_rows(&self) -> i64 {
+        self.max_evict_rows.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn request_purge(&self) {
+        self.purge_requested.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn take_purge_request(&self) -> bool {
+        self.purge_requested.swap(false, Ordering::Relaxed)
     }
 }
 
@@ -305,6 +323,13 @@ impl Store {
         self.settings
             .max_trash_rows
             .store(max_trash_rows, Ordering::Relaxed);
+    }
+
+    /// Lowers the number of rows a delete may remove synchronously from a
+    /// full trash, for tests (feature `test-hooks`).
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_eviction_budget_for_testing(&self, rows: i64) {
+        self.settings.max_evict_rows.store(rows, Ordering::Relaxed);
     }
 
     /// Checks that the database is reachable.

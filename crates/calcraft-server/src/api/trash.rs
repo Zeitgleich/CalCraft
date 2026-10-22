@@ -10,10 +10,10 @@ use axum::{
     http::StatusCode,
 };
 use calcraft_core::{
-    CollectionKind,
+    CollectionKind, Slug,
     api::{RestoredTrashEntry, TrashEntryInfo, TrashKind, TrashList},
 };
-use calcraft_store::{TrashEntry, TrashEntryKind};
+use calcraft_store::{TrashConflict, TrashEntry, TrashEntryKind};
 use serde::Deserialize;
 
 use super::{ApiError, SessionUser};
@@ -99,16 +99,34 @@ pub async fn list(
     }))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreQuery {
+    /// Restore an object into this collection (of the same kind) instead
+    /// of its original one, e.g. after that was deleted permanently.
+    #[serde(default)]
+    collection: Option<String>,
+}
+
 pub async fn restore(
     State(state): State<AppState>,
     session: SessionUser,
     Path(id): Path<String>,
+    query: Result<Query<RestoreQuery>, QueryRejection>,
 ) -> Result<Json<RestoredTrashEntry>, ApiError> {
+    let Query(query) = query.map_err(|_| ApiError::BadRequest("invalid query"))?;
     let id = valid_id(&id)?;
+    let target: Option<Slug> = query
+        .collection
+        .map(|slug| {
+            slug.parse()
+                .map_err(|_| ApiError::RestoreConflict(TrashConflict::InvalidTarget))
+        })
+        .transpose()?;
     let user = &session.user;
     let restored = state
         .store
-        .restore_trash_entry(user.id, id)
+        .restore_trash_entry(user.id, id, target.as_ref())
         .await?
         .ok_or(ApiError::NotFound)?;
     let collection = restored.collection_slug.to_string();

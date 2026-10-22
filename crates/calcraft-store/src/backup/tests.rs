@@ -757,7 +757,7 @@ async fn backup_and_restore_include_the_trash() {
     let after = store.trash_entries(owner, 10, 0).await.unwrap();
     assert_eq!(after, before);
     let restored = store
-        .restore_trash_entry(owner, &after.entries[0].id)
+        .restore_trash_entry(owner, &after.entries[0].id, None)
         .await
         .unwrap()
         .unwrap();

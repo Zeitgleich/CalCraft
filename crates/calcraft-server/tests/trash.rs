@@ -457,6 +457,36 @@ async fn object_of_a_purged_collection_answers_collection_deleted() {
     .await;
     assert_eq!(reply.status, StatusCode::CONFLICT);
     assert_eq!(reply.json()["error"], "collection_deleted");
+    // Way out: restore it into another address book.
+    for bad in ["nope", "..", "%2E%2E"] {
+        let reply = api(
+            &env.app,
+            &env.alice,
+            "POST",
+            &format!("/v1/trash/{single_id}/restore?collection={bad}"),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{bad}");
+        assert_eq!(reply.json()["error"], "invalid_target", "{bad}");
+    }
+    let reply = api(
+        &env.app,
+        &env.alice,
+        "POST",
+        &format!("/v1/trash/{single_id}/restore?collection=default"),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(
+        reply.json()["href"],
+        "/dav/addressbooks/alice/default/x.vcf"
+    );
+    assert_eq!(
+        dav(&env.app, "GET", &format!("{BOOK}x.vcf"), "")
+            .await
+            .status,
+        StatusCode::OK
+    );
     // Emptying removes the rest.
     let reply = api(&env.app, &env.alice, "DELETE", "/v1/trash").await;
     assert_eq!(reply.status, StatusCode::NO_CONTENT);

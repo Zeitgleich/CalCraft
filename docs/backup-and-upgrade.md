@@ -37,6 +37,13 @@ backup written to /var/lib/calcraft/backups/calcraft-2026-10-21.db (245760 bytes
   Entries whose retention has passed by then are purged at the next start.
   A backup therefore also contains data that users have deleted but not yet
   purged; empty the trash (or set a short retention) if that matters.
+- **Deletion requests (GDPR Art. 17):** deleted calendar and contact data is
+  kept in the trash for `storage.trash_retention_days` and in every backup
+  taken during that time. To erase it immediately, the user empties the
+  trash (or deletes the entry permanently); an operator can set
+  `trash_retention_days = 0` and restart – this purges **all** users' trash
+  entries at startup (a warning states how many) and makes later deletions
+  final. Then rotate or delete backups that still contain the data.
 - An existing file is not replaced unless `--force` is given.
 - `calcraft backup` never migrates the database, so a newer binary can back
   up the database of an older running server.

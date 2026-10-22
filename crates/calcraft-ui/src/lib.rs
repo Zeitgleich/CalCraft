@@ -82,6 +82,7 @@ impl ApiFailure {
             "collection_exists" => text::ERR_RESTORE_COLLECTION_EXISTS.to_owned(),
             "collection_in_trash" => text::ERR_RESTORE_COLLECTION_IN_TRASH.to_owned(),
             "collection_deleted" => text::ERR_RESTORE_COLLECTION_DELETED.to_owned(),
+            "invalid_target" => text::ERR_RESTORE_INVALID_TARGET.to_owned(),
             _ if self.message.is_empty() => text::ERR_UNKNOWN.to_owned(),
             _ => capitalize(&self.message),
         }
@@ -267,6 +268,7 @@ mod tests {
             "collection_exists",
             "collection_in_trash",
             "collection_deleted",
+            "invalid_target",
         ] {
             let body = format!(r#"{{"error":"{code}","message":"x"}}"#);
             let failure = ApiFailure::from_response(409, &body);

@@ -101,6 +101,9 @@ pub const TRASH_CONTACT: &str = "Contact";
 pub const TRASH_REMOVED: &str = "removed for good";
 pub const TRASH_RESTORED: &str = "Restored. Your apps will sync it back.";
 pub const TRASH_EMPTIED: &str = "The trash has been emptied.";
+pub const TRASH_LOAD_MORE: &str = "Load more";
+pub const TRASH_RESTORE_INTO: &str = "Restore into";
+pub const TRASH_NO_TARGET: &str = "There is no other calendar or address book of this type. Create one on the overview page first.";
 
 pub fn trash_hint(days: u32) -> String {
     format!(
@@ -219,7 +222,9 @@ pub const ERR_RESTORE_COLLECTION_EXISTS: &str = "Cannot restore: a calendar or a
 pub const ERR_RESTORE_COLLECTION_IN_TRASH: &str =
     "Its calendar or address book is in the trash as well. Restore that first.";
 pub const ERR_RESTORE_COLLECTION_DELETED: &str =
-    "Cannot restore: its calendar or address book was deleted permanently.";
+    "Its calendar or address book was deleted permanently. Choose another one to restore it into.";
+pub const ERR_RESTORE_INVALID_TARGET: &str =
+    "Please choose an existing calendar or address book of the same type.";
 pub const ERR_LOGIN_FIELDS: &str = "Please enter username and password.";
 pub const ERR_CURRENT_PASSWORD: &str = "Please enter your current password.";
 pub const ERR_DISABLE_FIELDS: &str = "Please enter your password and a code.";

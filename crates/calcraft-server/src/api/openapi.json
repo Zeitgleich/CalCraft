@@ -1175,7 +1175,7 @@
       },
       "delete": {
         "summary": "Empty the trash",
-        "description": "Deletes all entries of the logged-in user permanently.",
+        "description": "Deletes all entries of the logged-in user permanently. They disappear and stop counting towards the quota at once; the rows are removed by the background purge shortly after.",
         "tags": [
           "trash"
         ],
@@ -1204,7 +1204,7 @@
     "/v1/trash/{id}/restore": {
       "post": {
         "summary": "Restore a trash entry",
-        "description": "Puts an object back into its original collection under its original name, or recreates a collection with all its objects. DAV clients see the restored objects as new changes (sync-collection). Conflicts answer 409 with error = name_taken, uid_taken, collection_exists, collection_in_trash (restore the collection first) or collection_deleted.",
+        "description": "Puts an object back into its original collection under its original name, or recreates a collection with all its objects. DAV clients see the restored objects as new changes (sync-collection). Conflicts answer 409 with error = name_taken, uid_taken, collection_exists, collection_in_trash (restore the collection first) collection_deleted (restore into another collection with ?collection=) or invalid_target.",
         "tags": [
           "trash"
         ],
@@ -1220,6 +1220,15 @@
             "schema": {
               "type": "string",
               "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "collection",
+            "in": "query",
+            "required": false,
+            "description": "Restore an object into this collection (short name, same kind) instead of its original one, e.g. when that was deleted permanently (collection_deleted). Not allowed for collection entries.",
+            "schema": {
+              "type": "string"
             }
           }
         ],

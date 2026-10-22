@@ -11,8 +11,12 @@ use crate::{auth::now, validate::clean_text};
 /// Rows deleted per purge transaction, so that the single writer is never
 /// blocked for long.
 pub const PURGE_BATCH: u32 = 500;
-/// Pause between purge runs.
+/// Pause between regular purge runs.
 pub const PURGE_INTERVAL: Duration = Duration::from_secs(3600);
+/// How often the purge task checks for entries that were emptied, deleted
+/// permanently or dropped from a full trash (they are hidden already and
+/// no longer count towards the quota; this only frees the rows).
+pub const PURGE_POLL: Duration = Duration::from_secs(30);
 /// Longest display text, in characters.
 const MAX_SUMMARY: usize = 200;
 
@@ -67,14 +71,37 @@ async fn purge_and_log(store: &Store) {
     }
 }
 
-/// Purges expired entries now and then every [`PURGE_INTERVAL`].
+/// Purges expired entries now, then every [`PURGE_INTERVAL`], and within
+/// [`PURGE_POLL`] when entries were deleted from the trash.
 pub fn spawn_purge(store: Store) {
     tokio::spawn(async move {
+        let mut last = tokio::time::Instant::now();
+        purge_and_log(&store).await;
         loop {
-            purge_and_log(&store).await;
-            tokio::time::sleep(PURGE_INTERVAL).await;
+            tokio::time::sleep(PURGE_POLL).await;
+            if store.take_purge_request() || last.elapsed() >= PURGE_INTERVAL {
+                last = tokio::time::Instant::now();
+                purge_and_log(&store).await;
+            }
         }
     });
+}
+
+/// Warns at startup if the trash is disabled while entries are left in it:
+/// they are purged right away.
+pub async fn warn_if_disabled_with_entries(store: &Store) {
+    if store.trash_retention_days() != 0 {
+        return;
+    }
+    match store.trash_entry_count().await {
+        Ok(0) => {}
+        Ok(entries) => tracing::warn!(
+            entries,
+            "storage.trash_retention_days = 0 disables the trash: the entries still in it are \
+             purged now and can no longer be restored"
+        ),
+        Err(err) => tracing::warn!(%err, "counting trash entries failed"),
+    }
 }
 
 #[cfg(test)]

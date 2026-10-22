@@ -30,6 +30,7 @@ CREATE TABLE trash (
     range_start      INTEGER,
     range_end        INTEGER,
     content          BLOB,
+    modified_at      TEXT,
     -- Collections: their properties.
     display_name     TEXT,
     description      TEXT,
@@ -39,8 +40,11 @@ CREATE TABLE trash (
     summary          TEXT,
     -- Bytes of content (collections: of all their objects).
     size             INTEGER NOT NULL,
-    -- Unix seconds.
+    -- Unix seconds; 0 once the entry is waiting to be purged.
     deleted_at       INTEGER NOT NULL,
+    -- Emptied, deleted permanently or evicted from a full trash: hidden at
+    -- once and removed by the background purge in small batches.
+    purge_pending    INTEGER NOT NULL DEFAULT 0 CHECK (purge_pending IN (0, 1)),
     CHECK ((entry_kind = 'item') = (content IS NOT NULL)),
     CHECK (parent_id IS NULL OR entry_kind = 'item'),
     CHECK ((public_id IS NULL) = (parent_id IS NOT NULL))

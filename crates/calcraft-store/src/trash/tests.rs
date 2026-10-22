@@ -1,5 +1,6 @@
 use super::*;
 use crate::{Collection, DEFAULT_COLLECTION_SLUG, NewItem, User};
+use sqlx::Row;
 
 const DAY: i64 = 86_400;
 const NOW: i64 = 1_800_000_000;
@@ -114,7 +115,7 @@ async fn restore_puts_the_object_back_with_a_change() {
     let id = entries(&store, alice.id).await[0].id.clone();
 
     let restored = store
-        .restore_trash_entry(alice.id, &id)
+        .restore_trash_entry(alice.id, &id, None)
         .await
         .unwrap()
         .unwrap();
@@ -127,7 +128,7 @@ async fn restore_puts_the_object_back_with_a_change() {
     assert!(entries(&store, alice.id).await.is_empty());
     assert!(
         store
-            .restore_trash_entry(alice.id, &id)
+            .restore_trash_entry(alice.id, &id, None)
             .await
             .unwrap()
             .is_none()
@@ -146,12 +147,12 @@ async fn restore_conflicts() {
 
     put(&store, cal.id, "a.ics", "uid-other", "other").await;
     assert_eq!(
-        conflict(store.restore_trash_entry(alice.id, &a).await),
+        conflict(store.restore_trash_entry(alice.id, &a, None).await),
         TrashConflict::NameTaken
     );
     put(&store, cal.id, "c.ics", "uid-b", "same uid").await;
     assert_eq!(
-        conflict(store.restore_trash_entry(alice.id, &b).await),
+        conflict(store.restore_trash_entry(alice.id, &b, None).await),
         TrashConflict::UidTaken
     );
     // Nothing changed.
@@ -204,7 +205,7 @@ async fn collections_go_to_the_trash_as_one_unit() {
 
     // The object needs its collection back first.
     assert_eq!(
-        conflict(store.restore_trash_entry(alice.id, &single.id).await),
+        conflict(store.restore_trash_entry(alice.id, &single.id, None).await),
         TrashConflict::CollectionInTrash
     );
 
@@ -222,13 +223,13 @@ async fn collections_go_to_the_trash_as_one_unit() {
         .await
         .unwrap();
     assert_eq!(
-        conflict(store.restore_trash_entry(alice.id, &unit.id).await),
+        conflict(store.restore_trash_entry(alice.id, &unit.id, None).await),
         TrashConflict::CollectionExists
     );
     store.delete_collection(again.id).await.unwrap();
 
     let restored = store
-        .restore_trash_entry(alice.id, &unit.id)
+        .restore_trash_entry(alice.id, &unit.id, None)
         .await
         .unwrap()
         .unwrap();
@@ -258,7 +259,7 @@ async fn collections_go_to_the_trash_as_one_unit() {
 
     // Now the single object can follow.
     store
-        .restore_trash_entry(alice.id, &single.id)
+        .restore_trash_entry(alice.id, &single.id, None)
         .await
         .unwrap()
         .unwrap();
@@ -295,7 +296,7 @@ async fn object_of_a_permanently_deleted_collection_cannot_be_restored() {
     assert!(store.delete_trash_entry(alice.id, &unit.id).await.unwrap());
     let single = entries(&store, alice.id).await[0].id.clone();
     assert_eq!(
-        conflict(store.restore_trash_entry(alice.id, &single).await),
+        conflict(store.restore_trash_entry(alice.id, &single, None).await),
         TrashConflict::CollectionDeleted
     );
     // A new collection with the same name is a different collection.
@@ -312,9 +313,178 @@ async fn object_of_a_permanently_deleted_collection_cannot_be_restored() {
         .await
         .unwrap();
     assert_eq!(
-        conflict(store.restore_trash_entry(alice.id, &single).await),
+        conflict(store.restore_trash_entry(alice.id, &single, None).await),
         TrashConflict::CollectionDeleted
     );
+    // It can go into another collection of the same kind instead.
+    store
+        .restore_trash_entry(alice.id, &single, Some(&"work".parse().unwrap()))
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn objects_of_a_lost_collection_restore_into_a_target() {
+    let (store, alice, cal, _) = setup().await;
+    let work = store
+        .create_collection(
+            alice.id,
+            CollectionKind::Calendar,
+            &"work".parse().unwrap(),
+            None,
+            None,
+            None,
+            "VEVENT",
+        )
+        .await
+        .unwrap();
+    put(&store, work.id, "a.ics", "uid-a", "event a").await;
+    let modified = sqlx::query("SELECT modified_at FROM items WHERE collection_id = ?")
+        .bind(work.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap()
+        .try_get::<String, _>("modified_at")
+        .unwrap();
+    trash(&store, work.id, "a.ics", NOW).await;
+    store.delete_collection(work.id).await.unwrap();
+    let id = entries(&store, alice.id).await[0].id.clone();
+
+    let book: Slug = "book".parse().unwrap();
+    store
+        .create_collection(
+            alice.id,
+            CollectionKind::Addressbook,
+            &book,
+            None,
+            None,
+            None,
+            "VCARD",
+        )
+        .await
+        .unwrap();
+    // Wrong kind, unknown and foreign targets are refused.
+    for target in ["book", "nope"] {
+        assert_eq!(
+            conflict(
+                store
+                    .restore_trash_entry(alice.id, &id, Some(&target.parse().unwrap()))
+                    .await
+            ),
+            TrashConflict::InvalidTarget,
+            "{target}"
+        );
+    }
+    // Name and UID are checked in the target as well.
+    put(&store, cal.id, "a.ics", "uid-x", "taken").await;
+    assert_eq!(
+        conflict(
+            store
+                .restore_trash_entry(alice.id, &id, Some(&cal.slug))
+                .await
+        ),
+        TrashConflict::NameTaken
+    );
+    store
+        .delete_item(cal.id, "a.ics", &Precondition::None)
+        .await
+        .unwrap();
+    let restored = store
+        .restore_trash_entry(alice.id, &id, Some(&cal.slug))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.collection_slug, cal.slug);
+    let back =
+        sqlx::query("SELECT modified_at FROM items WHERE collection_id = ? AND name = 'a.ics'")
+            .bind(cal.id)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap()
+            .try_get::<String, _>("modified_at")
+            .unwrap();
+    assert_eq!(back, modified, "modified_at is kept");
+}
+
+#[tokio::test]
+async fn a_delete_into_a_full_trash_stays_bounded() {
+    let (store, alice, cal, _) = setup().await;
+    store.set_limits_for_testing(MAX_BYTES_PER_USER_FOR_TESTS, 6);
+    store.set_eviction_budget_for_testing(2);
+    let work = store
+        .create_collection(
+            alice.id,
+            CollectionKind::Calendar,
+            &"work".parse().unwrap(),
+            None,
+            None,
+            None,
+            "VEVENT",
+        )
+        .await
+        .unwrap();
+    for i in 0..4 {
+        put(&store, work.id, &format!("{i}.ics"), &format!("w{i}"), "x").await;
+    }
+    store
+        .delete_collection_to_trash(work.id, NOW)
+        .await
+        .unwrap();
+    put(&store, cal.id, "x.ics", "x", "x").await;
+    trash(&store, cal.id, "x.ics", NOW + 1).await;
+    let rows = || async {
+        sqlx::query("SELECT COUNT(*) AS n FROM trash")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap()
+            .try_get::<i64, _>("n")
+            .unwrap()
+    };
+    assert_eq!(rows().await, 6, "the trash is full");
+    assert!(!store.take_purge_request());
+
+    // The oldest entry (5 rows) is larger than the budget: it is only
+    // marked, nothing is deleted on the request path.
+    put(&store, cal.id, "y.ics", "y", "y").await;
+    trash(&store, cal.id, "y.ics", NOW + 2).await;
+    assert_eq!(rows().await, 7);
+    let names: Vec<Option<String>> = entries(&store, alice.id)
+        .await
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(names, [Some("y.ics".into()), Some("x.ics".into())]);
+    assert_eq!(store.trash_entries(alice.id, 10, 0).await.unwrap().bytes, 2);
+    assert!(store.take_purge_request());
+    assert!(!store.take_purge_request());
+
+    // The purge removes it in small batches.
+    assert_eq!(store.purge_expired_trash(NOW + 3, 3).await.unwrap(), 3);
+    assert_eq!(store.purge_expired_trash(NOW + 3, 3).await.unwrap(), 2);
+    assert_eq!(store.purge_expired_trash(NOW + 3, 3).await.unwrap(), 0);
+    assert_eq!(rows().await, 2);
+}
+
+#[tokio::test]
+async fn emptied_entries_disappear_at_once_and_are_purged_later() {
+    let (store, alice, cal, _) = setup().await;
+    put(&store, cal.id, "a.ics", "uid-a", "event a").await;
+    trash(&store, cal.id, "a.ics", NOW).await;
+    let id = entries(&store, alice.id).await[0].id.clone();
+    assert!(store.delete_trash_entry(alice.id, &id).await.unwrap());
+    assert!(!store.delete_trash_entry(alice.id, &id).await.unwrap());
+    assert!(
+        store
+            .restore_trash_entry(alice.id, &id, None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let page = store.trash_entries(alice.id, 10, 0).await.unwrap();
+    assert_eq!((page.total, page.bytes), (0, 0));
+    assert!(store.take_purge_request());
+    assert_eq!(store.purge_expired_trash(NOW, 100).await.unwrap(), 1);
 }
 
 #[tokio::test]
@@ -326,7 +496,7 @@ async fn entries_are_private_to_their_owner() {
     assert!(entries(&store, bob.id).await.is_empty());
     assert!(
         store
-            .restore_trash_entry(bob.id, &id)
+            .restore_trash_entry(bob.id, &id, None)
             .await
             .unwrap()
             .is_none()
@@ -451,7 +621,7 @@ async fn the_trash_counts_towards_the_quota() {
     // ... restoring needs no extra space ...
     let id = entries(&store, alice.id).await[0].id.clone();
     store
-        .restore_trash_entry(alice.id, &id)
+        .restore_trash_entry(alice.id, &id, None)
         .await
         .unwrap()
         .unwrap();

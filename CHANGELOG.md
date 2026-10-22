@@ -16,12 +16,17 @@ follow [Semantic Versioning](https://semver.org/). Release process:
   REST endpoints `GET /api/v1/trash`, `POST /api/v1/trash/{id}/restore`,
   `DELETE /api/v1/trash/{id}` and `DELETE /api/v1/trash`; restores go back to
   the original collection and name (409 with `name_taken`, `uid_taken`,
-  `collection_exists`, `collection_in_trash` or `collection_deleted` on
-  conflicts) and appear as new changes for sync clients. The trash counts
-  towards the storage quota and holds at most 101 000 rows per user (oldest
-  entries are purged early); expired entries are purged at startup and
-  hourly in small batches. Database migration `0006_trash`; backups include
-  the trash.
+  `collection_exists`, `collection_in_trash`, `collection_deleted` or
+  `invalid_target` on conflicts; objects of a permanently deleted collection
+  can be restored into another one with `?collection=`), keep ETag and
+  modification time, and appear as new changes for sync clients. The trash
+  counts towards the storage quota and holds at most 101 000 rows per user
+  (the oldest entries are dropped early; large ones are left to the
+  background purge so a delete never blocks the database for long); expired
+  and emptied entries are purged in small batches at startup, hourly and
+  shortly after emptying. With `trash_retention_days = 0` all remaining
+  entries are purged at startup (logged as a warning). Database migration
+  `0006_trash`; backups include the trash.
 - Request limits: at most `server.max_concurrent_requests` (256) requests at
   once (`503`), per client 32 concurrent requests and 120 burst / 20 per
   second (`429`), 20 failed logins per client in 15 minutes; IPv6 per /64,

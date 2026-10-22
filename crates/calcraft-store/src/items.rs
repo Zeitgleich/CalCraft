@@ -354,20 +354,21 @@ impl Store {
 
         // The trash counts towards the quota: deleting does not free space
         // until the trash is emptied or its entries expire.
-        let used: i64 = sqlx::query(
-            "SELECT (SELECT COALESCE(SUM(length(i.content)), 0) FROM items i \
-               JOIN collections c ON c.id = i.collection_id \
-               WHERE c.owner_id = (SELECT owner_id FROM collections WHERE id = ?1) \
-                 AND NOT (i.collection_id = ?1 AND i.name = ?2)) \
-             + (SELECT COALESCE(SUM(size), 0) FROM trash \
-               WHERE owner_id = (SELECT owner_id FROM collections WHERE id = ?1) \
-                 AND entry_kind = 'item') AS used",
+        let row = sqlx::query(
+            "SELECT c.owner_id, (SELECT COALESCE(SUM(length(i.content)), 0) FROM items i \
+               JOIN collections o ON o.id = i.collection_id \
+               WHERE o.owner_id = c.owner_id \
+                 AND NOT (i.collection_id = ?1 AND i.name = ?2)) AS used \
+             FROM collections c WHERE c.id = ?1",
         )
         .bind(collection_id)
         .bind(name)
         .fetch_one(&mut *tx)
-        .await?
-        .try_get("used")?;
+        .await?;
+        let owner_id: i64 = row.try_get("owner_id")?;
+        let used = row
+            .try_get::<i64, _>("used")?
+            .saturating_add(crate::trash::trash_bytes(&mut *tx, owner_id).await?);
         let size = i64::try_from(item.content.len()).unwrap_or(i64::MAX);
         if used.saturating_add(size) > self.settings.quota_bytes() {
             return Err(StoreError::Limit("storage quota exceeded"));
