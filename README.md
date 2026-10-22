@@ -404,7 +404,7 @@ Further checks:
   migration state and a backup/restore smoke test with the real binary.
 - **cargo-deny** (advisories, licenses, sources) on every change and an
   advisory check daily; **CodeQL** (`security-extended`) for Rust and the
-  workflows on every pull request and weekly.
+  workflows on pushes and pull requests to `main` and weekly.
 - **Coverage:** 92.2 % of lines (16 037 of 17 401), measured with
   `cargo llvm-cov --workspace --all-features`; per crate and known gaps in
   [docs/coverage.md](docs/coverage.md). CI measures it on every pull request.
