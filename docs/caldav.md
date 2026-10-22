@@ -49,7 +49,7 @@ Results stay bounded as before: at most 5 000 objects and 32 MiB of
 | Open-ended rules (no `COUNT`, no `UNTIL`) | The index stays open towards the future; queries still check the instances exactly (expansion skips ahead to the requested range). |
 | Rules too large for the budget (see below) | Index: open-ended, or bounded by `UNTIL`. Query: the object is returned. |
 | `RANGE=THISANDFUTURE` overrides | Later instances count both at their original time and shifted by the override's offset, with the override's length. |
-| `RSCALE`/`SKIP` (RFC 7529), x-parts in RRULE, and combinations RFC 5545 forbids (e.g. `BYWEEKNO` outside `YEARLY`, `BYDAY` ordinals in `WEEKLY`) | Accepted, but not expanded: treated like a rule too large for the budget. |
+| `RSCALE`/`SKIP` (RFC 7529), x-parts in RRULE, combinations RFC 5545 forbids (e.g. `BYWEEKNO` outside `YEARLY`, `BYDAY` ordinals in `WEEKLY`), and irregular rules (repeated parts, out-of-range or malformed BYxxx values such as `BYHOUR=24` or `BYDAY=0MO`, trailing commas, lists over 1 000 entries, more than 32 parts) | Accepted and stored unchanged, but not expanded: treated like a rule too large for the budget. Only what CalCraft always rejected stays an error: no or unknown `FREQ`, invalid `UNTIL`, `COUNT` together with `UNTIL`, zero or non-numeric `INTERVAL`/`COUNT`, parts without `=`. |
 | `VTODO` boundaries | Compared inclusively at both ends (RFC 4791's VTODO conditions use `<=`/`>=`). |
 | VTODO/VJOURNAL without any date | Match every time range. |
 
@@ -66,13 +66,21 @@ python-icalendar, rrule.js, Open WebUI). CalCraft bounds it everywhere:
   rules such as `FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30` end at year 9999 within
   that budget; sub-daily rules skip non-matching days, hours and minutes as
   a whole.
-- **Per REPORT:** 20 000 000 steps and 10 000 exact checks in total; the
-  checks run outside the async worker threads.
-- **Per component:** at most 10 000 RDATE plus EXDATE values, 16 distinct
-  `TZID`s per object, 1 000 entries per BYxxx list, 32 RRULE parts.
+- **Per REPORT:** 2 000 000 steps, 1 000 checked objects, 64 MiB of object
+  data read for checks and 5 seconds in total. The checks run on the
+  blocking pool, at most half the CPU cores at a time (a semaphore separate
+  from password hashing), and stop at their next step when the request is
+  cancelled (client gone, timeout).
+- **Per component:** at most 10 000 RDATE plus EXDATE values and 16 distinct
+  `TZID`s per object. A VTIMEZONE with more than 5 000 transitions, more than
+  16 distinct offsets or transitions less than 6 hours apart is not evaluated
+  (times are widened instead), which keeps each time conversion cheap; every
+  conversion is charged to the budget.
 
 When a budget runs out, the answer falls back to the conservative one: the
 object is indexed as open-ended (or up to `UNTIL`) and returned by queries.
+`RANGE=THISANDFUTURE` shifts widen the expansion window by the largest shift,
+so moved instances are found however far they moved (within the budget).
 
 ## Upgrades
 
@@ -81,7 +89,9 @@ Migration `0007_recurrence` adds the columns `items.recurring` and
 (conservative) span until the server re-indexes them: right after startup, in
 the background, in batches of 32 objects, once per object (idempotent, objects
 changed meanwhile are skipped). Re-indexing changes neither the objects, their
-ETags nor sync tokens. If it is interrupted, it continues at the next start.
+ETags nor sync tokens. If it is interrupted, it continues at the next start;
+an object that cannot be indexed is marked to match every time range, so it
+never blocks the run.
 
 ## Not yet supported
 

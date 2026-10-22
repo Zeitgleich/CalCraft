@@ -212,6 +212,7 @@ fn rrule_until(rule: &str) -> Result<Option<DateTime>, IcalError> {
 /// possible: local times widened, open-ended unless bounded by UNTIL.
 fn component_range(component: &Component, kind: ComponentKind) -> Result<TimeRange, IcalError> {
     let start = datetime(component, "DTSTART")?;
+    let start_is_date = start.is_some_and(|s| s.is_date);
     let end_prop = match kind {
         ComponentKind::Event => datetime(component, "DTEND")?,
         ComponentKind::Todo => datetime(component, "DUE")?,
@@ -250,7 +251,15 @@ fn component_range(component: &Component, kind: ComponentKind) -> Result<TimeRan
     }
     if let Some(rrule) = rrules.first() {
         end = match rrule_until(&rrule.value)? {
-            Some(until) => end.zip(start).map(|(e, s)| until.seconds + (e - s)),
+            // A DATE UNTIL with DATE-TIME instances includes that whole day.
+            Some(until) => {
+                let until_end = if until.is_date && !start_is_date {
+                    until.seconds + 86_400
+                } else {
+                    until.seconds
+                };
+                end.zip(start).map(|(e, s)| until_end + (e - s))
+            }
             None => None,
         };
     }

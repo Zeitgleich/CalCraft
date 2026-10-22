@@ -17,6 +17,14 @@ use calcraft_store::{ItemIndex, StaleIndex, Store};
 /// Objects read per batch (at most 1 MiB each).
 const BATCH: u32 = 32;
 
+/// Matches every time range: for objects this version cannot index.
+const CONSERVATIVE: ItemIndex = ItemIndex {
+    range_start: None,
+    range_end: None,
+    recurring: false,
+    version: INDEX_VERSION,
+};
+
 fn index(content: &[u8]) -> ItemIndex {
     match CalendarObject::parse(content) {
         Ok(object) => ItemIndex {
@@ -27,13 +35,21 @@ fn index(content: &[u8]) -> ItemIndex {
         },
         // Accepted by an older version but not by this one: match every
         // time range rather than none.
-        Err(_) => ItemIndex {
-            range_start: None,
-            range_end: None,
-            recurring: false,
-            version: INDEX_VERSION,
-        },
+        Err(_) => CONSERVATIVE,
     }
+}
+
+/// [`index`], but a panic (which would be a bug) only affects this object:
+/// it is indexed conservatively and the run continues, so one bad row
+/// cannot block re-indexing at every start.
+fn index_isolated(id: i64, content: &[u8]) -> ItemIndex {
+    std::panic::catch_unwind(|| index(content)).unwrap_or_else(|_| {
+        tracing::error!(
+            id,
+            "indexing a calendar object panicked; indexed conservatively"
+        );
+        CONSERVATIVE
+    })
 }
 
 /// Re-indexes every calendar object with an older index version. Returns
@@ -51,7 +67,10 @@ pub async fn run(store: &Store) -> anyhow::Result<usize> {
         let indexed = tokio::task::spawn_blocking(move || {
             batch
                 .into_iter()
-                .map(|item| (item.id, item.etag, index(&item.content)))
+                .map(|item| {
+                    let index = index_isolated(item.id, &item.content);
+                    (item.id, item.etag, index)
+                })
                 .collect::<Vec<_>>()
         })
         .await

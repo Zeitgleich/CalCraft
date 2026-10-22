@@ -18,6 +18,22 @@ use crate::{
 
 /// More parts than any meaningful rule has (RFC 5545 defines 14).
 const MAX_PARTS: usize = 32;
+const KNOWN_PARTS: [&str; 14] = [
+    "FREQ",
+    "UNTIL",
+    "COUNT",
+    "INTERVAL",
+    "BYSECOND",
+    "BYMINUTE",
+    "BYHOUR",
+    "BYDAY",
+    "BYMONTHDAY",
+    "BYYEARDAY",
+    "BYWEEKNO",
+    "BYMONTH",
+    "BYSETPOS",
+    "WKST",
+];
 /// Entries per BYxxx list; the longest meaningful list (BYYEARDAY) has 732.
 const MAX_LIST: usize = 1_000;
 const DAY: i64 = 86_400;
@@ -62,9 +78,6 @@ fn invalid() -> IcalError {
 }
 
 fn positive(value: &str) -> Result<u32, IcalError> {
-    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(invalid());
-    }
     match value.parse::<u32>() {
         Ok(n) if n > 0 => Ok(n),
         _ => Err(invalid()),
@@ -148,8 +161,10 @@ fn weekdays(value: &str) -> Result<Vec<(i64, i64)>, IcalError> {
     Ok(out)
 }
 
-/// Parses and validates an RRULE value. Errors are for rules that are
-/// invalid iCalendar; rules this expander cannot evaluate are returned with
+/// Parses and validates an RRULE value. Errors only for what CalCraft has
+/// always rejected (no or unknown FREQ, invalid UNTIL, COUNT with UNTIL,
+/// zero or non-numeric INTERVAL/COUNT, parts without `=`); every other
+/// irregularity, and rules this expander cannot evaluate, are returned with
 /// `supported == false`.
 pub(crate) fn parse_rule(value: &str) -> Result<Rule, IcalError> {
     let mut rule = Rule {
@@ -170,18 +185,21 @@ pub(crate) fn parse_rule(value: &str) -> Result<Rule, IcalError> {
         wkst: 0,
     };
     let mut freq = None;
-    let mut seen: Vec<String> = Vec::new();
+    // Bit per known part, to notice repetitions.
+    let mut seen = 0u32;
+    let mut has_count = false;
+    let mut has_until = false;
     for (index, part) in value.split(';').enumerate() {
         if index >= MAX_PARTS {
-            return Err(IcalError::Limit("RRULE has too many parts"));
+            rule.supported = false;
         }
         let (key, value) = part.split_once('=').ok_or_else(invalid)?;
         let key = key.to_ascii_uppercase();
-        if seen.contains(&key) {
-            return Err(invalid());
-        }
         let upper = value.to_ascii_uppercase();
-        match key.as_str() {
+        // Only what earlier versions rejected is an error, so objects from
+        // other servers keep syncing; anything else odd only makes the rule
+        // unsupported (indexed and matched conservatively).
+        let parsed: Result<(), IcalError> = match key.as_str() {
             "FREQ" => {
                 freq = Some(match upper.as_str() {
                     "SECONDLY" => Freq::Secondly,
@@ -193,27 +211,49 @@ pub(crate) fn parse_rule(value: &str) -> Result<Rule, IcalError> {
                     "YEARLY" => Freq::Yearly,
                     _ => return Err(invalid()),
                 });
+                Ok(())
             }
-            "INTERVAL" => rule.interval = i64::from(positive(value)?),
-            "COUNT" => rule.count = Some(positive(value)?),
-            "UNTIL" => rule.until = Some(parse_date_or_datetime(value)?),
-            "BYSECOND" => rule.by_second = numbers(value, 0, 60, false)?,
-            "BYMINUTE" => rule.by_minute = numbers(value, 0, 59, false)?,
-            "BYHOUR" => rule.by_hour = numbers(value, 0, 23, false)?,
-            "BYDAY" => rule.by_day = weekdays(&upper)?,
-            "BYMONTHDAY" => rule.by_month_day = numbers(value, 1, 31, true)?,
-            "BYYEARDAY" => rule.by_year_day = numbers(value, 1, 366, true)?,
-            "BYWEEKNO" => rule.by_week_no = numbers(value, 1, 53, true)?,
-            "BYMONTH" => rule.by_month = numbers(value, 1, 12, false)?,
-            "BYSETPOS" => rule.by_set_pos = numbers(value, 1, 366, true)?,
-            "WKST" => rule.wkst = weekday_code(&upper).ok_or_else(invalid)?,
+            "INTERVAL" => {
+                rule.interval = i64::from(positive(value)?);
+                Ok(())
+            }
+            "COUNT" => {
+                has_count = true;
+                rule.count = Some(positive(value)?);
+                Ok(())
+            }
+            "UNTIL" => {
+                has_until = true;
+                rule.until = Some(parse_date_or_datetime(value)?);
+                Ok(())
+            }
+            "BYSECOND" => numbers(value, 0, 60, false).map(|v| rule.by_second = v),
+            "BYMINUTE" => numbers(value, 0, 59, false).map(|v| rule.by_minute = v),
+            "BYHOUR" => numbers(value, 0, 23, false).map(|v| rule.by_hour = v),
+            "BYDAY" => weekdays(&upper).map(|v| rule.by_day = v),
+            "BYMONTHDAY" => numbers(value, 1, 31, true).map(|v| rule.by_month_day = v),
+            "BYYEARDAY" => numbers(value, 1, 366, true).map(|v| rule.by_year_day = v),
+            "BYWEEKNO" => numbers(value, 1, 53, true).map(|v| rule.by_week_no = v),
+            "BYMONTH" => numbers(value, 1, 12, false).map(|v| rule.by_month = v),
+            "BYSETPOS" => numbers(value, 1, 366, true).map(|v| rule.by_set_pos = v),
+            "WKST" => weekday_code(&upper)
+                .map(|d| rule.wkst = d)
+                .ok_or_else(invalid),
             // RSCALE/SKIP (RFC 7529) and x-parts change the meaning of a rule.
-            _ => rule.supported = false,
+            _ => Err(invalid()),
+        };
+        if parsed.is_err() {
+            rule.supported = false;
         }
-        seen.push(key);
+        if let Some(bit) = KNOWN_PARTS.iter().position(|k| *k == key) {
+            if seen & (1 << bit) != 0 {
+                rule.supported = false;
+            }
+            seen |= 1 << bit;
+        }
     }
     rule.freq = freq.ok_or_else(invalid)?;
-    if rule.count.is_some() && rule.until.is_some() {
+    if has_count && has_until {
         return Err(invalid());
     }
     // Combinations RFC 5545 forbids ("MUST NOT"): accepted for
@@ -742,35 +782,53 @@ mod tests {
             "FREQ=DAILY;INTERVAL=0",
             "FREQ=DAILY;INTERVAL=-1",
             "FREQ=DAILY;COUNT=-1",
+            "FREQ=DAILY;COUNT=0",
             "FREQ=DAILY;COUNT=2;UNTIL=20261101T000000Z",
+            "FREQ=DAILY;COUNT=2;COUNT=3;UNTIL=20261101T000000Z",
+            "FREQ=DAILY;FREQ=FORTNIGHTLY",
+            "FREQ=DAILY;UNTIL=99999",
+            "FREQ=DAILY;",
+            "FREQ=DAILY;BYHOUR",
+        ] {
+            assert!(parse_rule(bad).is_err(), "{bad:?}");
+        }
+        // Odd but harmless: accepted, not expanded.
+        for odd in [
             "FREQ=DAILY;FREQ=WEEKLY",
             "FREQ=DAILY;BYHOUR=24",
             "FREQ=DAILY;BYSECOND=-1",
             "FREQ=MONTHLY;BYMONTHDAY=0",
             "FREQ=MONTHLY;BYMONTHDAY=32",
+            "FREQ=MONTHLY;BYMONTHDAY=+0001",
             "FREQ=YEARLY;BYYEARDAY=367",
             "FREQ=YEARLY;BYWEEKNO=54",
             "FREQ=YEARLY;BYMONTH=13",
+            "FREQ=YEARLY;BYMONTH=+1",
             "FREQ=YEARLY;BYSETPOS=0",
             "FREQ=MONTHLY;BYDAY=0MO",
             "FREQ=MONTHLY;BYDAY=54MO",
             "FREQ=MONTHLY;BYDAY=XX",
             "FREQ=MONTHLY;BYDAY=",
             "FREQ=MONTHLY;BYDAY=MO,",
-            "FREQ=DAILY;UNTIL=99999",
             "FREQ=DAILY;WKST=XY",
-            "FREQ=DAILY;",
+            "FREQ=DAILY;BYHOUR=1;BYHOUR=2",
         ] {
-            assert!(parse_rule(bad).is_err(), "{bad:?}");
+            assert!(!parse_rule(odd).unwrap().supported, "{odd:?}");
         }
-        assert!(matches!(
-            parse_rule(&format!(
+        assert_eq!(parse_rule("FREQ=DAILY;COUNT=+3").unwrap().count, Some(3));
+        assert!(
+            !parse_rule(&format!(
                 "FREQ=YEARLY;BYYEARDAY={}",
                 vec!["1"; 1001].join(",")
-            )),
-            Err(IcalError::Limit(_))
-        ));
-        assert!(parse_rule(&format!("FREQ=DAILY{}", ";X-A=1".repeat(40))).is_err());
+            ))
+            .unwrap()
+            .supported
+        );
+        assert!(
+            !parse_rule(&format!("FREQ=DAILY{}", ";X-A=1".repeat(40)))
+                .unwrap()
+                .supported
+        );
         for unsupported in [
             "FREQ=DAILY;X-FOO=1",
             "RSCALE=HEBREW;FREQ=YEARLY",

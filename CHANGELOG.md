@@ -68,10 +68,6 @@ follow [Semantic Versioning](https://semver.org/). Release process:
   `items.index_version`). After the upgrade, existing calendar objects are
   re-indexed once in the background; until then their time ranges stay
   conservative. Objects, ETags and sync tokens do not change.
-- RRULEs are validated more strictly at PUT and import: duplicate rule parts
-  and out-of-range or malformed BYxxx values (e.g. `BYHOUR=24`, `BYDAY=0MO`)
-  are rejected with `CALDAV:valid-calendar-data`. Unknown parts (`RSCALE`,
-  x-parts) are still accepted.
 
 - Web UI: refreshed design with the logo in the header and on the login page,
   a token-based colour system (light and dark), clearer buttons, focus rings

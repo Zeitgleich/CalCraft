@@ -14,7 +14,13 @@
 //! [`Inexact`] and callers fall back to conservative answers: an object
 //! that might match is always returned, never dropped.
 
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use crate::{
     Component, Property,
@@ -30,6 +36,9 @@ pub(crate) const SLACK: i64 = 14 * 3600;
 pub const OBJECT_BUDGET: u64 = 200_000;
 /// Most instances one expansion may visit before it counts as too large.
 pub const MAX_INSTANCES: usize = 10_000;
+/// Steps charged per instance: up to three time zone conversions, each a
+/// bounded search (see [`Tz`]).
+const INSTANCE_COST: u64 = 4;
 /// Distinct TZIDs evaluated per object.
 const MAX_ZONES: usize = 16;
 /// RDATE plus EXDATE values per component.
@@ -40,15 +49,30 @@ const DAY: i64 = 86_400;
 pub(crate) const MARGIN: i64 = MAX_OFFSET + SLACK + DAY;
 
 /// Work budget for recurrence evaluation, in abstract steps (one loop
-/// iteration or generated candidate each).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// iteration, generated candidate, date value or time zone conversion
+/// each). Optionally tied to a cancel flag: once it is set, the budget
+/// counts as exhausted.
+#[derive(Debug, Clone)]
 pub struct Budget {
     steps: u64,
+    cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Budget {
     pub fn new(steps: u64) -> Self {
-        Self { steps }
+        Self {
+            steps,
+            cancel: None,
+        }
+    }
+
+    /// A budget that also ends when `cancel` becomes `true` (e.g. because
+    /// the request that needs the answer has gone away).
+    pub fn with_cancel(steps: u64, cancel: Arc<AtomicBool>) -> Self {
+        Self {
+            steps,
+            cancel: Some(cancel),
+        }
     }
 
     /// Steps left.
@@ -57,12 +81,16 @@ impl Budget {
     }
 
     pub(crate) fn charge(&mut self, steps: u64) -> Result<(), Inexact> {
+        let cancelled = self
+            .cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed));
         match self.steps.checked_sub(steps) {
-            Some(left) => {
+            Some(left) if !cancelled => {
                 self.steps = left;
                 Ok(())
             }
-            None => {
+            _ => {
                 self.steps = 0;
                 Err(Inexact)
             }
@@ -436,14 +464,22 @@ impl Series {
         shifts: &[Shift],
         visit: &mut dyn FnMut(Span) -> bool,
     ) -> Result<bool, Inexact> {
-        let emit = |span: Span, key: Option<Key>, visit: &mut dyn FnMut(Span) -> bool| {
+        // Each instance costs its time zone conversions plus one step per
+        // THISANDFUTURE shift.
+        let cost = INSTANCE_COST + u64::try_from(shifts.len()).unwrap_or(u64::MAX);
+        let emit = |span: Span,
+                    key: Option<Key>,
+                    budget: &mut Budget,
+                    visit: &mut dyn FnMut(Span) -> bool|
+         -> Result<bool, Inexact> {
+            budget.charge(cost)?;
             if key.is_some_and(|k| self.exdates.contains(&k) || overridden.contains(&k)) {
-                return false;
+                return Ok(false);
             }
             if visit(span) {
-                return true;
+                return Ok(true);
             }
-            shifts.iter().any(|shift| {
+            Ok(shifts.iter().any(|shift| {
                 span.hi >= shift.rid_lo
                     && visit(Span {
                         lo: span.lo.saturating_add(shift.delta_lo),
@@ -452,15 +488,27 @@ impl Series {
                             .saturating_add(shift.delta_hi)
                             .saturating_add(shift.len_hi),
                     })
-            })
+            }))
         };
+        // How far THISANDFUTURE shifts can move an instance: the window for
+        // skipping ahead and stopping must be widened by as much.
+        let reach = shifts
+            .iter()
+            .map(|s| {
+                s.delta_lo
+                    .unsigned_abs()
+                    .max(s.delta_hi.saturating_add(s.len_hi).unsigned_abs())
+            })
+            .max()
+            .map_or(0, |r| i64::try_from(r).unwrap_or(i64::MAX));
         match &self.rule {
             None => {
                 if emit(
                     self.instance(zones, self.start, None),
                     zones.key(self.start),
+                    budget,
                     visit,
-                ) {
+                )? {
                     return Ok(true);
                 }
             }
@@ -497,7 +545,8 @@ impl Series {
                     expansion.skip_to(
                         start
                             .saturating_sub(self.max_duration())
-                            .saturating_sub(MARGIN),
+                            .saturating_sub(MARGIN)
+                            .saturating_sub(reach),
                     );
                 }
                 let mut visited = 0usize;
@@ -506,7 +555,9 @@ impl Series {
                     if visited > MAX_INSTANCES {
                         return Err(Inexact);
                     }
-                    if window_end.is_some_and(|end| naive > end.saturating_add(MARGIN)) {
+                    if window_end
+                        .is_some_and(|end| naive > end.saturating_add(MARGIN).saturating_add(reach))
+                    {
                         break;
                     }
                     let value = Value {
@@ -518,14 +569,19 @@ impl Series {
                     if until_utc.is_some_and(|until| span.lo > until.saturating_add(1)) {
                         continue;
                     }
-                    if emit(span, zones.key(value), visit) {
+                    if emit(span, zones.key(value), budget, visit)? {
                         return Ok(true);
                     }
                 }
             }
         }
         for &(value, end) in &self.rdates {
-            if emit(self.instance(zones, value, end), zones.key(value), visit) {
+            if emit(
+                self.instance(zones, value, end),
+                zones.key(value),
+                budget,
+                visit,
+            )? {
                 return Ok(true);
             }
         }

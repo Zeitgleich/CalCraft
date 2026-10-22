@@ -22,6 +22,12 @@ pub(crate) const HORIZON_YEAR: i64 = 2200;
 pub(crate) const MAX_OFFSET: i64 = 18 * 3600;
 const MAX_TRANSITIONS: usize = 5_000;
 const MAX_OBSERVANCES: usize = 100;
+/// Bounds the work of one conversion: at most this many distinct offsets
+/// are tried, and transitions closer than [`MIN_TRANSITION_GAP`] (which no
+/// real zone has) make the zone unusable, so a gap search looks at a
+/// handful of transitions only.
+const MAX_OFFSETS: usize = 16;
+const MIN_TRANSITION_GAP: i64 = 6 * 3600;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Transition {
@@ -149,9 +155,19 @@ impl Tz {
         }
         transitions.sort_by_key(|t| t.at);
         transitions.dedup_by_key(|t| t.at);
+        budget.charge(u64::try_from(transitions.len()).unwrap_or(u64::MAX))?;
+        if transitions
+            .windows(2)
+            .any(|pair| pair[1].at - pair[0].at < MIN_TRANSITION_GAP)
+        {
+            return Ok(None);
+        }
         let mut offsets: Vec<i64> = transitions.iter().flat_map(|t| [t.from, t.to]).collect();
         offsets.sort_unstable();
         offsets.dedup();
+        if offsets.len() > MAX_OFFSETS {
+            return Ok(None);
+        }
         Ok(Some(Self {
             transitions,
             covered_until,

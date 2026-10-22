@@ -477,3 +477,123 @@ fn span_never_excludes_an_instance() {
         }
     }
 }
+
+/// A weekly series (Thursdays 10:00 UTC from 1 January 2026) whose
+/// instances from 29 January on are moved with THISANDFUTURE.
+fn shifted_series(rule_end: &str, new_start: &str) -> String {
+    format!(
+        "{}BEGIN:VEVENT\r\nUID:e\r\nRECURRENCE-ID;RANGE=THISANDFUTURE:20260129T100000Z\r\nDTSTART:{new_start}\r\nDURATION:PT1H\r\nEND:VEVENT\r\n",
+        event(&format!(
+            "DTSTART:20260101T100000Z\r\nDURATION:PT1H\r\nRRULE:FREQ=WEEKLY{rule_end}\r\n"
+        ))
+    )
+}
+
+#[test]
+fn this_and_future_shifts_widen_pruning() {
+    for rule_end in ["", ";COUNT=20", ";UNTIL=20260521T100000Z"] {
+        // Four days earlier: 5 February becomes Sunday 1 February.
+        let earlier = shifted_series(rule_end, "20260125T100000Z");
+        assert!(
+            matches(&earlier, "20260201T100000Z", "20260201T110000Z"),
+            "{rule_end}"
+        );
+        assert!(
+            matches(&earlier, "20260301T100000Z", "20260301T110000Z"),
+            "{rule_end}"
+        );
+        // Four days later: 5 February becomes Monday 9 February.
+        let later = shifted_series(rule_end, "20260202T100000Z");
+        assert!(
+            matches(&later, "20260209T100000Z", "20260209T110000Z"),
+            "{rule_end}"
+        );
+        // Forty days later and earlier.
+        let far_later = shifted_series(rule_end, "20260310T100000Z");
+        assert!(
+            matches(&far_later, "20260317T100000Z", "20260317T110000Z"),
+            "{rule_end}"
+        );
+        let far_earlier = shifted_series(rule_end, "20251220T100000Z");
+        assert!(
+            matches(&far_earlier, "20251227T100000Z", "20251227T110000Z"),
+            "{rule_end}"
+        );
+        // The index covers the shifted instances, too.
+        for (body, from, to) in [
+            (&far_earlier, "20251227T100000Z", "20251227T110000Z"),
+            (&far_later, "20260317T100000Z", "20260317T110000Z"),
+        ] {
+            assert!(object(body).range.overlaps(Some(utc(from)), Some(utc(to))));
+        }
+        // Instances before the override are not shifted.
+        assert!(
+            !matches(&earlier, "20260111T100000Z", "20260111T110000Z"),
+            "{rule_end}"
+        );
+    }
+}
+
+#[test]
+fn date_until_with_date_time_start_keeps_the_last_day() {
+    // Too large to expand: the conservative range must include 21 October 2030.
+    let body = event("DTSTART:20261021T100000Z\r\nRRULE:FREQ=SECONDLY;UNTIL=20301021\r\n");
+    let indexed = object(&body);
+    assert!(indexed.range.end.unwrap() > utc("20301021T235959Z"));
+}
+
+#[test]
+fn odd_rules_are_accepted_and_matched_conservatively() {
+    for rule in [
+        "FREQ=WEEKLY;BYDAY=MO,",
+        "FREQ=WEEKLY;BYDAY=0MO;COUNT=2",
+        "FREQ=DAILY;BYHOUR=24;COUNT=2",
+        "FREQ=DAILY;COUNT=2;COUNT=2",
+        "FREQ=DAILY;WKST=XY;COUNT=2",
+        "FREQ=MONTHLY;BYMONTHDAY=+0001;COUNT=2",
+    ] {
+        let body = event(&format!(
+            "DTSTART:20261021T100000Z\r\nDURATION:PT1H\r\nRRULE:{rule}\r\n"
+        ));
+        let indexed = object(&body);
+        assert!(indexed.recurring);
+        assert_eq!(indexed.range.end, None, "{rule}");
+        assert!(
+            matches(&body, "20400101T000000Z", "20400102T000000Z"),
+            "{rule}"
+        );
+        // Not expanded, but the index still starts at DTSTART.
+        assert_eq!(indexed.range.start, Some(utc("20261021T100000Z")), "{rule}");
+    }
+}
+
+#[test]
+fn cancelled_budgets_answer_conservatively() {
+    let body = event("DTSTART:20261021T100000Z\r\nRRULE:FREQ=WEEKLY;COUNT=5\r\n");
+    let cancel = Arc::new(AtomicBool::new(true));
+    let mut budget = Budget::with_cancel(OBJECT_BUDGET, cancel);
+    assert_eq!(
+        exact_time_range_match(
+            calendar(&body).as_bytes(),
+            Some(utc("20400101T000000Z")),
+            Some(utc("20400102T000000Z")),
+            &mut budget
+        ),
+        None
+    );
+}
+
+#[test]
+fn dense_timezones_are_not_evaluated() {
+    // Transitions every hour (RDATE): unusable, times are widened.
+    let rdates: Vec<String> = (0..20).map(|h| format!("20260101T{h:02}0000")).collect();
+    let dense = format!(
+        "BEGIN:VTIMEZONE\r\nTZID:D\r\nBEGIN:STANDARD\r\nDTSTART:19700101T000000\r\nTZOFFSETFROM:+0100\r\nTZOFFSETTO:+0200\r\nRDATE:{}\r\nEND:STANDARD\r\nEND:VTIMEZONE\r\n{}",
+        rdates.join(","),
+        event("DTSTART;TZID=D:20261021T100000\r\nDURATION:PT1H\r\n")
+    );
+    assert_eq!(
+        object(&dense).range.start,
+        Some(utc("20261021T100000Z") - SLACK)
+    );
+}

@@ -275,11 +275,15 @@ async fn queries_page_through_many_candidates() {
     }
     let app = app(store);
     let mondays = query(&app, "20261012T100000Z", "20261012T110000Z").await;
-    assert_eq!(mondays.len(), 600);
-    assert!(mondays.iter().all(|name| {
-        let n: usize = name[1..5].parse().unwrap();
-        n.is_multiple_of(2)
-    }));
+    // The first 1 000 candidates (in name order) are checked exactly; the
+    // check limit returns the remaining 200 conservatively.
+    let numbers: Vec<usize> = mondays
+        .iter()
+        .map(|name| name[1..5].parse().unwrap())
+        .collect();
+    assert_eq!(numbers.len(), 500 + 200);
+    assert!(numbers.iter().all(|n| n.is_multiple_of(2) || *n >= 1000));
+    assert!((0..1200).step_by(2).all(|n| numbers.contains(&n)));
 }
 
 #[tokio::test]
@@ -341,4 +345,46 @@ async fn upgrade_reindexes_old_rows() {
     let (status, body) = send(&app, "GET", &format!("{CAL}old.ics"), "").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, content);
+}
+
+#[tokio::test]
+async fn odd_rules_sync_and_shifted_series_are_found() {
+    let app = app(store().await);
+    // Irregular rules from other servers are stored, matched conservatively.
+    put(
+        &app,
+        "odd.ics",
+        &event(
+            "odd",
+            "DTSTART:20261001T100000Z\r\nDURATION:PT1H\r\nRRULE:FREQ=WEEKLY;BYDAY=MO,;BYHOUR=24;COUNT=3\r\n",
+        ),
+    )
+    .await;
+    assert_eq!(
+        query(&app, "20400101T000000Z", "20400102T000000Z").await,
+        ["odd.ics"]
+    );
+    // THISANDFUTURE moving all later instances 40 days ahead.
+    put(
+        &app,
+        "moved.ics",
+        &format!(
+            "{}{}",
+            event(
+                "moved",
+                "DTSTART:20270107T100000Z\r\nDURATION:PT1H\r\nRRULE:FREQ=WEEKLY\r\n"
+            ),
+            event(
+                "moved",
+                "RECURRENCE-ID;RANGE=THISANDFUTURE:20270128T100000Z\r\nDTSTART:20270309T100000Z\r\nDURATION:PT1H\r\n"
+            )
+        ),
+    )
+    .await;
+    // 4 February + 40 days = Tuesday 16 March 2027.
+    assert!(
+        query(&app, "20270316T100000Z", "20270316T110000Z")
+            .await
+            .contains(&"moved.ics".to_owned())
+    );
 }
