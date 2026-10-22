@@ -160,19 +160,32 @@ calcraft --version
   shows a placeholder page. A DAV-only binary without web UI and API:
   `cargo build --release --locked -p calcraft-server --no-default-features`.
 
-Create a system user and the directories:
+Create the system user `calcraft` (no login shell, home
+`/var/lib/calcraft`) and the directories `/var/lib/calcraft` (`0700
+calcraft:calcraft`) and `/etc/calcraft` (`0750 root:calcraft`) with the
+sysusers.d and tmpfiles.d files shipped in
+[`contrib/systemd/`](../contrib/systemd) (also contained in the Linux release
+archives); systemd re-applies them at every boot:
 
 ```bash
-sudo useradd --system --home /var/lib/calcraft --shell /usr/sbin/nologin calcraft
+sudo install -Dm644 contrib/systemd/calcraft.sysusers /etc/sysusers.d/calcraft.conf
 ```
 
 ```bash
-sudo install -d -m 0700 -o calcraft -g calcraft /var/lib/calcraft
+sudo install -Dm644 contrib/systemd/calcraft.tmpfiles /etc/tmpfiles.d/calcraft.conf
 ```
 
 ```bash
-sudo install -d -m 0750 -o root -g calcraft /etc/calcraft
+sudo systemd-sysusers /etc/sysusers.d/calcraft.conf
 ```
+
+```bash
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/calcraft.conf
+```
+
+Without systemd: `useradd --system --home /var/lib/calcraft --shell
+/usr/sbin/nologin calcraft` and `install -d` the two directories with the
+modes above.
 
 Continue with [5. Configure](#5-configure).
 
@@ -303,60 +316,12 @@ Notes:
 
 ## 6. Run as a systemd service
 
-Create `/etc/systemd/system/calcraft.service`:
+Install the unit shipped in
+[`contrib/systemd/calcraft.service`](../contrib/systemd/calcraft.service)
+(user and directories come from section 4a):
 
-```ini
-[Unit]
-Description=CalCraft CalDAV/CardDAV server
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=exec
-User=calcraft
-Group=calcraft
-Environment=CALCRAFT_CONFIG=/etc/calcraft/calcraft.toml
-ExecStart=/usr/local/bin/calcraft serve
-Restart=on-failure
-RestartSec=5s
-UMask=0077
-
-# Hardening
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=/var/lib/calcraft
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-ProtectHostname=yes
-RestrictNamespaces=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-SystemCallArchitectures=native
-SystemCallFilter=@system-service
-CapabilityBoundingSet=
-AmbientCapabilities=
-
-# Resource limits (adjust to the host). CalCraft limits concurrent requests,
-# but not idle keep-alive connections: LimitNOFILE caps those. Worst-case
-# memory grows with server.max_concurrent_requests × request size; MemoryMax
-# makes the kernel stop CalCraft (and systemd restart it) instead of the
-# whole host running out of memory.
-LimitNOFILE=8192
-MemoryHigh=768M
-MemoryMax=1G
-TasksMax=512
-
-[Install]
-WantedBy=multi-user.target
+```bash
+sudo install -Dm644 contrib/systemd/calcraft.service /etc/systemd/system/calcraft.service
 ```
 
 ```bash
@@ -376,6 +341,85 @@ curl -s http://127.0.0.1:5232/readyz
 ```
 
 The last command must print `ok`. Logs: `journalctl -u calcraft -f`.
+
+What the unit does:
+
+- **Readiness** (`Type=notify`): CalCraft tells systemd `READY=1` only after
+  the database is open, migrations are applied and the listener is bound, so
+  `systemctl start` returns – and units ordered `After=calcraft.service`
+  start – only when CalCraft accepts requests. `systemctl status` shows
+  CalCraft's status line (e.g. `Listening on 127.0.0.1:5232`). Startup may
+  take up to `TimeoutStartSec=5min` (migrations and the pre-migration backup
+  of a large database after an update).
+- **Configuration check**: `ExecStartPre=calcraft check-config --quiet`
+  rejects a broken configuration before the server starts; the reason is in
+  `journalctl -u calcraft`.
+- **Restarts**: after a crash, a kill or an out-of-memory stop
+  (`MemoryMax`), systemd restarts CalCraft after 5 seconds
+  (`Restart=on-failure`). A **watchdog** (`WatchdogSec=30s`) restarts a hung
+  server: CalCraft sends a keep-alive every 15 seconds while it is
+  responsive. If the service fails 5 times within 5 minutes
+  (`StartLimitBurst=5`, `StartLimitIntervalSec=300`), e.g. because of a
+  broken configuration, systemd gives up and leaves it `failed` instead of
+  restarting it forever. Fix the cause, then:
+
+  ```bash
+  sudo systemctl reset-failed calcraft
+  ```
+
+  ```bash
+  sudo systemctl start calcraft
+  ```
+
+  Manual starts count too: more than 5 `systemctl restart` within 5 minutes
+  also hit the limit.
+- **Graceful shutdown**: `systemctl stop`/`restart` send `SIGTERM`; CalCraft
+  stops accepting connections, finishes running requests and exits
+  (`TimeoutStopSec=30`, after that systemd kills it).
+- **Hardening**: read-only file system except `/var/lib/calcraft`, no
+  capabilities, private `/tmp` and devices, system call filter, and resource
+  limits (`LimitNOFILE`, `MemoryHigh`/`MemoryMax`, `TasksMax`; adjust them to
+  the host). `systemd-analyze security calcraft` shows the exposure level;
+  CI checks it (`scripts/systemd-test.sh`).
+
+Change settings with a drop-in instead of editing the unit, so an update of
+the shipped file does not overwrite them:
+
+```bash
+sudo systemctl edit calcraft
+```
+
+for example:
+
+```ini
+[Service]
+MemoryMax=2G
+```
+
+A different binary location needs both `ExecStartPre=` and `ExecStart=`
+overridden (an empty `ExecStartPre=` line first clears the shipped one).
+
+After a reboot, check that the service came back:
+
+```bash
+systemctl is-enabled calcraft
+```
+
+```bash
+systemctl is-active calcraft
+```
+
+```bash
+journalctl -b -u calcraft
+```
+
+`is-enabled` must print `enabled` (the unit is wanted by
+`multi-user.target`), `is-active` `active`; the journal of the current boot
+(`-b`) shows the startup and any errors.
+
+With Docker the unit is not used: the container's restart policy
+(`--restart unless-stopped`) takes its place, and CalCraft ignores systemd
+notifications when `NOTIFY_SOCKET` is not set.
 
 ## 7. Create the first user
 

@@ -1,0 +1,7 @@
+# tmpfiles.d(5): directories of the CalCraft service.
+# Install as /etc/tmpfiles.d/calcraft.conf (packages: /usr/lib/tmpfiles.d/),
+# then run `systemd-tmpfiles --create`; systemd re-applies it at every boot.
+# Needs the calcraft user (calcraft.sysusers) to exist first.
+#Type Path               Mode User     Group    Age
+d     /var/lib/calcraft  0700 calcraft calcraft -
+d     /etc/calcraft      0750 root     calcraft -

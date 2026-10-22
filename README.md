@@ -85,6 +85,10 @@ A step-by-step guide for production setups — DNS records, build or Docker,
 systemd service, TLS with Let's Encrypt and ready-to-use **nginx** and
 **Apache** configurations — is in [docs/installation.md](docs/installation.md).
 
+The Linux release archives contain the systemd unit, sysusers.d and
+tmpfiles.d files from [`contrib/systemd/`](contrib/systemd) (installation:
+section 6 of the guide).
+
 Released binaries (Linux, macOS, Windows) and the Docker image
 `ghcr.io/zeitgleich/calcraft` come with SHA-256 checksums, build provenance
 attestations and a keyless cosign signature; how to check them is described in
