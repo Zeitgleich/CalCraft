@@ -236,16 +236,24 @@ fn connect_options(path: &Path) -> SqliteConnectOptions {
         .busy_timeout(Duration::from_secs(5))
 }
 
-async fn connect_pool(path: &Path, max_connections: u32) -> Result<SqlitePool> {
-    Ok(sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(max_connections)
+async fn connect_pool(
+    path: &Path,
+    max_connections: u32,
+    simulation: &crate::test_hooks::Simulation,
+) -> Result<SqlitePool> {
+    let options = sqlx::sqlite::SqlitePoolOptions::new().max_connections(max_connections);
+    Ok(simulation
+        .hook(options)
         // On SQLITE_FULL or an I/O error SQLite may roll a transaction back
         // by itself. sqlx's ROLLBACK on drop then fails and the connection
         // stays marked as inside a transaction, so every later `BEGIN` on it
-        // fails. Such connections are closed instead of reused. The ping
-        // waits for the queued rollback first.
+        // fails. Such connections are closed instead of reused. Normally the
+        // rollback on drop is merely still queued: the ping waits for it.
         .after_release(|conn, _| {
             Box::pin(async move {
+                if !conn.is_in_transaction() {
+                    return Ok(true);
+                }
                 conn.ping().await?;
                 Ok(!conn.is_in_transaction())
             })
@@ -297,6 +305,7 @@ impl Store {
             crate::create_private(&file)?;
         }
         let lock = Arc::new(DbLock::open(path)?);
+        let simulation = crate::test_hooks::Simulation::default();
         // Normally one round; a second one after migrating. More rounds only
         // happen if other processes keep restoring or migrating concurrently.
         for _ in 0..4 {
@@ -307,7 +316,7 @@ impl Store {
                     lock.path.display()
                 )));
             }
-            let pool = connect_pool(path, 8).await?;
+            let pool = connect_pool(path, 8, &simulation).await?;
             let pending = match check_database(&pool, path).await {
                 Ok(pending) => pending,
                 Err(err) => {
@@ -325,6 +334,7 @@ impl Store {
                     pool,
                     lock: Some(lock),
                     path: Some(Arc::new(path.to_path_buf())),
+                    simulation,
                 });
             }
             pool.close().await;
@@ -337,11 +347,12 @@ impl Store {
                     path.display()
                 )));
             }
-            let pool = connect_pool(path, 1).await?;
+            let pool = connect_pool(path, 1, &simulation).await?;
             let store = Self {
                 pool,
                 lock: None,
                 path: Some(Arc::new(path.to_path_buf())),
+                simulation: simulation.clone(),
             };
             let result = store.migrate(path, options).await;
             store.pool.close().await;

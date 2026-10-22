@@ -404,6 +404,12 @@ async fn logs_contain_no_secrets_or_contents() {
         .create_user_with_role(&ALICE.0.parse().unwrap(), &hash, None, true)
         .await
         .unwrap();
+    let dave_password = format!("{MARKER}DavePassword");
+    let hash = hash_password(&dave_password).unwrap();
+    store
+        .create_user(&"dave".parse().unwrap(), &hash, None)
+        .await
+        .unwrap();
     let app = router(&Config::default(), AppState::new(store).unwrap());
 
     let mut secrets = vec![ALICE.1.to_owned()];
@@ -423,6 +429,37 @@ async fn logs_contain_no_secrets_or_contents() {
         .await;
     }
     dav_flows(&app, &password_auth, &mut secrets).await;
+
+    // Lockout: repeated wrong guesses, then even the right password fails.
+    secrets.push(dave_password.clone());
+    for guess in 0..6 {
+        let wrong = format!("{MARKER}Guess{guess}");
+        secrets.push(wrong.clone());
+        let auth = basic("dave", &wrong);
+        secrets.push(auth["Basic ".len()..].to_owned());
+        let reply = dav(
+            &app,
+            &auth,
+            "PROPFIND",
+            "/dav/",
+            "application/xml",
+            String::new(),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+    }
+    let auth = basic("dave", &dave_password);
+    secrets.push(auth["Basic ".len()..].to_owned());
+    let reply = dav(
+        &app,
+        &auth,
+        "PROPFIND",
+        "/dav/",
+        "application/xml",
+        String::new(),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
 
     #[cfg(feature = "api")]
     {
@@ -456,6 +493,7 @@ async fn logs_contain_no_secrets_or_contents() {
     // The capture works and is verbose: requests and SQL statements are in it.
     assert!(logs.contains("finished processing request"), "{logs}");
     assert!(logs.contains("INSERT INTO items"), "{logs}");
+    assert!(logs.contains("account locked after repeated failed logins"));
     assert!(logs.lines().count() > 50);
     assert_absent(&logs, &secrets);
 }

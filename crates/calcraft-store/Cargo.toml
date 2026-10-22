@@ -8,6 +8,11 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+# Simulated storage failures (`Store::simulate_failure`) for tests; enabled
+# only through dev-dependencies, never in release builds.
+test-hooks = []
+
 [dependencies]
 calcraft-core.workspace = true
 sqlx.workspace = true

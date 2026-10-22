@@ -52,6 +52,10 @@ const MAX_FAILURES: u32 = 5;
 const LOCKOUT_WINDOW: Duration = Duration::from_secs(15 * 60);
 const MAX_TRACKED: usize = 10_000;
 const MAX_CONCURRENT_HASHES: usize = 4;
+/// Requests of one account that may wait for an attempt slot at once.
+const MAX_WAITERS: u32 = 8;
+/// How long a request waits for an attempt slot at most.
+const MAX_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum PasswordError {
@@ -150,7 +154,28 @@ struct Failures {
     count: u32,
     /// Attempts currently being verified.
     in_flight: u32,
+    /// Requests waiting for an attempt slot, see [`Authenticator::reserve`].
+    waiting: u32,
     since: Instant,
+    /// Wakes one waiter when an attempt ends.
+    released: Arc<Notify>,
+}
+
+impl Failures {
+    fn new() -> Self {
+        Self {
+            count: 0,
+            in_flight: 0,
+            waiting: 0,
+            since: Instant::now(),
+            released: Arc::new(Notify::new()),
+        }
+    }
+
+    /// Nothing to remember: the entry can be dropped.
+    fn idle(&self) -> bool {
+        self.count == 0 && self.in_flight == 0 && self.waiting == 0
+    }
 }
 
 struct CacheEntry {
@@ -163,11 +188,11 @@ pub struct Authenticator {
     store: Store,
     cache_key: [u8; 32],
     dummy_hash: String,
-    hashing: Semaphore,
+    /// Bounds concurrent Argon2 runs. Owned permits move into the blocking
+    /// task, so a cancelled request keeps its permit until hashing ends.
+    hashing: Arc<Semaphore>,
     cache: Mutex<HashMap<Username, CacheEntry>>,
     failures: Mutex<HashMap<Username, Failures>>,
-    /// Signalled whenever an attempt ends, see [`Authenticator::reserve`].
-    released: Notify,
     /// Account passwords accepted (`security.password_login`).
     password_login: AtomicBool,
 }
@@ -197,10 +222,9 @@ impl Authenticator {
             store,
             cache_key,
             dummy_hash,
-            hashing: Semaphore::new(MAX_CONCURRENT_HASHES),
+            hashing: Arc::new(Semaphore::new(MAX_CONCURRENT_HASHES)),
             cache: Mutex::new(HashMap::new()),
             failures: Mutex::new(HashMap::new()),
-            released: Notify::new(),
             password_login: AtomicBool::new(true),
         }))
     }
@@ -214,6 +238,16 @@ impl Authenticator {
             return AuthOutcome::Denied;
         };
         let username = &credentials.username;
+        // Valid credentials that need no Argon2 run (an app password, or an
+        // account password verified recently) take no attempt slot, so the
+        // parallel requests of a busy client never queue or get denied.
+        // Anything else takes the counted path below.
+        if !self.is_locked(username)
+            && let Some(user) = self.verify_cheaply(&credentials).await
+        {
+            self.clear_failures(username);
+            return AuthOutcome::Authenticated(user);
+        }
         let Some(attempt) = self.reserve(username).await else {
             return self.locked_out().await;
         };
@@ -238,58 +272,52 @@ impl Authenticator {
 
     /// Reserves a login attempt for `username`. Attempts in progress count
     /// towards the limit together with recorded failures, so concurrent
-    /// requests cannot bypass the lockout. Returns `None` when locked.
+    /// requests cannot bypass the lockout. Returns `None` when locked; the
+    /// caller then answers like a wrong password ([`Self::locked_out`]).
     ///
     /// When only attempts in progress fill the limit, this waits until one
     /// of them ends instead of failing: a client sending more than
     /// `MAX_FAILURES` requests at once with correct credentials (sync
-    /// clients do) must not get 401 for its own parallel requests.
+    /// clients do) must not get 401 for its own parallel requests. Waiting
+    /// is bounded: at most `MAX_WAITERS` requests per account name (known
+    /// or not) wait, each for at most `MAX_WAIT`; beyond that it is `None`.
     pub async fn reserve(&self, username: &Username) -> Option<Attempt<'_>> {
+        let deadline = tokio::time::Instant::now() + MAX_WAIT;
+        let mut waiter: Option<Waiter<'_>> = None;
         loop {
-            // Registered before checking, so a release in between is not missed.
-            let mut released = std::pin::pin!(self.released.notified());
-            released.as_mut().enable();
-            match self.try_reserve(username) {
-                Reservation::Reserved => {
-                    return Some(Attempt {
-                        auth: self,
-                        username: username.clone(),
-                    });
+            let released = {
+                let Ok(mut failures) = self.failures.lock() else {
+                    return None;
+                };
+                match try_reserve(&mut failures, username, waiter.is_some()) {
+                    Reservation::Reserved => {
+                        drop(failures);
+                        // Leave the queue only after the slot is taken.
+                        drop(waiter);
+                        return Some(Attempt {
+                            auth: self,
+                            username: username.clone(),
+                        });
+                    }
+                    Reservation::Locked => return None,
+                    Reservation::Busy(released) => released,
                 }
-                Reservation::Locked => return None,
-                Reservation::Busy => released.await,
+            };
+            if waiter.is_none() {
+                waiter = Some(Waiter {
+                    auth: self,
+                    username: username.clone(),
+                });
+            }
+            // `notify_one` keeps a wake-up for the next waiter if nobody
+            // waits yet, so a release right here is not missed.
+            if tokio::time::timeout_at(deadline, released.notified())
+                .await
+                .is_err()
+            {
+                return None;
             }
         }
-    }
-
-    fn try_reserve(&self, username: &Username) -> Reservation {
-        let Ok(mut failures) = self.failures.lock() else {
-            return Reservation::Locked;
-        };
-        if failures.len() >= MAX_TRACKED {
-            failures.retain(|_, f| f.in_flight > 0 || f.since.elapsed() < LOCKOUT_WINDOW);
-            if failures.len() >= MAX_TRACKED {
-                // Degrade safely under extreme load.
-                return Reservation::Locked;
-            }
-        }
-        let entry = failures.entry(username.clone()).or_insert(Failures {
-            count: 0,
-            in_flight: 0,
-            since: Instant::now(),
-        });
-        if entry.since.elapsed() >= LOCKOUT_WINDOW && entry.in_flight == 0 {
-            entry.count = 0;
-            entry.since = Instant::now();
-        }
-        if entry.count >= MAX_FAILURES {
-            return Reservation::Locked;
-        }
-        if entry.count + entry.in_flight >= MAX_FAILURES {
-            return Reservation::Busy;
-        }
-        entry.in_flight += 1;
-        Reservation::Reserved
     }
 
     /// Response for a locked account. It does the same work as a wrong
@@ -297,11 +325,84 @@ impl Authenticator {
     /// (and with it, whether the account exists).
     pub async fn locked_out(&self) -> AuthOutcome {
         let hash = self.dummy_hash.clone();
-        if let Ok(_permit) = self.hashing.acquire().await {
-            let _ = tokio::task::spawn_blocking(move || verify_password("locked", &hash)).await;
+        if let Ok(permit) = self.hashing.clone().acquire_owned().await {
+            let _ = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                verify_password("locked", &hash)
+            })
+            .await;
         }
         tracing::debug!("login attempt for a locked account");
         AuthOutcome::LockedOut
+    }
+
+    /// Whether `username` has too many recorded failures (attempts in
+    /// progress do not count here).
+    fn is_locked(&self, username: &Username) -> bool {
+        let Ok(failures) = self.failures.lock() else {
+            return true;
+        };
+        failures.get(username).is_some_and(|entry| {
+            entry.count >= MAX_FAILURES && entry.since.elapsed() < LOCKOUT_WINDOW
+        })
+    }
+
+    /// The user, if the credentials are valid and can be checked without
+    /// Argon2: an app password, or an account password in the cache.
+    /// `None` also for storage errors; the counted path reports those.
+    async fn verify_cheaply(&self, credentials: &BasicCredentials) -> Option<User> {
+        let username = &credentials.username;
+        if let Some((id, secret)) = parse_app_password(&credentials.password) {
+            return self.app_password_user(id, secret, username).await.ok()?;
+        }
+        if !self.password_login() {
+            return None;
+        }
+        let record = self.store.user_credentials(username).await.ok()??;
+        let digest = self.cache_digest(&credentials.password, &record.password_hash);
+        let user = record.user;
+        (self.cache_hit(username, &digest) && !user.disabled && !user.totp_enabled).then_some(user)
+    }
+
+    /// Cache key of a verified password, bound to the stored hash so that it
+    /// becomes invalid as soon as the password changes.
+    fn cache_digest(&self, password: &str, password_hash: &str) -> blake3::Hash {
+        blake3::Hasher::new_keyed(&self.cache_key)
+            .update(password.as_bytes())
+            .update(&[0xff])
+            .update(password_hash.as_bytes())
+            .finalize()
+    }
+
+    /// The enabled owner of a valid app password sent with `username`, and
+    /// records its use. `Err` on storage errors (logged).
+    async fn app_password_user(
+        &self,
+        id: i64,
+        secret: &str,
+        username: &Username,
+    ) -> Result<Option<User>, ()> {
+        let stored = self.store.app_password_secret(id).await.map_err(|err| {
+            tracing::error!(%err, "failed to load app password");
+        })?;
+        let Some((user_id, hash)) = stored else {
+            return Ok(None);
+        };
+        let user = self.store.user_by_id(user_id).await.map_err(|err| {
+            tracing::error!(%err, "failed to load user");
+        })?;
+        // The app password must belong to the user name it is sent with.
+        let user = user.filter(|user| {
+            hashes_equal(&hash_secret(secret), &hash)
+                && &user.username == username
+                && !user.disabled
+        });
+        if user.is_some()
+            && let Err(err) = self.store.touch_app_password(id, now()).await
+        {
+            tracing::warn!(%err, "failed to record app password use");
+        }
+        Ok(user)
     }
 
     /// Verifies an app password (`ccap_<id>_<secret>`) of the reserved user.
@@ -312,39 +413,13 @@ impl Authenticator {
         secret: &str,
     ) -> AuthOutcome {
         let username = &attempt.username;
-        let stored = match self.store.app_password_secret(id).await {
-            Ok(stored) => stored,
-            Err(err) => {
-                tracing::error!(%err, "failed to load app password");
-                return AuthOutcome::Error;
-            }
-        };
-        let user = match &stored {
-            Some((user_id, _)) => match self.store.user_by_id(*user_id).await {
-                Ok(user) => user,
-                Err(err) => {
-                    tracing::error!(%err, "failed to load user");
-                    return AuthOutcome::Error;
-                }
-            },
-            None => None,
-        };
-        let valid = match (&stored, &user) {
-            (Some((_, hash)), Some(user)) => {
-                // The app password must belong to the user name it is sent with.
-                hashes_equal(&hash_secret(secret), hash) && &user.username == username
-            }
-            _ => false,
-        };
-        match user {
-            Some(user) if valid && !user.disabled => {
+        match self.app_password_user(id, secret, username).await {
+            Err(()) => AuthOutcome::Error,
+            Ok(Some(user)) => {
                 self.clear_failures(username);
-                if let Err(err) = self.store.touch_app_password(id, now()).await {
-                    tracing::warn!(%err, "failed to record app password use");
-                }
                 AuthOutcome::Authenticated(user)
             }
-            _ => {
+            Ok(None) => {
                 // Count only for existing accounts (see `check_first_factor_reserved`).
                 if matches!(self.store.user_credentials(username).await, Ok(Some(_))) {
                     self.record_failure(username.clone());
@@ -374,13 +449,9 @@ impl Authenticator {
 
         // Binding the cache entry to the stored hash invalidates it as soon
         // as the password changes.
-        let digest = record.as_ref().map(|record| {
-            blake3::Hasher::new_keyed(&self.cache_key)
-                .update(password.as_bytes())
-                .update(&[0xff])
-                .update(record.password_hash.as_bytes())
-                .finalize()
-        });
+        let digest = record
+            .as_ref()
+            .map(|record| self.cache_digest(password, &record.password_hash));
         if let (Some(record), Some(digest)) = (&record, &digest)
             && self.cache_hit(&username, digest)
         {
@@ -399,18 +470,22 @@ impl Authenticator {
             Some(record) if usable => record.password_hash.clone(),
             _ => self.dummy_hash.clone(),
         };
-        let Ok(_permit) = self.hashing.acquire().await else {
+        let Ok(permit) = self.hashing.clone().acquire_owned().await else {
             return AuthOutcome::Error;
         };
         let password = password.to_owned();
-        let valid =
-            match tokio::task::spawn_blocking(move || verify_password(&password, &hash)).await {
-                Ok(valid) => valid && usable,
-                Err(err) => {
-                    tracing::error!(%err, "password verification task failed");
-                    return AuthOutcome::Error;
-                }
-            };
+        let valid = match tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            verify_password(&password, &hash)
+        })
+        .await
+        {
+            Ok(valid) => valid && usable,
+            Err(err) => {
+                tracing::error!(%err, "password verification task failed");
+                return AuthOutcome::Error;
+            }
+        };
 
         match record {
             Some(record) if valid && !record.user.disabled => {
@@ -464,11 +539,7 @@ impl Authenticator {
         let Ok(mut failures) = self.failures.lock() else {
             return;
         };
-        let entry = failures.entry(username).or_insert(Failures {
-            count: 0,
-            in_flight: 0,
-            since: Instant::now(),
-        });
+        let entry = failures.entry(username).or_insert_with(Failures::new);
         if entry.since.elapsed() >= LOCKOUT_WINDOW {
             entry.count = 0;
             entry.since = Instant::now();
@@ -476,6 +547,8 @@ impl Authenticator {
         entry.count += 1;
         if entry.count == MAX_FAILURES {
             tracing::warn!("account locked after repeated failed logins");
+            // Waiters are denied now and need not wait any longer.
+            entry.released.notify_waiters();
         }
     }
 
@@ -485,7 +558,7 @@ impl Authenticator {
             && let Some(entry) = failures.get_mut(username)
         {
             entry.count = 0;
-            if entry.in_flight == 0 {
+            if entry.idle() {
                 failures.remove(username);
             }
         }
@@ -496,21 +569,102 @@ impl Authenticator {
             && let Some(entry) = failures.get_mut(username)
         {
             entry.in_flight = entry.in_flight.saturating_sub(1);
-            if entry.count == 0 && entry.in_flight == 0 {
+            // One slot is free: wake one waiter (a waiter that is dropped
+            // after being woken passes the wake-up on).
+            entry.released.notify_one();
+            if entry.idle() {
                 failures.remove(username);
             }
         }
-        self.released.notify_waiters();
     }
 }
 
-/// Result of [`Authenticator::try_reserve`].
+#[cfg(test)]
+impl Authenticator {
+    /// Takes a slot without waiting, for tests.
+    fn try_reserve_now(&self, username: &Username) -> Attempt<'_> {
+        let mut failures = self.failures.lock().unwrap();
+        assert!(matches!(
+            try_reserve(&mut failures, username, false),
+            Reservation::Reserved
+        ));
+        Attempt {
+            auth: self,
+            username: username.clone(),
+        }
+    }
+
+    fn waiting(&self, username: &Username) -> u32 {
+        let failures = self.failures.lock().unwrap();
+        failures.get(username).map_or(0, |entry| entry.waiting)
+    }
+}
+
+/// Result of [`try_reserve`].
 enum Reservation {
     Reserved,
-    /// Too many recorded failures.
+    /// Too many recorded failures, waiters or tracked names.
     Locked,
-    /// The limit is filled by attempts still in progress.
-    Busy,
+    /// The limit is filled by attempts still in progress: wait for this.
+    Busy(Arc<Notify>),
+}
+
+/// Takes an attempt slot if possible. `queued`: the caller already counts
+/// as a waiter of this account name.
+fn try_reserve(
+    failures: &mut HashMap<Username, Failures>,
+    username: &Username,
+    queued: bool,
+) -> Reservation {
+    if failures.len() >= MAX_TRACKED {
+        failures
+            .retain(|_, f| f.in_flight > 0 || f.waiting > 0 || f.since.elapsed() < LOCKOUT_WINDOW);
+        if failures.len() >= MAX_TRACKED && !failures.contains_key(username) {
+            // Degrade safely under extreme load.
+            return Reservation::Locked;
+        }
+    }
+    let entry = failures
+        .entry(username.clone())
+        .or_insert_with(Failures::new);
+    if entry.since.elapsed() >= LOCKOUT_WINDOW && entry.in_flight == 0 {
+        entry.count = 0;
+        entry.since = Instant::now();
+    }
+    if entry.count >= MAX_FAILURES {
+        return Reservation::Locked;
+    }
+    if entry.count + entry.in_flight >= MAX_FAILURES {
+        if !queued {
+            if entry.waiting >= MAX_WAITERS {
+                return Reservation::Locked;
+            }
+            entry.waiting += 1;
+        }
+        return Reservation::Busy(entry.released.clone());
+    }
+    entry.in_flight += 1;
+    Reservation::Reserved
+}
+
+/// A request waiting in [`Authenticator::reserve`]; leaves the queue when
+/// dropped, also when the request is cancelled.
+struct Waiter<'a> {
+    auth: &'a Authenticator,
+    username: Username,
+}
+
+impl Drop for Waiter<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut failures) = self.auth.failures.lock()
+            && let Some(entry) = failures.get_mut(&self.username)
+        {
+            entry.waiting = entry.waiting.saturating_sub(1);
+            if entry.idle() {
+                failures.remove(&self.username);
+            }
+        }
+    }
 }
 
 /// A reserved login attempt; released when dropped.
@@ -607,21 +761,106 @@ mod tests {
         }
     }
 
+    /// Runs `n` authentications of `header` at once.
+    async fn parallel(auth: &Arc<Authenticator>, header: &str, n: u32) -> Vec<AuthOutcome> {
+        let handles: Vec<_> = (0..n)
+            .map(|_| {
+                let (auth, header) = (auth.clone(), header.to_owned());
+                tokio::spawn(async move { auth.authenticate(Some(header.as_bytes())).await })
+            })
+            .collect();
+        let mut outcomes = Vec::new();
+        for handle in handles {
+            outcomes.push(handle.await.unwrap());
+        }
+        outcomes
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn many_parallel_requests_with_valid_credentials_are_not_locked_out() {
         let auth = setup().await;
         let header = basic("alice", "correct horse battery");
-        let handles: Vec<_> = (0..4 * MAX_FAILURES)
-            .map(|_| {
-                let (auth, header) = (auth.clone(), header.clone());
+        // Not yet cached: more than the attempt limit, some of them wait.
+        for outcome in parallel(&auth, &header, MAX_FAILURES + 2).await {
+            assert!(
+                matches!(outcome, AuthOutcome::Authenticated(_)),
+                "{outcome:?}"
+            );
+        }
+        // Cached: verified without taking an attempt slot.
+        for outcome in parallel(&auth, &header, 8 * MAX_FAILURES).await {
+            assert!(
+                matches!(outcome, AuthOutcome::Authenticated(_)),
+                "{outcome:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn waiting_for_an_attempt_slot_is_capped_and_bounded() {
+        let auth = setup().await;
+        // Known and unknown names are limited alike.
+        for name in ["alice", "nobody"] {
+            let username: Username = name.parse().unwrap();
+            let held: Vec<_> = (0..MAX_FAILURES)
+                .map(|_| auth.try_reserve_now(&username))
+                .collect();
+            let waiters: Vec<_> = (0..MAX_WAITERS)
+                .map(|_| {
+                    let (auth, username) = (auth.clone(), username.clone());
+                    tokio::spawn(async move { auth.reserve(&username).await.is_some() })
+                })
+                .collect();
+            while auth.waiting(&username) < MAX_WAITERS {
+                tokio::task::yield_now().await;
+            }
+            // Queue full: denied at once.
+            let start = Instant::now();
+            assert!(auth.reserve(&username).await.is_none());
+            assert!(start.elapsed() < Duration::from_secs(1));
+            if name == "alice" {
+                // One slot freed: the waiters get it one after another.
+                drop(held);
+                for waiter in waiters {
+                    assert!(waiter.await.unwrap());
+                }
+            } else {
+                // No slot freed: every waiter gives up after MAX_WAIT.
+                for waiter in waiters {
+                    assert!(!waiter.await.unwrap());
+                }
+                assert!(start.elapsed() >= MAX_WAIT - Duration::from_millis(100));
+                drop(held);
+            }
+            assert!(auth.reserve(&username).await.is_some());
+            assert_eq!(auth.waiting(&username), 0);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancelled_requests_keep_their_hash_permit_until_hashing_ends() {
+        let auth = setup().await;
+        let tasks: Vec<_> = (0..MAX_CONCURRENT_HASHES)
+            .map(|i| {
+                let auth = auth.clone();
+                let header = basic(&format!("ghost{i}"), "some wrong password");
                 tokio::spawn(async move { auth.authenticate(Some(header.as_bytes())).await })
             })
             .collect();
-        for handle in handles {
-            assert!(matches!(
-                handle.await.unwrap(),
-                AuthOutcome::Authenticated(_)
-            ));
+        while auth.hashing.available_permits() > 0 {
+            tokio::task::yield_now().await;
+        }
+        // Client disconnects or timeouts drop the request futures ...
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks {
+            assert!(task.await.unwrap_err().is_cancelled());
+        }
+        // ... but the Argon2 runs go on and keep the bound.
+        assert_eq!(auth.hashing.available_permits(), 0);
+        while auth.hashing.available_permits() < MAX_CONCURRENT_HASHES {
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 

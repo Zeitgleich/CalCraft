@@ -16,6 +16,7 @@ mod accounts;
 mod backup;
 mod items;
 mod oidc;
+mod test_hooks;
 
 pub use accounts::{AppPassword, MAX_APP_PASSWORDS, RECOVERY_CODES, Session, TotpState};
 pub use backup::{
@@ -24,6 +25,8 @@ pub use backup::{
 };
 pub use items::{Change, Item, ItemMeta, NewItem, Precondition, PutOutcome};
 pub use oidc::{ApprovedBinding, OidcBinding};
+#[cfg(feature = "test-hooks")]
+pub use test_hooks::SimulatedFailure;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -102,19 +105,6 @@ impl From<sqlx::Error> for StoreError {
 
 pub type Result<T, E = StoreError> = std::result::Result<T, E>;
 
-/// Storage failures that the failure tests simulate, see
-/// [`Store::simulate_failure`].
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SimulatedFailure {
-    /// Normal operation.
-    None,
-    /// Writes fail like on a read-only file or file system (`SQLITE_READONLY`).
-    ReadOnly,
-    /// No room for new pages, like a full disk (`SQLITE_FULL`).
-    Full,
-}
-
 /// A user account without credentials.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct User {
@@ -172,6 +162,9 @@ pub struct Store {
     lock: Option<Arc<backup::DbLock>>,
     /// Database file; `None` in memory.
     path: Option<Arc<std::path::PathBuf>>,
+    /// Simulated failures (feature `test-hooks`; empty otherwise).
+    #[allow(dead_code)]
+    simulation: test_hooks::Simulation,
 }
 
 impl Store {
@@ -185,19 +178,17 @@ impl Store {
     pub async fn in_memory() -> Result<Self> {
         let options = SqliteConnectOptions::from_str("sqlite::memory:")?.foreign_keys(true);
         // A single connection, because every connection gets its own in-memory database.
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
+        let simulation = test_hooks::Simulation::default();
+        let pool = simulation
+            .hook(SqlitePoolOptions::new().max_connections(1))
             .connect_with(options)
             .await?;
-        Self::init(pool).await
-    }
-
-    async fn init(pool: SqlitePool) -> Result<Self> {
         MIGRATOR.run(&pool).await?;
         Ok(Self {
             pool,
             lock: None,
             path: None,
+            simulation,
         })
     }
 
@@ -207,28 +198,13 @@ impl Store {
         Ok(())
     }
 
-    /// Makes every connection of the pool behave as if the database file
-    /// were read-only or the disk full, or back to normal. Only for failure
-    /// tests: it sets `PRAGMA query_only` and `PRAGMA max_page_count` on all
-    /// connections, so it must run while no other query holds one.
-    #[doc(hidden)]
-    pub async fn simulate_failure(&self, failure: SimulatedFailure) -> Result<()> {
-        const NO_PAGE_LIMIT: &str = "PRAGMA max_page_count = 1073741823";
-        let pragmas = match failure {
-            SimulatedFailure::None => ["PRAGMA query_only = OFF", NO_PAGE_LIMIT],
-            SimulatedFailure::ReadOnly => ["PRAGMA query_only = ON", NO_PAGE_LIMIT],
-            // SQLite raises a smaller value to the current size: no new pages.
-            SimulatedFailure::Full => ["PRAGMA query_only = OFF", "PRAGMA max_page_count = 1"],
-        };
-        let mut connections = Vec::new();
-        for _ in 0..self.pool.options().get_max_connections() {
-            let mut connection = self.pool.acquire().await?;
-            for pragma in pragmas {
-                sqlx::query(pragma).execute(&mut *connection).await?;
-            }
-            connections.push(connection);
-        }
-        Ok(())
+    /// Makes the database behave as if its file were read-only or the disk
+    /// full, or back to normal, for failure tests (feature `test-hooks`).
+    /// Every connection gets `PRAGMA query_only` / `max_page_count` when it
+    /// is opened or acquired.
+    #[cfg(feature = "test-hooks")]
+    pub fn simulate_failure(&self, failure: SimulatedFailure) {
+        self.simulation.set(failure);
     }
 
     /// Creates a user with a default calendar and address book.

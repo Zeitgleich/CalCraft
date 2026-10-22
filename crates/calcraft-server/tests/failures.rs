@@ -5,8 +5,12 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::{
+    io::Write,
     path::PathBuf,
-    sync::atomic::{AtomicU32, Ordering},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU32, Ordering},
+    },
     time::Duration,
 };
 
@@ -21,9 +25,59 @@ use calcraft_store::{SimulatedFailure, Store};
 use http_body_util::BodyExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tower::ServiceExt;
+use tracing_subscriber::{EnvFilter, util::SubscriberInitExt};
 
 const ALICE: (&str, &str) = ("alice", "alice password 123");
 const CAL: &str = "/dav/calendars/alice/default/";
+/// In every stored object; must never show up in the logs.
+const MARKER: &str = "Zq7FailureMarker";
+
+/// Everything the production JSON subscriber writes, for all tests of this
+/// binary (installed once, globally).
+#[derive(Clone, Default)]
+struct Capture(Arc<Mutex<Vec<u8>>>);
+
+impl Write for Capture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn logs() -> &'static Capture {
+    static LOGS: OnceLock<Capture> = OnceLock::new();
+    LOGS.get_or_init(|| {
+        let capture = Capture::default();
+        let writer = capture.clone();
+        calcraft_server::telemetry::json_subscriber(EnvFilter::new("debug"), move || {
+            writer.clone()
+        })
+        .try_init()
+        .unwrap();
+        capture
+    })
+}
+
+/// Errors are logged, but without contents, credentials or SQL statements.
+fn assert_logs_clean(expected: &str) {
+    let text = String::from_utf8(logs().0.lock().unwrap().clone()).unwrap();
+    assert!(text.contains(expected), "{expected} not logged");
+    for secret in [MARKER, ALICE.1, &basic()["Basic ".len()..]] {
+        assert!(!text.contains(secret), "{secret} logged");
+    }
+    for line in text
+        .lines()
+        .filter(|l| l.contains(r#""level":"ERROR""#) || l.contains(r#""level":"WARN""#))
+    {
+        for sql in ["INSERT", "UPDATE", "SELECT", "DELETE FROM"] {
+            assert!(!line.contains(sql), "SQL in error log: {line}");
+        }
+    }
+}
 
 struct TempDir(PathBuf);
 
@@ -52,6 +106,7 @@ impl Drop for TempDir {
 }
 
 async fn setup(dir: &TempDir) -> (Store, Router) {
+    logs();
     let store = Store::open(&dir.db()).await.unwrap();
     let hash = hash_password(ALICE.1).unwrap();
     store
@@ -112,7 +167,7 @@ fn event(uid: &str, padding: usize) -> String {
         description.push(char::from(b'a' + u8::try_from(i % 26).unwrap()));
     }
     format!(
-        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\nBEGIN:VEVENT\r\nUID:{uid}\r\nDTSTAMP:20261001T000000Z\r\nDTSTART:20261021T100000Z\r\nDTEND:20261021T110000Z\r\nSUMMARY:{uid}\r\n{description}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\nBEGIN:VEVENT\r\nUID:{uid}\r\nDTSTAMP:20261001T000000Z\r\nDTSTART:20261021T100000Z\r\nDTEND:20261021T110000Z\r\nSUMMARY:{uid}\r\nLOCATION:{MARKER}\r\n{description}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
     )
 }
 
@@ -188,10 +243,7 @@ async fn full_disk_answers_507_without_partial_state_and_recovers() {
     let before = send(&app, "GET", &small, &[], "").await.body;
     let (token, _) = sync(&app, "").await;
 
-    store
-        .simulate_failure(SimulatedFailure::Full)
-        .await
-        .unwrap();
+    store.simulate_failure(SimulatedFailure::Full);
     let big = format!("{CAL}big.ics");
     let reply = put(&app, &big, &event("big", 300_000)).await;
     assert_eq!(reply.status, StatusCode::INSUFFICIENT_STORAGE);
@@ -200,17 +252,10 @@ async fn full_disk_answers_507_without_partial_state_and_recovers() {
     let reply = put(&app, &small, &event("small", 300_000)).await;
     assert_eq!(reply.status, StatusCode::INSUFFICIENT_STORAGE);
     assert_no_details(&reply);
-    // Failures on many pooled connections. A connection whose transaction
-    // SQLite rolled back by itself is replaced; the new one gets the
-    // simulated limit again (a really full disk needs no such help).
-    for i in 0..PARALLEL {
-        let uri = format!("{CAL}full-{i}.ics");
-        let reply = put(&app, &uri, &event(&format!("full-{i}"), 300_000)).await;
-        assert_eq!(reply.status, StatusCode::INSUFFICIENT_STORAGE);
-        store
-            .simulate_failure(SimulatedFailure::Full)
-            .await
-            .unwrap();
+    // Failures on many pooled connections at once (each one's transaction
+    // is rolled back by SQLite itself).
+    for status in concurrent_puts(&app, "full", 300_000).await {
+        assert_eq!(status, StatusCode::INSUFFICIENT_STORAGE);
     }
 
     // Reads keep working and show the state before the failed writes.
@@ -224,10 +269,7 @@ async fn full_disk_answers_507_without_partial_state_and_recovers() {
 
     // Space freed: writes work again without a restart, on every pooled
     // connection (SQLite rolled the failed transactions back by itself).
-    store
-        .simulate_failure(SimulatedFailure::None)
-        .await
-        .unwrap();
+    store.simulate_failure(SimulatedFailure::None);
     assert_eq!(
         put(&app, &big, &event("big", 300_000)).await.status,
         StatusCode::CREATED
@@ -237,6 +279,7 @@ async fn full_disk_answers_507_without_partial_state_and_recovers() {
     }
     let (_, changes) = sync(&app, &token).await;
     assert_eq!(changes, 1 + PARALLEL);
+    assert_logs_clean("storage full");
 }
 
 #[cfg(feature = "api")]
@@ -244,10 +287,7 @@ async fn full_disk_answers_507_without_partial_state_and_recovers() {
 async fn full_disk_answers_507_in_the_api() {
     let dir = TempDir::new("full-api");
     let (store, app) = setup(&dir).await;
-    store
-        .simulate_failure(SimulatedFailure::Full)
-        .await
-        .unwrap();
+    store.simulate_failure(SimulatedFailure::Full);
     // A login needs a new session row; with luck it fits into a free page,
     // otherwise it must fail with 507, never 500.
     let request = Request::post("/api/v1/auth/login")
@@ -276,10 +316,7 @@ async fn read_only_database_fails_writes_cleanly_and_recovers() {
     );
     let (token, _) = sync(&app, "").await;
 
-    store
-        .simulate_failure(SimulatedFailure::ReadOnly)
-        .await
-        .unwrap();
+    store.simulate_failure(SimulatedFailure::ReadOnly);
     let rename = r#"<d:propertyupdate xmlns:d="DAV:"><d:set><d:prop><d:displayname>New</d:displayname></d:prop></d:set></d:propertyupdate>"#;
     let writes = [
         put(&app, &format!("{CAL}new.ics"), &event("new", 10)).await,
@@ -313,10 +350,7 @@ async fn read_only_database_fails_writes_cleanly_and_recovers() {
     // The database answers, so the instance stays ready (it can serve reads).
     assert_eq!(status(&app, "/readyz").await, StatusCode::OK);
 
-    store
-        .simulate_failure(SimulatedFailure::None)
-        .await
-        .unwrap();
+    store.simulate_failure(SimulatedFailure::None);
     assert_eq!(
         put(&app, &format!("{CAL}new.ics"), &event("new", 10))
             .await
@@ -331,6 +365,7 @@ async fn read_only_database_fails_writes_cleanly_and_recovers() {
         assert_eq!(status, StatusCode::CREATED);
     }
     assert_eq!(sync(&app, &token).await.1, 2 + PARALLEL);
+    assert_logs_clean("readonly database");
 }
 
 /// File permissions only matter when SQLite opens the files: a running
@@ -460,4 +495,5 @@ async fn aborted_uploads_leave_no_trace() {
     let answer = raw_request(address, &head, full.as_bytes(), false).await;
     assert!(answer.starts_with("HTTP/1.1 201"), "{answer}");
     assert_eq!(sync(&app, &token).await.1, 1);
+    assert_logs_clean("aborted.ics");
 }
