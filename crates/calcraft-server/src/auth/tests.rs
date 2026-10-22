@@ -217,11 +217,7 @@ impl Authenticator {
             try_reserve(&mut failures, username, false),
             Reservation::Reserved
         ));
-        Attempt {
-            auth: self,
-            username: username.clone(),
-            client: None,
-        }
+        Attempt::new(self, username, None)
     }
 
     fn waiting(&self, username: &Username) -> u32 {
@@ -377,4 +373,128 @@ async fn blocked_clients_are_refused_before_waiting_and_waiters_still_count() {
     assert!(start.elapsed() < Duration::from_secs(1));
     assert_eq!(auth.waiting(&username), 0);
     drop(held);
+}
+
+/// Starts a verification of `header` and cancels it while Argon2 runs, like
+/// a client that hangs up or a request timeout.
+async fn cancel_while_hashing(auth: &Arc<Authenticator>, header: &str, client: Option<ClientKey>) {
+    while auth.hashing.available_permits() < MAX_CONCURRENT_HASHES {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let task = {
+        let (auth, header) = (auth.clone(), header.to_owned());
+        tokio::spawn(async move { auth.authenticate(Some(header.as_bytes()), client).await })
+    };
+    while auth.hashing.available_permits() == MAX_CONCURRENT_HASHES {
+        tokio::task::yield_now().await;
+    }
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_verifications_still_count_as_failures() {
+    let auth = setup().await;
+    let wrong = basic("alice", "wrong password!!");
+    for _ in 0..MAX_FAILURES {
+        cancel_while_hashing(&auth, &wrong, None).await;
+    }
+    // Hanging up early did not get around the account lockout.
+    let good = basic("alice", "correct horse battery");
+    assert!(matches!(
+        auth.authenticate_test(Some(good.as_bytes())).await,
+        AuthOutcome::LockedOut
+    ));
+
+    // Nor around the client block, also for unknown names (which never
+    // get an account entry).
+    let auth = setup().await;
+    auth.set_client_failure_limit(3, 100);
+    for name in ["ghost1", "ghost2", "ghost3"] {
+        cancel_while_hashing(&auth, &basic(name, "whatever password"), client(5)).await;
+    }
+    assert!(auth.client_blocked(client(5)));
+    assert_eq!(auth.failures.lock().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn requests_for_a_locked_account_count_for_the_client() {
+    let auth = setup().await;
+    auth.set_client_failure_limit(2, 100);
+    let alice: Username = "alice".parse().unwrap();
+    for _ in 0..MAX_FAILURES {
+        auth.record_failure(alice.clone());
+    }
+    assert!(matches!(
+        auth.reserve(&alice, client(8)).await,
+        Err(Refusal::Account)
+    ));
+    // The second one blocks the client: from now on no dummy hash is spent.
+    assert!(matches!(
+        auth.reserve(&alice, client(8)).await,
+        Err(Refusal::Client)
+    ));
+    assert!(auth.client_blocked(client(8)));
+}
+
+#[tokio::test]
+async fn names_only_in_flight_leave_no_entries() {
+    let auth = setup().await;
+    for i in 0..MAX_TRACKED + 10 {
+        let name: Username = format!("ghost{i}").parse().unwrap();
+        let attempt = auth.reserve(&name, None).await.unwrap();
+        if i % 2 == 0 {
+            attempt.fail();
+        }
+    }
+    assert_eq!(auth.failures.lock().unwrap().len(), 0);
+    assert!(auth.reserve(&"fresh".parse().unwrap(), None).await.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_freed_slot_wakes_a_waiter() {
+    let auth = setup().await;
+    let username: Username = "alice".parse().unwrap();
+    let mut held: Vec<_> = (0..MAX_FAILURES)
+        .map(|_| auth.try_reserve_now(&username))
+        .collect();
+    let (acquired, mut slots) = tokio::sync::mpsc::channel(8);
+    let done = Arc::new(Semaphore::new(0));
+    for _ in 0..3 {
+        let (auth, username, acquired, done) = (
+            auth.clone(),
+            username.clone(),
+            acquired.clone(),
+            done.clone(),
+        );
+        tokio::spawn(async move {
+            let attempt = auth.reserve(&username, None).await.unwrap();
+            acquired.send(()).await.unwrap();
+            let _ = done.acquire().await;
+            drop(attempt);
+        });
+    }
+    while auth.waiting(&username) < 3 {
+        tokio::task::yield_now().await;
+    }
+    // Two slots freed at once: two waiters get one each, the third waits.
+    held.truncate(MAX_FAILURES as usize - 2);
+    for _ in 0..2 {
+        tokio::time::timeout(Duration::from_secs(1), slots.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), slots.recv())
+            .await
+            .is_err()
+    );
+    assert_eq!(auth.waiting(&username), 1);
+    done.add_permits(3);
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(1), slots.recv())
+        .await
+        .unwrap()
+        .unwrap();
 }

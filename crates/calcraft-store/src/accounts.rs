@@ -251,12 +251,21 @@ impl Store {
     }
 
     /// Enables 2FA and replaces the recovery codes.
-    pub async fn enable_totp(&self, user_id: i64, recovery_hashes: &[String]) -> Result<()> {
+    /// Enables 2FA with new recovery codes. Returns `false` (and changes
+    /// nothing) if it is already enabled or no secret was set up.
+    pub async fn enable_totp(&self, user_id: i64, recovery_hashes: &[String]) -> Result<bool> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query("UPDATE users SET totp_enabled = 1 WHERE id = ? AND totp_secret IS NOT NULL")
-            .bind(user_id)
-            .execute(&mut *tx)
-            .await?;
+        let changed = sqlx::query(
+            "UPDATE users SET totp_enabled = 1 \
+             WHERE id = ? AND totp_secret IS NOT NULL AND totp_enabled = 0",
+        )
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if changed == 0 {
+            return Ok(false);
+        }
         sqlx::query("DELETE FROM recovery_codes WHERE user_id = ?")
             .bind(user_id)
             .execute(&mut *tx)
@@ -269,7 +278,7 @@ impl Store {
                 .await?;
         }
         tx.commit().await?;
-        Ok(())
+        Ok(true)
     }
 
     pub async fn disable_totp(&self, user_id: i64) -> Result<()> {

@@ -295,15 +295,21 @@ impl Authenticator {
             return self.check_app_password(&attempt, id, secret).await;
         }
         if !self.password_login() {
+            attempt.settle();
             return AuthOutcome::Denied;
         }
         match self
             .check_first_factor_reserved(&attempt, &credentials.password)
             .await
         {
-            AuthOutcome::Authenticated(user) if user.totp_enabled => AuthOutcome::Denied,
+            // The right password, but DAV clients need an app password with 2FA.
+            AuthOutcome::Authenticated(user) if user.totp_enabled => {
+                attempt.settle();
+                AuthOutcome::Denied
+            }
             AuthOutcome::Authenticated(user) => {
                 self.clear_failures(username);
+                attempt.settle();
                 AuthOutcome::Authenticated(user)
             }
             outcome => outcome,
@@ -343,13 +349,22 @@ impl Authenticator {
                         drop(failures);
                         // Leave the queue only after the slot is taken.
                         drop(waiter);
-                        return Ok(Attempt {
-                            auth: self,
-                            username: username.clone(),
-                            client,
+                        return Ok(Attempt::new(self, username, client));
+                    }
+                    Reservation::Locked => {
+                        drop(failures);
+                        // Requests for a locked account are guesses, too. Once
+                        // the client is blocked, it gets the client refusal
+                        // (no dummy hash), so it cannot keep the hash permits
+                        // busy.
+                        self.record_client_failure(client);
+                        return Err(if self.client_blocked(client) {
+                            Refusal::Client
+                        } else {
+                            Refusal::Account
                         });
                     }
-                    Reservation::Locked => return Err(Refusal::Account),
+                    Reservation::Full => return Err(Refusal::Account),
                     Reservation::Busy(released) => released,
                 }
             };
@@ -475,17 +490,21 @@ impl Authenticator {
     ) -> AuthOutcome {
         let username = &attempt.username;
         match self.app_password_user(id, secret, username).await {
-            Err(()) => AuthOutcome::Error,
+            Err(()) => {
+                attempt.settle();
+                AuthOutcome::Error
+            }
             Ok(Some(user)) => {
                 self.clear_failures(username);
+                attempt.settle();
                 AuthOutcome::Authenticated(user)
             }
             Ok(None) => {
-                self.record_client_failure(attempt.client);
                 // Count only for existing accounts (see `check_first_factor_reserved`).
                 if matches!(self.store.user_credentials(username).await, Ok(Some(_))) {
-                    self.record_failure(username.clone());
+                    attempt.mark_known();
                 }
+                attempt.fail();
                 AuthOutcome::Denied
             }
         }
@@ -494,7 +513,9 @@ impl Authenticator {
     /// Verifies the account password of a reserved attempt, with cache,
     /// without resetting the failure counter: with 2FA the counter must also
     /// cover wrong second factors, so callers reset it only after full
-    /// success.
+    /// success. A wrong password settles the attempt as a failure; after
+    /// success the caller settles it ([`Attempt::settle`] or
+    /// [`Attempt::fail`]).
     pub async fn check_first_factor_reserved(
         &self,
         attempt: &Attempt<'_>,
@@ -505,9 +526,14 @@ impl Authenticator {
             Ok(record) => record,
             Err(err) => {
                 tracing::error!(%err, "failed to load user");
+                attempt.settle();
                 return AuthOutcome::Error;
             }
         };
+        if record.is_some() {
+            // From here on, a cancelled request counts for the account too.
+            attempt.mark_known();
+        }
 
         // Binding the cache entry to the stored hash invalidates it as soon
         // as the password changes.
@@ -518,6 +544,7 @@ impl Authenticator {
             && self.cache_hit(&username, digest)
         {
             if record.user.disabled {
+                attempt.settle();
                 return AuthOutcome::Denied;
             }
             return AuthOutcome::Authenticated(record.user.clone());
@@ -533,6 +560,7 @@ impl Authenticator {
             _ => self.dummy_hash.clone(),
         };
         let Ok(permit) = self.hashing.clone().acquire_owned().await else {
+            attempt.settle();
             return AuthOutcome::Error;
         };
         let password = password.to_owned();
@@ -545,6 +573,7 @@ impl Authenticator {
             Ok(valid) => valid && usable,
             Err(err) => {
                 tracing::error!(%err, "password verification task failed");
+                attempt.settle();
                 return AuthOutcome::Error;
             }
         };
@@ -559,13 +588,8 @@ impl Authenticator {
             // Failures are only counted for existing accounts; entries of
             // unknown names disappear when their attempt ends, so made-up
             // names cannot fill the table.
-            Some(_) => {
-                self.record_client_failure(attempt.client);
-                self.record_failure(username);
-                AuthOutcome::Denied
-            }
-            None => {
-                self.record_client_failure(attempt.client);
+            Some(_) | None => {
+                attempt.fail();
                 AuthOutcome::Denied
             }
         }
@@ -669,8 +693,10 @@ impl Authenticator {
 /// Result of [`try_reserve`].
 enum Reservation {
     Reserved,
-    /// Too many recorded failures, waiters or tracked names.
+    /// Too many recorded failures: the account is locked.
     Locked,
+    /// Too many waiters or tracked names.
+    Full,
     /// The limit is filled by attempts still in progress: wait for this.
     Busy(Arc<Notify>),
 }
@@ -687,7 +713,7 @@ fn try_reserve(
             .retain(|_, f| f.in_flight > 0 || f.waiting > 0 || f.since.elapsed() < LOCKOUT_WINDOW);
         if failures.len() >= MAX_TRACKED && !failures.contains_key(username) {
             // Degrade safely under extreme load.
-            return Reservation::Locked;
+            return Reservation::Full;
         }
     }
     let entry = failures
@@ -703,13 +729,19 @@ fn try_reserve(
     if entry.count + entry.in_flight >= MAX_FAILURES {
         if !queued {
             if entry.waiting >= MAX_WAITERS {
-                return Reservation::Locked;
+                return Reservation::Full;
             }
             entry.waiting += 1;
         }
         return Reservation::Busy(entry.released.clone());
     }
     entry.in_flight += 1;
+    // Several slots may have been freed before the waiters ran, but
+    // `notify_one` keeps only one wake-up: pass it on while slots are left.
+    let others_waiting = entry.waiting.saturating_sub(u32::from(queued));
+    if others_waiting > 0 && entry.count + entry.in_flight < MAX_FAILURES {
+        entry.released.notify_one();
+    }
     Reservation::Reserved
 }
 
@@ -743,13 +775,32 @@ pub enum Refusal {
 }
 
 /// A reserved login attempt; released when dropped.
+///
+/// Its outcome is recorded even if the request is cancelled (client hangs
+/// up, request timeout) while the password is being verified: an attempt
+/// dropped without [`Attempt::settle`] or [`Attempt::fail`] counts as a
+/// failure, for the client and, once known to exist, for the account.
+/// Otherwise hanging up early would allow guessing without a lockout.
 pub struct Attempt<'a> {
     auth: &'a Authenticator,
     username: Username,
     client: Option<ClientKey>,
+    settled: AtomicBool,
+    /// The account exists (failures are only counted for existing accounts).
+    known: AtomicBool,
 }
 
-impl Attempt<'_> {
+impl<'a> Attempt<'a> {
+    fn new(auth: &'a Authenticator, username: &Username, client: Option<ClientKey>) -> Self {
+        Self {
+            auth,
+            username: username.clone(),
+            client,
+            settled: AtomicBool::new(false),
+            known: AtomicBool::new(false),
+        }
+    }
+
     pub fn username(&self) -> &Username {
         &self.username
     }
@@ -757,10 +808,32 @@ impl Attempt<'_> {
     pub fn client(&self) -> Option<ClientKey> {
         self.client
     }
+
+    /// The account exists: failures from now on count for it, too.
+    pub fn mark_known(&self) {
+        self.known.store(true, Ordering::Release);
+    }
+
+    /// Ends the attempt without a failure (success, or not a guess).
+    pub fn settle(&self) {
+        self.settled.store(true, Ordering::Release);
+    }
+
+    /// Records a failed guess (client, and account if known) and ends the attempt.
+    pub fn fail(&self) {
+        if !self.settled.swap(true, Ordering::AcqRel) {
+            self.auth.record_client_failure(self.client);
+            if self.known.load(Ordering::Acquire) {
+                self.auth.record_failure(self.username.clone());
+            }
+        }
+    }
 }
 
 impl Drop for Attempt<'_> {
     fn drop(&mut self) {
+        // Recorded before the slot is freed, so no other attempt slips in.
+        self.fail();
         self.auth.release(&self.username);
     }
 }

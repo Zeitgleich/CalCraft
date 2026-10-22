@@ -692,3 +692,49 @@ async fn openapi_is_served() {
     assert_eq!(spec.status, StatusCode::OK);
     assert_eq!(spec.json["openapi"], "3.1.0");
 }
+
+#[tokio::test]
+async fn totp_enable_guesses_use_the_account_lockout() {
+    let app = app().await;
+    let cookie = cookie_of(&login(&app, ALICE, None).await);
+    let setup = call(
+        &app,
+        Method::POST,
+        "/api/v1/me/totp/setup",
+        Some(&cookie),
+        None,
+    )
+    .await;
+    let secret = base32_decode(setup.json["secret"].as_str().unwrap()).unwrap();
+    let valid = totp_code(&secret, now() / TOTP_STEP);
+    // Guaranteed wrong: differs from every code of the accepted window.
+    let accepted: Vec<String> = (-1..=1)
+        .map(|offset| totp_code(&secret, now() / TOTP_STEP + offset))
+        .collect();
+    let wrong = (0..1_000_000)
+        .map(|n| format!("{n:06}"))
+        .find(|code| !accepted.contains(code))
+        .unwrap();
+    for _ in 0..5 {
+        let reply = call(
+            &app,
+            Method::POST,
+            "/api/v1/me/totp/enable",
+            Some(&cookie),
+            Some(json!({"code": wrong})),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+    }
+    // Locked: even the right code is refused now, like a wrong one.
+    let reply = call(
+        &app,
+        Method::POST,
+        "/api/v1/me/totp/enable",
+        Some(&cookie),
+        Some(json!({"code": valid})),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(reply.json["error"], "invalid_credentials");
+}
