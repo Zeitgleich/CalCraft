@@ -5,8 +5,11 @@
 //! files (see `build.rs`) and serves them:
 //!
 //! - `GET /` returns the app shell (`Cache-Control: no-cache`),
-//! - `GET /assets/<name>-<hash>.<ext>` returns the content-hashed assets,
-//!   cached for a year as immutable.
+//! - `GET /assets/<name>-<hash>.<ext>` returns the content-hashed assets
+//!   (application, stylesheet, icons, web app manifest), cached for a year
+//!   as immutable,
+//! - `GET /favicon.ico` returns the icon for clients that ask for it at
+//!   the conventional path (cached for a day).
 //!
 //! If the assets were not built, a static placeholder page is served
 //! instead. Neither page uses inline scripts or styles, so both work under
@@ -28,6 +31,8 @@ pub const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 /// Cache policy for the app shell: always revalidate, so that a new
 /// release is picked up immediately.
 pub const NO_CACHE: &str = "no-cache";
+/// Cache policy for `/favicon.ico` (fixed name, so not immutable).
+pub const ONE_DAY: &str = "public, max-age=86400";
 
 /// A file embedded into the binary.
 #[derive(Debug)]
@@ -60,21 +65,35 @@ pub fn assets() -> &'static [Asset] {
 /// itself is served through [`index`] so that the server can combine it
 /// with DAV handling on `/`.
 pub fn router() -> Router {
-    Router::new().route("/assets/{name}", get(asset))
+    Router::new()
+        .route("/assets/{name}", get(asset))
+        .route("/favicon.ico", get(favicon))
 }
 
-async fn asset(Path(name): Path<String>) -> Response {
+fn serve(name: &str, cache_control: &'static str) -> Response {
     match assets().iter().find(|asset| asset.name == name) {
         Some(asset) => (
             [
                 (CONTENT_TYPE, HeaderValue::from_static(asset.content_type)),
-                (CACHE_CONTROL, HeaderValue::from_static(IMMUTABLE)),
+                (CACHE_CONTROL, HeaderValue::from_static(cache_control)),
             ],
             asset.body,
         )
             .into_response(),
         None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
+}
+
+async fn asset(Path(name): Path<String>) -> Response {
+    serve(&name, IMMUTABLE)
+}
+
+async fn favicon() -> Response {
+    #[cfg(calcraft_ui_assets)]
+    let name = generated::FAVICON_ICO;
+    #[cfg(not(calcraft_ui_assets))]
+    let name = "";
+    serve(name, ONE_DAY)
 }
 
 /// The page served on `GET /`.
@@ -100,7 +119,14 @@ fn page() -> String {
          <head>\n\
          <meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <meta name=\"color-scheme\" content=\"light dark\">\n\
+         <meta name=\"theme-color\" content=\"#ffffff\" media=\"(prefers-color-scheme: light)\">\n\
+         <meta name=\"theme-color\" content=\"#1e293b\" media=\"(prefers-color-scheme: dark)\">\n\
          <title>{name}</title>\n\
+         <link rel=\"icon\" href=\"/assets/{ico}\" sizes=\"32x32\">\n\
+         <link rel=\"icon\" href=\"/assets/{svg}\" type=\"image/svg+xml\">\n\
+         <link rel=\"apple-touch-icon\" href=\"/assets/{touch}\">\n\
+         <link rel=\"manifest\" href=\"/assets/{manifest}\">\n\
          <link rel=\"stylesheet\" href=\"/assets/{css}\">\n\
          <script type=\"module\" src=\"/assets/{script}\"></script>\n\
          </head>\n\
@@ -116,6 +142,10 @@ fn page() -> String {
         source = calcraft_core::SOURCE_URL,
         css = generated::STYLESHEET,
         script = generated::SCRIPT,
+        ico = generated::FAVICON_ICO,
+        svg = generated::FAVICON_SVG,
+        touch = generated::APPLE_TOUCH_ICON,
+        manifest = generated::MANIFEST,
     )
 }
 
@@ -161,7 +191,7 @@ mod tests {
             assert!(assets.is_empty());
             return;
         }
-        for ext in ["js", "wasm", "css"] {
+        for ext in ["js", "wasm", "css", "svg", "ico", "png", "webmanifest"] {
             assert!(assets.iter().any(|a| a.name.ends_with(ext)), "{ext}");
         }
         for asset in assets {

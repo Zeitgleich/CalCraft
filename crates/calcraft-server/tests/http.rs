@@ -204,6 +204,10 @@ async fn web_ui_shell_and_assets() {
             Some("js") => "text/javascript; charset=utf-8",
             Some("wasm") => "application/wasm",
             Some("css") => "text/css; charset=utf-8",
+            Some("svg") => "image/svg+xml",
+            Some("ico") => "image/x-icon",
+            Some("png") => "image/png",
+            Some("webmanifest") => "application/manifest+json",
             other => panic!("unexpected asset type {other:?}"),
         };
         assert_eq!(headers[header::CONTENT_TYPE], expected, "{name}");
@@ -214,14 +218,56 @@ async fn web_ui_shell_and_assets() {
         );
         assert_eq!(headers[header::CONTENT_SECURITY_POLICY], CSP, "{name}");
         assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
-        if name.starts_with("boot-") {
+        if name.starts_with("boot-") || name.starts_with("manifest-") {
             pending.extend(referenced_assets(&body_text(response).await));
         }
         seen.push(name);
     }
-    // Page -> stylesheet and bootstrap; bootstrap -> glue and module.
-    assert_eq!(seen.len(), 4, "{seen:?}");
+    // Page -> stylesheet, icons, manifest and bootstrap; manifest -> app
+    // icons; bootstrap -> glue and module. Nothing is embedded unused.
+    assert_eq!(seen.len(), 10, "{seen:?}");
     assert_eq!(seen.len(), calcraft_web::assets().len());
+}
+
+#[cfg(feature = "web-ui")]
+#[tokio::test]
+async fn web_ui_favicon_and_manifest() {
+    let mut config = Config::default();
+    let app_on = app(&config).await;
+    let response = get(&app_on, "/favicon.ico").await;
+    if !calcraft_web::ASSETS_EMBEDDED {
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        return;
+    }
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "image/x-icon");
+    assert_eq!(
+        response.headers()[header::CACHE_CONTROL],
+        "public, max-age=86400"
+    );
+
+    // The manifest names the app and only uses same-origin icons.
+    let html = body_text(get(&app_on, "/").await).await;
+    let manifest = referenced_assets(&html)
+        .into_iter()
+        .find(|name| name.ends_with(".webmanifest"))
+        .unwrap();
+    let response = get(&app_on, &format!("/assets/{manifest}")).await;
+    let json: serde_json::Value = serde_json::from_str(&body_text(response).await).unwrap();
+    assert_eq!(json["name"], "CalCraft");
+    assert_eq!(json["display"], "standalone");
+    let icons = json["icons"].as_array().unwrap();
+    assert_eq!(icons.len(), 2);
+    for icon in icons {
+        assert!(icon["src"].as_str().unwrap().starts_with("./icon-"));
+    }
+
+    config.web_ui.enabled = false;
+    let app_off = app(&config).await;
+    assert_eq!(
+        get(&app_off, "/favicon.ico").await.status(),
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[cfg(feature = "web-ui")]
