@@ -8,8 +8,15 @@
 //!
 //! Trade-off: anyone who knows a username can lock that account for the
 //! lockout window by sending wrong passwords. This is accepted in favour of
-//! stopping online guessing; per-source limits follow together with the
-//! trusted-proxy configuration.
+//! stopping online guessing.
+//!
+//! In addition, failed logins are counted per client address
+//! (`server.max_login_failures_per_client` within the lockout window, for
+//! known and unknown usernames alike). A blocked client gets the same
+//! answer as for wrong credentials, without spending a password hash: the
+//! block concerns the client, not an account, so it reveals nothing about
+//! accounts. Successful logins do not reset this counter, so one valid
+//! account cannot be used to keep guessing others.
 
 use std::{
     collections::HashMap,
@@ -28,7 +35,11 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use calcraft_core::Username;
 use calcraft_store::{Store, User};
 
-use crate::secrets::{hash_secret, hashes_equal};
+use crate::{
+    limits::FailureTable,
+    net::ClientKey,
+    secrets::{hash_secret, hashes_equal},
+};
 use tokio::sync::Semaphore;
 
 /// Prefix of app passwords: `ccap_<id>_<secret>`.
@@ -52,6 +63,8 @@ const MAX_FAILURES: u32 = 5;
 const LOCKOUT_WINDOW: Duration = Duration::from_secs(15 * 60);
 const MAX_TRACKED: usize = 10_000;
 const MAX_CONCURRENT_HASHES: usize = 4;
+/// Default of `server.max_login_failures_per_client`.
+const MAX_CLIENT_FAILURES: u32 = 20;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PasswordError {
@@ -166,6 +179,8 @@ pub struct Authenticator {
     hashing: Semaphore,
     cache: Mutex<HashMap<Username, CacheEntry>>,
     failures: Mutex<HashMap<Username, Failures>>,
+    /// Failed logins per client address.
+    client_failures: Mutex<FailureTable>,
     /// Account passwords accepted (`security.password_login`).
     password_login: AtomicBool,
 }
@@ -179,6 +194,15 @@ impl Authenticator {
 
     pub fn password_login(&self) -> bool {
         self.password_login.load(Ordering::Relaxed)
+    }
+
+    /// Sets the failed logins allowed per client within the lockout window
+    /// and the most clients tracked (`server.max_login_failures_per_client`,
+    /// `server.max_tracked_clients`).
+    pub fn set_client_failure_limit(&self, max_failures: u32, max_clients: usize) {
+        if let Ok(mut table) = self.client_failures.lock() {
+            table.configure(max_clients, max_failures);
+        }
     }
 
     pub fn new(store: Store) -> anyhow::Result<Arc<Self>> {
@@ -198,21 +222,32 @@ impl Authenticator {
             hashing: Semaphore::new(MAX_CONCURRENT_HASHES),
             cache: Mutex::new(HashMap::new()),
             failures: Mutex::new(HashMap::new()),
+            client_failures: Mutex::new(FailureTable::new(
+                MAX_TRACKED,
+                MAX_CLIENT_FAILURES,
+                LOCKOUT_WINDOW,
+            )),
             password_login: AtomicBool::new(true),
         }))
     }
 
-    /// Authenticates the `Authorization` header of a DAV request.
+    /// Authenticates the `Authorization` header of a DAV request from
+    /// `client` (`None` if unknown: no per-client counting).
     ///
     /// DAV clients may use the account password only while two-factor
     /// authentication is off; with 2FA they must use an app password.
-    pub async fn authenticate(&self, header: Option<&[u8]>) -> AuthOutcome {
+    pub async fn authenticate(
+        &self,
+        header: Option<&[u8]>,
+        client: Option<ClientKey>,
+    ) -> AuthOutcome {
         let Some(credentials) = header.and_then(parse_basic) else {
             return AuthOutcome::Denied;
         };
         let username = &credentials.username;
-        let Some(attempt) = self.reserve(username) else {
-            return self.locked_out().await;
+        let attempt = match self.reserve(username, client) {
+            Ok(attempt) => attempt,
+            Err(refusal) => return self.refused(refusal).await,
         };
         if let Some((id, secret)) = parse_app_password(&credentials.password) {
             return self.check_app_password(&attempt, id, secret).await;
@@ -233,18 +268,26 @@ impl Authenticator {
         }
     }
 
-    /// Reserves a login attempt for `username`. Attempts in progress count
-    /// towards the limit together with recorded failures, so concurrent
-    /// requests cannot bypass the lockout. Returns `None` when locked.
-    pub fn reserve(&self, username: &Username) -> Option<Attempt<'_>> {
+    /// Reserves a login attempt for `username` from `client`. Attempts in
+    /// progress count towards the account limit together with recorded
+    /// failures, so concurrent requests cannot bypass the lockout. Fails
+    /// when the client or the account is blocked.
+    pub fn reserve(
+        &self,
+        username: &Username,
+        client: Option<ClientKey>,
+    ) -> Result<Attempt<'_>, Refusal> {
+        if self.client_blocked(client) {
+            return Err(Refusal::Client);
+        }
         let Ok(mut failures) = self.failures.lock() else {
-            return None;
+            return Err(Refusal::Account);
         };
         if failures.len() >= MAX_TRACKED {
             failures.retain(|_, f| f.in_flight > 0 || f.since.elapsed() < LOCKOUT_WINDOW);
             if failures.len() >= MAX_TRACKED {
                 // Degrade safely under extreme load.
-                return None;
+                return Err(Refusal::Account);
             }
         }
         let entry = failures.entry(username.clone()).or_insert(Failures {
@@ -260,13 +303,25 @@ impl Authenticator {
             if entry.count == 0 && entry.in_flight == 0 {
                 failures.remove(username);
             }
-            return None;
+            return Err(Refusal::Account);
         }
         entry.in_flight += 1;
-        Some(Attempt {
+        Ok(Attempt {
             auth: self,
             username: username.clone(),
+            client,
         })
+    }
+
+    /// Response for a refused attempt; looks like wrong credentials.
+    pub async fn refused(&self, refusal: Refusal) -> AuthOutcome {
+        match refusal {
+            Refusal::Account => self.locked_out().await,
+            Refusal::Client => {
+                tracing::debug!("login attempt from a client with too many failed logins");
+                AuthOutcome::LockedOut
+            }
+        }
     }
 
     /// Response for a locked account. It does the same work as a wrong
@@ -322,6 +377,7 @@ impl Authenticator {
                 AuthOutcome::Authenticated(user)
             }
             _ => {
+                self.record_client_failure(attempt.client);
                 // Count only for existing accounts (see `check_first_factor_reserved`).
                 if matches!(self.store.user_credentials(username).await, Ok(Some(_))) {
                     self.record_failure(username.clone());
@@ -400,10 +456,14 @@ impl Authenticator {
             // unknown names disappear when their attempt ends, so made-up
             // names cannot fill the table.
             Some(_) => {
+                self.record_client_failure(attempt.client);
                 self.record_failure(username);
                 AuthOutcome::Denied
             }
-            None => AuthOutcome::Denied,
+            None => {
+                self.record_client_failure(attempt.client);
+                AuthOutcome::Denied
+            }
         }
     }
 
@@ -456,6 +516,27 @@ impl Authenticator {
         }
     }
 
+    /// Whether `client` has used up its failed logins (`false` if unknown).
+    pub fn client_blocked(&self, client: Option<ClientKey>) -> bool {
+        client.is_some_and(|client| {
+            self.client_failures
+                .lock()
+                .map_or(true, |table| table.is_blocked(client, Instant::now()))
+        })
+    }
+
+    /// Records a failed attempt of `client` (known or unknown username).
+    pub fn record_client_failure(&self, client: Option<ClientKey>) {
+        let Some(client) = client else {
+            return;
+        };
+        if let Ok(mut table) = self.client_failures.lock()
+            && table.record(client, Instant::now())
+        {
+            tracing::warn!(%client, "client blocked after repeated failed logins");
+        }
+    }
+
     /// Resets the failure count after a fully successful login.
     pub fn clear_failures(&self, username: &Username) {
         if let Ok(mut failures) = self.failures.lock()
@@ -480,15 +561,29 @@ impl Authenticator {
     }
 }
 
+/// Why [`Authenticator::reserve`] refused an attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// Too many failures for the account (or the tracking table is full).
+    Account,
+    /// Too many failures from the client address.
+    Client,
+}
+
 /// A reserved login attempt; released when dropped.
 pub struct Attempt<'a> {
     auth: &'a Authenticator,
     username: Username,
+    client: Option<ClientKey>,
 }
 
 impl Attempt<'_> {
     pub fn username(&self) -> &Username {
         &self.username
+    }
+
+    pub fn client(&self) -> Option<ClientKey> {
+        self.client
     }
 }
 
@@ -515,164 +610,4 @@ fn parse_app_password(password: &str) -> Option<(i64, &str)> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn basic(user: &str, password: &str) -> String {
-        format!("Basic {}", STANDARD.encode(format!("{user}:{password}")))
-    }
-
-    async fn setup() -> Arc<Authenticator> {
-        let store = Store::in_memory().await.unwrap();
-        let hash = hash_password("correct horse battery").unwrap();
-        store
-            .create_user(&"alice".parse().unwrap(), &hash, None)
-            .await
-            .unwrap();
-        Authenticator::new(store).unwrap()
-    }
-
-    #[test]
-    fn password_policy() {
-        assert!(matches!(
-            hash_password("short"),
-            Err(PasswordError::TooShort)
-        ));
-        assert!(matches!(
-            hash_password(&"x".repeat(MAX_PASSWORD_LEN + 1)),
-            Err(PasswordError::TooLong)
-        ));
-        let hash = hash_password("a long enough password").unwrap();
-        assert!(hash.starts_with("$argon2id$"));
-        assert!(verify_password("a long enough password", &hash));
-        assert!(!verify_password("a long enough passwore", &hash));
-        assert!(!verify_password("x", "not a hash"));
-    }
-
-    #[test]
-    fn parses_basic_header() {
-        let creds = parse_basic(basic("Alice", "pw:with:colons").as_bytes()).unwrap();
-        assert_eq!(creds.username.as_str(), "alice");
-        assert_eq!(creds.password, "pw:with:colons");
-        assert!(parse_basic(b"Bearer abc").is_none());
-        assert!(parse_basic(b"Basic !!!").is_none());
-        assert!(parse_basic(basic("../etc", "x").as_bytes()).is_none());
-        assert!(parse_basic(basic("alice", "").as_bytes()).is_none());
-        assert!(parse_basic(b"Basic").is_none());
-    }
-
-    #[tokio::test]
-    async fn authenticates_valid_credentials() {
-        let auth = setup().await;
-        let header = basic("alice", "correct horse battery");
-        for _ in 0..2 {
-            // Second round hits the cache.
-            assert!(matches!(
-                auth.authenticate(Some(header.as_bytes())).await,
-                AuthOutcome::Authenticated(user) if user.username.as_str() == "alice"
-            ));
-        }
-    }
-
-    #[tokio::test]
-    async fn rejects_wrong_or_missing_credentials() {
-        let auth = setup().await;
-        assert!(matches!(auth.authenticate(None).await, AuthOutcome::Denied));
-        let wrong = basic("alice", "wrong password!!");
-        assert!(matches!(
-            auth.authenticate(Some(wrong.as_bytes())).await,
-            AuthOutcome::Denied
-        ));
-        let unknown = basic("mallory", "correct horse battery");
-        assert!(matches!(
-            auth.authenticate(Some(unknown.as_bytes())).await,
-            AuthOutcome::Denied
-        ));
-    }
-
-    #[tokio::test]
-    async fn cached_login_does_not_accept_other_passwords() {
-        let auth = setup().await;
-        let good = basic("alice", "correct horse battery");
-        let bad = basic("alice", "correct horse batterx");
-        assert!(matches!(
-            auth.authenticate(Some(good.as_bytes())).await,
-            AuthOutcome::Authenticated(_)
-        ));
-        assert!(matches!(
-            auth.authenticate(Some(bad.as_bytes())).await,
-            AuthOutcome::Denied
-        ));
-    }
-
-    #[tokio::test]
-    async fn locks_out_after_repeated_failures() {
-        let auth = setup().await;
-        let wrong = basic("alice", "wrong password!!");
-        for _ in 0..MAX_FAILURES {
-            auth.authenticate(Some(wrong.as_bytes())).await;
-        }
-        let good = basic("alice", "correct horse battery");
-        assert!(matches!(
-            auth.authenticate(Some(good.as_bytes())).await,
-            AuthOutcome::LockedOut
-        ));
-    }
-
-    #[tokio::test]
-    async fn password_change_invalidates_cache() {
-        let auth = setup().await;
-        let old = basic("alice", "correct horse battery");
-        assert!(matches!(
-            auth.authenticate(Some(old.as_bytes())).await,
-            AuthOutcome::Authenticated(_)
-        ));
-        let hash = hash_password("a brand new password").unwrap();
-        auth.store
-            .set_password_hash(&"alice".parse().unwrap(), &hash)
-            .await
-            .unwrap();
-        assert!(matches!(
-            auth.authenticate(Some(old.as_bytes())).await,
-            AuthOutcome::Denied
-        ));
-    }
-
-    #[tokio::test]
-    async fn unknown_usernames_cannot_disable_the_lockout() {
-        let auth = setup().await;
-        // Flooding with made-up names must not stop counting for real accounts.
-        for i in 0..50 {
-            let fake = basic(&format!("ghost{i}"), "whatever password");
-            auth.authenticate(Some(fake.as_bytes())).await;
-        }
-        assert!(auth.failures.lock().unwrap().is_empty());
-        let wrong = basic("alice", "wrong password!!");
-        for _ in 0..MAX_FAILURES {
-            auth.authenticate(Some(wrong.as_bytes())).await;
-        }
-        let good = basic("alice", "correct horse battery");
-        assert!(matches!(
-            auth.authenticate(Some(good.as_bytes())).await,
-            AuthOutcome::LockedOut
-        ));
-    }
-
-    #[tokio::test]
-    async fn disabled_users_are_denied() {
-        let auth = setup().await;
-        let good = basic("alice", "correct horse battery");
-        assert!(matches!(
-            auth.authenticate(Some(good.as_bytes())).await,
-            AuthOutcome::Authenticated(_)
-        ));
-        auth.store
-            .set_disabled(&"alice".parse().unwrap(), true)
-            .await
-            .unwrap();
-        assert!(matches!(
-            auth.authenticate(Some(good.as_bytes())).await,
-            AuthOutcome::Denied
-        ));
-    }
-}
+mod tests;

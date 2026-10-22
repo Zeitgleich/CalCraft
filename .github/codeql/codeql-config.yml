@@ -1,0 +1,6 @@
+# Test code holds fixed test passwords and keys on purpose; analysing it only
+# produces "hard-coded credential" noise. Production code stays fully covered.
+paths-ignore:
+  - crates/*/tests
+  - "**/tests.rs"
+  - fuzz

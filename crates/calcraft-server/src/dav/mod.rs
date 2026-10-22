@@ -24,7 +24,7 @@ use axum::{
 use calcraft_dav::{DavError, Multistatus};
 use calcraft_store::StoreError;
 
-use crate::{app::AppState, auth::AuthOutcome};
+use crate::{app::AppState, auth::AuthOutcome, net::ClientKey};
 
 pub(crate) use objects::{Rejection, Validated, check_object, etag};
 pub use paths::valid_item_name;
@@ -49,10 +49,12 @@ pub async fn handle(State(state): State<AppState>, request: Request) -> Response
         .headers()
         .get(AUTHORIZATION)
         .map(HeaderValue::as_bytes);
-    let user = match state.auth.authenticate(header).await {
+    let client = request.extensions().get::<ClientKey>().copied();
+    let user = match state.auth.authenticate(header, client).await {
         AuthOutcome::Authenticated(user) => user,
         AuthOutcome::Denied => return unauthorized(),
-        // A locked account looks like wrong credentials (no account oracle).
+        // A locked account or a client with too many failed logins looks
+        // like wrong credentials (no account oracle).
         AuthOutcome::LockedOut => return unauthorized(),
         AuthOutcome::Error => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
