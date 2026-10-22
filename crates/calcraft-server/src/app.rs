@@ -220,7 +220,14 @@ impl ReadinessCache {
         {
             return cached.readiness;
         }
-        let readiness = store.readiness().await;
+        // Read before probing: a real write failing meanwhile makes this
+        // result stale.
+        let failures = store.write_failures();
+        let Some(readiness) = store.probe_readiness().await else {
+            // The writer is busy (a burst of writes): no new information.
+            // Keep the last known state and probe again next time.
+            return store.assumed_readiness();
+        };
         let previous = last.map(|cached| cached.readiness);
         if previous != Some(readiness) {
             if readiness.is_ready() {
@@ -233,7 +240,7 @@ impl ReadinessCache {
         }
         *last = Some(CachedReadiness {
             at: Instant::now(),
-            failures: store.write_failures(),
+            failures,
             readiness,
         });
         readiness

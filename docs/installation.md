@@ -387,12 +387,16 @@ exempt from the global concurrency limit, not from the per-client rate limit):
   written. Otherwise `503` with `Retry-After: 5` and one of the bodies
   `database not writable` (read-only file or file system), `storage full` (a
   write failed for lack of space and there is still no room) or `database
-  unavailable` (not answering or locked by another process). The write check
+  unavailable` (the database cannot be read, or fails otherwise, e.g. with
+  an I/O error). The write check
   takes the write lock and rolls back; it changes no data and does not grow
   the database. After a full disk it commits and removes a 64 KiB test value
   until that succeeds, so the instance becomes ready again by itself once
-  space is freed. Results are reused for 5 seconds, so frequent probes do not
-  compete with clients for the database.
+  space is freed. If the writer is busy (a burst of writes, waiting longer
+  than 1 s, or another process holding the lock for more than 0.5 s), the
+  check gives no new information and the last known state is reported (ready
+  unless a write failure was recorded). Results are reused for 5 seconds, so
+  frequent probes do not compete with clients for the database.
 
 ## 7. Create the first user
 

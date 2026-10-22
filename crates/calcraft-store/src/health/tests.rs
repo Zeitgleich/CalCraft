@@ -1,6 +1,7 @@
 use std::{
     path::PathBuf,
     sync::atomic::{AtomicU32, Ordering},
+    time::Duration,
 };
 
 use calcraft_core::{CollectionKind, Slug};
@@ -106,6 +107,8 @@ async fn read_only_database_is_not_ready_until_writable() {
     // The probe alone notices.
     query_only(&store, true).await;
     assert_eq!(store.readiness().await, Readiness::NotWritable);
+    // The probe's own failure does not count as a failed real write.
+    assert_eq!(store.write_failures(), 0);
     query_only(&store, false).await;
     assert_eq!(store.readiness().await, Readiness::Ready);
 
@@ -114,6 +117,7 @@ async fn read_only_database_is_not_ready_until_writable() {
     let err = put(&store, calendar, "a.ics").await.unwrap_err();
     assert!(err.is_read_only(), "{err}");
     assert_eq!(store.health.failure(), Some(FailureKind::ReadOnly));
+    assert_eq!(store.write_failures(), 1);
     query_only(&store, false).await;
     put(&store, calendar, "a.ics").await.unwrap();
     assert_eq!(store.health.failure(), None);
@@ -146,7 +150,7 @@ async fn space_probe_grows_the_file_at_most_once() {
     let store = Store::open(&dir.0.join("calcraft.db")).await.unwrap();
     let mut sizes = Vec::new();
     for _ in 0..20 {
-        store.health.record(&StoreError::Full);
+        store.health.record(&StoreError::Full, false);
         assert_eq!(store.readiness().await, Readiness::Ready);
         sizes.push(page_count(&store).await);
     }
@@ -172,4 +176,68 @@ async fn other_errors_are_not_recorded() {
     assert_eq!(Readiness::Full.reason(), "storage full");
     assert_eq!(Readiness::NotWritable.reason(), "database not writable");
     assert_eq!(Readiness::Unavailable.reason(), "database unavailable");
+}
+
+#[tokio::test]
+async fn busy_writer_keeps_the_last_known_state() {
+    let dir = TempDir::new("busy");
+    let store = Store::open(&dir.0.join("calcraft.db")).await.unwrap();
+    store.health.set_acquire_timeout(Duration::from_millis(20));
+    assert_eq!(store.readiness().await, Readiness::Ready);
+
+    // A write burst holds the single writer longer than the probe waits.
+    let held = store.writer.acquire().await.unwrap();
+    assert_eq!(store.probe_readiness().await, None);
+    assert_eq!(store.readiness().await, Readiness::Ready);
+    // A recorded failure still counts while the writer is busy.
+    store.health.record(&StoreError::Full, true);
+    assert_eq!(store.probe_readiness().await, None);
+    assert_eq!(store.readiness().await, Readiness::Full);
+    drop(held);
+
+    assert_eq!(store.readiness().await, Readiness::Ready);
+    store.close().await;
+}
+
+#[tokio::test]
+async fn probe_restores_the_busy_timeout() {
+    assert_eq!(
+        SHORT_BUSY_TIMEOUT,
+        format!("PRAGMA busy_timeout = {}", PROBE_BUSY_TIMEOUT.as_millis())
+    );
+    assert_eq!(
+        NORMAL_BUSY_TIMEOUT,
+        format!(
+            "PRAGMA busy_timeout = {}",
+            crate::backup::BUSY_TIMEOUT.as_millis()
+        )
+    );
+    let dir = TempDir::new("timeout");
+    let store = Store::open(&dir.0.join("calcraft.db")).await.unwrap();
+    for space in [false, true] {
+        if space {
+            store.health.record(&StoreError::Full, false);
+        }
+        assert_eq!(store.readiness().await, Readiness::Ready);
+        let timeout: i64 = sqlx::query("PRAGMA busy_timeout")
+            .fetch_one(&store.writer)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(timeout, 5000);
+    }
+    store.close().await;
+}
+
+#[tokio::test]
+async fn probe_removes_a_leftover_blob() {
+    let (store, _) = setup().await;
+    // As if resetting the blob after a space probe had failed.
+    sqlx::query("UPDATE health SET pad = zeroblob(1000) WHERE id = 1")
+        .execute(&store.writer)
+        .await
+        .unwrap();
+    assert_eq!(health_row(&store).await, (0, Some(1000)));
+    assert_eq!(store.readiness().await, Readiness::Ready);
+    assert_eq!(health_row(&store).await, (0, None));
 }

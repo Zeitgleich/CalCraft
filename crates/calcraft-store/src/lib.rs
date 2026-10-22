@@ -35,7 +35,7 @@ pub use backup::{
     BackupInfo, DEFAULT_ACQUIRE_TIMEOUT, RestoreInfo, StoreOptions, backup_database,
     latest_migration, pre_migration_backups, restore_database,
 };
-pub use health::{PROBE_ACQUIRE_TIMEOUT, Readiness};
+pub use health::{PROBE_ACQUIRE_TIMEOUT, PROBE_BUSY_TIMEOUT, Readiness};
 pub use items::{
     Change, Item, ItemIndex, ItemMeta, NewItem, Precondition, PutOutcome, QueryCandidate,
     StaleIndex, Transfer, TransferOutcome,

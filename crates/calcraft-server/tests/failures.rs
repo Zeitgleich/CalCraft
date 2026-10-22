@@ -564,7 +564,9 @@ async fn readiness_probe_changes_nothing_and_does_not_grow_the_file() {
     let listing = send(&app, "PROPFIND", CAL, &[("depth", "1")], "").await;
     let sizes = file_sizes(&dir);
 
-    // Directly: the per-client request rate limit applies to /readyz.
+    // Through the store: 500 requests from the one test client would exceed
+    // the per-client token bucket (burst 120), which also covers /readyz
+    // (it is exempt from the global concurrency limit only).
     for _ in 0..500 {
         assert_eq!(store.readiness().await, Readiness::Ready);
     }

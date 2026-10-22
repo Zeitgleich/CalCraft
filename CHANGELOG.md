@@ -12,8 +12,9 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 - `/readyz` now checks that the database can be written, not only read: it
   answers `503` with `Retry-After` and a short reason (`database not
   writable`, `storage full`, `database unavailable`) while the database is
-  read-only, a write failed for lack of space, or the database is locked or
-  unavailable, and `200` again by itself once writes work. The write probe
+  read-only, a write failed for lack of space, or the database cannot be
+  read, and `200` again by itself once writes work. A busy writer (write
+  burst, lock held by another process) keeps the last known state. The write probe
   rolls back, changes no data and does not grow the database; results are
   cached for 5 seconds. `/healthz` stays liveness only. New migration
   `0008_health` (one-row table for the probe).

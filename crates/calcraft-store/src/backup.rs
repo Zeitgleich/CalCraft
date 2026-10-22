@@ -240,12 +240,15 @@ fn pending_migrations(applied: &[Applied]) -> Result<Vec<i64>> {
 // Opening
 // ---------------------------------------------------------------------------
 
+/// How long a connection waits for a lock held by another connection.
+pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn connect_options(path: &Path) -> SqliteConnectOptions {
     SqliteConnectOptions::new()
         .filename(path)
         .journal_mode(SqliteJournalMode::Wal)
         .foreign_keys(true)
-        .busy_timeout(Duration::from_secs(5))
+        .busy_timeout(BUSY_TIMEOUT)
 }
 
 async fn connect_pool(
