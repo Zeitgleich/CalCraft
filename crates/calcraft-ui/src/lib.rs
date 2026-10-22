@@ -4,6 +4,7 @@
 //! tested natively (`cargo test -p calcraft-ui`). The Leptos application
 //! itself lives in the binary target and is only compiled for `wasm32`.
 
+pub mod sso;
 pub mod text;
 pub mod validate;
 

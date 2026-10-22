@@ -249,6 +249,28 @@ button {
     padding: 0.4rem 0.9rem;
 }
 
+/* A link that starts a top-level navigation (SSO login), styled as a button. */
+a.button {
+    display: block;
+    text-align: center;
+    text-decoration: none;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius);
+    background: var(--accent);
+    color: var(--accent-text);
+    padding: 0.5rem 0.9rem;
+    font-weight: 500;
+}
+
+a.button:hover {
+    filter: brightness(1.08);
+}
+
+.separator {
+    text-align: center;
+    margin: 0;
+}
+
 button.secondary {
     background: transparent;
     color: var(--text);

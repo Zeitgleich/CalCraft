@@ -14,7 +14,7 @@ mod collections;
 mod login;
 
 use calcraft_core::api::Me;
-use calcraft_ui::{ApiFailure, Page, text as t};
+use calcraft_ui::{ApiFailure, Page, sso, text as t};
 use leptos::{prelude::*, task::spawn_local};
 
 /// Login state of the application.
@@ -33,6 +33,9 @@ pub struct Ctx {
     pub session: RwSignal<Session>,
     /// Message shown on the login page (e.g. after a password change).
     pub notice: RwSignal<Option<String>>,
+    /// Text for a failed SSO login (`/?sso_error=<code>`), shown on the
+    /// login page.
+    pub sso_error: RwSignal<Option<&'static str>>,
 }
 
 impl Ctx {
@@ -81,6 +84,24 @@ pub fn start() {
     leptos::mount::mount_to_body(App);
 }
 
+/// Reads a failed SSO login from the URL and removes the parameter, so
+/// that a reload does not show the message again. Only the fixed text for
+/// the code is kept, never the value itself.
+fn take_sso_error() -> Option<&'static str> {
+    let location = window().location();
+    let (code, rest) = sso::take_error(&location.search().unwrap_or_default());
+    let code = code?;
+    let url = format!(
+        "{}{rest}{}",
+        location.pathname().unwrap_or_else(|_| "/".to_owned()),
+        location.hash().unwrap_or_default()
+    );
+    if let Ok(history) = window().history() {
+        let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url));
+    }
+    Some(sso::error_message(&code))
+}
+
 fn current_page() -> Page {
     Page::from_hash(&window().location().hash().unwrap_or_default())
 }
@@ -90,6 +111,7 @@ fn App() -> impl IntoView {
     let ctx = Ctx {
         session: RwSignal::new(Session::Loading),
         notice: RwSignal::new(None),
+        sso_error: RwSignal::new(take_sso_error()),
     };
     provide_context(ctx);
 
