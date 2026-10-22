@@ -138,6 +138,11 @@ fn store_error(err: StoreError) -> Response {
     match err {
         StoreError::PreconditionFailed => StatusCode::PRECONDITION_FAILED.into_response(),
         StoreError::Limit(reason) => (StatusCode::INSUFFICIENT_STORAGE, reason).into_response(),
+        // RFC 4918 §11.5; the transaction was rolled back.
+        StoreError::Full => {
+            tracing::error!("storage full: database or disk has no space left");
+            StatusCode::INSUFFICIENT_STORAGE.into_response()
+        }
         StoreError::CollectionExists => method_not_allowed(),
         err => {
             tracing::error!(%err, "storage error");

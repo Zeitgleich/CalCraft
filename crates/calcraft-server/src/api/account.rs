@@ -84,7 +84,7 @@ async fn authenticate(
     if password.is_empty() || password.len() > MAX_PASSWORD_LEN {
         return Err(ApiError::InvalidCredentials);
     }
-    let Some(attempt) = state.auth.reserve(username) else {
+    let Some(attempt) = state.auth.reserve(username).await else {
         state.auth.locked_out().await;
         return Err(ApiError::InvalidCredentials);
     };

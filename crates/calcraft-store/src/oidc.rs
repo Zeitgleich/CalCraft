@@ -135,7 +135,10 @@ impl Store {
         subject: &str,
         now: i64,
     ) -> Result<ApprovedBinding> {
-        let mut tx = self.pool.begin().await?;
+        // Write transactions start IMMEDIATE (see `put_item`): a deferred one that
+        // reads first fails with SQLITE_BUSY instead of waiting when another
+        // writer commits in between.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let consumed = sqlx::query(
             "DELETE FROM oidc_link_approvals \
              WHERE user_id = ? AND issuer = ? AND subject = ? AND expires_at > ?",

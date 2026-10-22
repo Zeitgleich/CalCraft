@@ -29,7 +29,7 @@ use calcraft_core::Username;
 use calcraft_store::{Store, User};
 
 use crate::secrets::{hash_secret, hashes_equal};
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 
 /// Prefix of app passwords: `ccap_<id>_<secret>`.
 pub const APP_PASSWORD_PREFIX: &str = "ccap_";
@@ -166,6 +166,8 @@ pub struct Authenticator {
     hashing: Semaphore,
     cache: Mutex<HashMap<Username, CacheEntry>>,
     failures: Mutex<HashMap<Username, Failures>>,
+    /// Signalled whenever an attempt ends, see [`Authenticator::reserve`].
+    released: Notify,
     /// Account passwords accepted (`security.password_login`).
     password_login: AtomicBool,
 }
@@ -198,6 +200,7 @@ impl Authenticator {
             hashing: Semaphore::new(MAX_CONCURRENT_HASHES),
             cache: Mutex::new(HashMap::new()),
             failures: Mutex::new(HashMap::new()),
+            released: Notify::new(),
             password_login: AtomicBool::new(true),
         }))
     }
@@ -211,7 +214,7 @@ impl Authenticator {
             return AuthOutcome::Denied;
         };
         let username = &credentials.username;
-        let Some(attempt) = self.reserve(username) else {
+        let Some(attempt) = self.reserve(username).await else {
             return self.locked_out().await;
         };
         if let Some((id, secret)) = parse_app_password(&credentials.password) {
@@ -236,15 +239,38 @@ impl Authenticator {
     /// Reserves a login attempt for `username`. Attempts in progress count
     /// towards the limit together with recorded failures, so concurrent
     /// requests cannot bypass the lockout. Returns `None` when locked.
-    pub fn reserve(&self, username: &Username) -> Option<Attempt<'_>> {
+    ///
+    /// When only attempts in progress fill the limit, this waits until one
+    /// of them ends instead of failing: a client sending more than
+    /// `MAX_FAILURES` requests at once with correct credentials (sync
+    /// clients do) must not get 401 for its own parallel requests.
+    pub async fn reserve(&self, username: &Username) -> Option<Attempt<'_>> {
+        loop {
+            // Registered before checking, so a release in between is not missed.
+            let mut released = std::pin::pin!(self.released.notified());
+            released.as_mut().enable();
+            match self.try_reserve(username) {
+                Reservation::Reserved => {
+                    return Some(Attempt {
+                        auth: self,
+                        username: username.clone(),
+                    });
+                }
+                Reservation::Locked => return None,
+                Reservation::Busy => released.await,
+            }
+        }
+    }
+
+    fn try_reserve(&self, username: &Username) -> Reservation {
         let Ok(mut failures) = self.failures.lock() else {
-            return None;
+            return Reservation::Locked;
         };
         if failures.len() >= MAX_TRACKED {
             failures.retain(|_, f| f.in_flight > 0 || f.since.elapsed() < LOCKOUT_WINDOW);
             if failures.len() >= MAX_TRACKED {
                 // Degrade safely under extreme load.
-                return None;
+                return Reservation::Locked;
             }
         }
         let entry = failures.entry(username.clone()).or_insert(Failures {
@@ -256,17 +282,14 @@ impl Authenticator {
             entry.count = 0;
             entry.since = Instant::now();
         }
+        if entry.count >= MAX_FAILURES {
+            return Reservation::Locked;
+        }
         if entry.count + entry.in_flight >= MAX_FAILURES {
-            if entry.count == 0 && entry.in_flight == 0 {
-                failures.remove(username);
-            }
-            return None;
+            return Reservation::Busy;
         }
         entry.in_flight += 1;
-        Some(Attempt {
-            auth: self,
-            username: username.clone(),
-        })
+        Reservation::Reserved
     }
 
     /// Response for a locked account. It does the same work as a wrong
@@ -477,7 +500,17 @@ impl Authenticator {
                 failures.remove(username);
             }
         }
+        self.released.notify_waiters();
     }
+}
+
+/// Result of [`Authenticator::try_reserve`].
+enum Reservation {
+    Reserved,
+    /// Too many recorded failures.
+    Locked,
+    /// The limit is filled by attempts still in progress.
+    Busy,
 }
 
 /// A reserved login attempt; released when dropped.
@@ -570,6 +603,24 @@ mod tests {
             assert!(matches!(
                 auth.authenticate(Some(header.as_bytes())).await,
                 AuthOutcome::Authenticated(user) if user.username.as_str() == "alice"
+            ));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn many_parallel_requests_with_valid_credentials_are_not_locked_out() {
+        let auth = setup().await;
+        let header = basic("alice", "correct horse battery");
+        let handles: Vec<_> = (0..4 * MAX_FAILURES)
+            .map(|_| {
+                let (auth, header) = (auth.clone(), header.clone());
+                tokio::spawn(async move { auth.authenticate(Some(header.as_bytes())).await })
+            })
+            .collect();
+        for handle in handles {
+            assert!(matches!(
+                handle.await.unwrap(),
+                AuthOutcome::Authenticated(_)
             ));
         }
     }

@@ -33,7 +33,11 @@ pub const DEFAULT_COLLECTION_SLUG: &str = "default";
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("database error: {0}")]
-    Database(#[from] sqlx::Error),
+    Database(sqlx::Error),
+    /// The disk (or the database size limit) is full (`SQLITE_FULL`). The
+    /// failed transaction was rolled back; DAV answers 507.
+    #[error("database or disk is full")]
+    Full,
     #[error("database migration failed: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
     #[error("user {0} already exists")]
@@ -77,7 +81,39 @@ pub enum StoreError {
     PreMigrationBackup(String),
 }
 
+impl From<sqlx::Error> for StoreError {
+    fn from(err: sqlx::Error) -> Self {
+        /// Primary result code `SQLITE_FULL`; extended codes keep it in the low byte.
+        const SQLITE_FULL: i64 = 13;
+        let full = match &err {
+            sqlx::Error::Database(db) => db
+                .code()
+                .and_then(|code| code.parse::<i64>().ok())
+                .is_some_and(|code| code & 0xff == SQLITE_FULL),
+            _ => false,
+        };
+        if full {
+            Self::Full
+        } else {
+            Self::Database(err)
+        }
+    }
+}
+
 pub type Result<T, E = StoreError> = std::result::Result<T, E>;
+
+/// Storage failures that the failure tests simulate, see
+/// [`Store::simulate_failure`].
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimulatedFailure {
+    /// Normal operation.
+    None,
+    /// Writes fail like on a read-only file or file system (`SQLITE_READONLY`).
+    ReadOnly,
+    /// No room for new pages, like a full disk (`SQLITE_FULL`).
+    Full,
+}
 
 /// A user account without credentials.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +207,30 @@ impl Store {
         Ok(())
     }
 
+    /// Makes every connection of the pool behave as if the database file
+    /// were read-only or the disk full, or back to normal. Only for failure
+    /// tests: it sets `PRAGMA query_only` and `PRAGMA max_page_count` on all
+    /// connections, so it must run while no other query holds one.
+    #[doc(hidden)]
+    pub async fn simulate_failure(&self, failure: SimulatedFailure) -> Result<()> {
+        const NO_PAGE_LIMIT: &str = "PRAGMA max_page_count = 1073741823";
+        let pragmas = match failure {
+            SimulatedFailure::None => ["PRAGMA query_only = OFF", NO_PAGE_LIMIT],
+            SimulatedFailure::ReadOnly => ["PRAGMA query_only = ON", NO_PAGE_LIMIT],
+            // SQLite raises a smaller value to the current size: no new pages.
+            SimulatedFailure::Full => ["PRAGMA query_only = OFF", "PRAGMA max_page_count = 1"],
+        };
+        let mut connections = Vec::new();
+        for _ in 0..self.pool.options().get_max_connections() {
+            let mut connection = self.pool.acquire().await?;
+            for pragma in pragmas {
+                sqlx::query(pragma).execute(&mut *connection).await?;
+            }
+            connections.push(connection);
+        }
+        Ok(())
+    }
+
     /// Creates a user with a default calendar and address book.
     pub async fn create_user(
         &self,
@@ -190,7 +250,10 @@ impl Store {
         display_name: Option<&str>,
         is_admin: bool,
     ) -> Result<User> {
-        let mut tx = self.pool.begin().await?;
+        // Write transactions start IMMEDIATE (see `put_item`): a deferred one that
+        // reads first fails with SQLITE_BUSY instead of waiting when another
+        // writer commits in between.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let result = sqlx::query(
             "INSERT INTO users (username, password_hash, display_name, is_admin) VALUES (?, ?, ?, ?) RETURNING id",
         )

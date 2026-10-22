@@ -239,6 +239,17 @@ fn connect_options(path: &Path) -> SqliteConnectOptions {
 async fn connect_pool(path: &Path, max_connections: u32) -> Result<SqlitePool> {
     Ok(sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(max_connections)
+        // On SQLITE_FULL or an I/O error SQLite may roll a transaction back
+        // by itself. sqlx's ROLLBACK on drop then fails and the connection
+        // stays marked as inside a transaction, so every later `BEGIN` on it
+        // fails. Such connections are closed instead of reused. The ping
+        // waits for the queued rollback first.
+        .after_release(|conn, _| {
+            Box::pin(async move {
+                conn.ping().await?;
+                Ok(!conn.is_in_transaction())
+            })
+        })
         .connect_with(connect_options(path).create_if_missing(true))
         .await?)
 }

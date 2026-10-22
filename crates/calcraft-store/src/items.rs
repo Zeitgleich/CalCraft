@@ -121,7 +121,10 @@ impl Store {
         color: Option<&str>,
         components: &str,
     ) -> Result<Collection> {
-        let mut tx = self.pool.begin().await?;
+        // Write transactions start IMMEDIATE (see `put_item`): a deferred one that
+        // reads first fails with SQLITE_BUSY instead of waiting when another
+        // writer commits in between.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM collections WHERE owner_id = ?")
             .bind(owner_id)
             .fetch_one(&mut *tx)
@@ -174,7 +177,10 @@ impl Store {
         description: Option<Option<&str>>,
         color: Option<Option<&str>>,
     ) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        // Write transactions start IMMEDIATE (see `put_item`): a deferred one that
+        // reads first fails with SQLITE_BUSY instead of waiting when another
+        // writer commits in between.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         // Column names are fixed literals; values are always bound.
         for (column, value) in [
             ("display_name", display_name),

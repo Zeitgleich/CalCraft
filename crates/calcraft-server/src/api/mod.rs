@@ -234,6 +234,10 @@ impl From<StoreError> for ApiError {
     fn from(err: StoreError) -> Self {
         match err {
             StoreError::Limit(message) => Self::Limit(message),
+            StoreError::Full => {
+                tracing::error!("storage full: database or disk has no space left");
+                Self::Limit("storage is full")
+            }
             StoreError::CollectionExists => Self::Conflict("collection already exists"),
             StoreError::UserExists(_) => Self::Conflict("user already exists"),
             err => {
