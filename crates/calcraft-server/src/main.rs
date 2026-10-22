@@ -213,7 +213,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         );
     }
 
-    let mut state = AppState::new(open_store(&config).await?)?;
+    let store = open_store(&config).await?;
+    // Purges expired trash entries now and then regularly.
+    calcraft_server::trash::warn_if_disabled_with_entries(&store).await;
+    calcraft_server::trash::spawn_purge(store.clone());
+    let mut state = AppState::new(store)?;
     state.secure_cookies = config.security.secure_cookies;
     state
         .auth

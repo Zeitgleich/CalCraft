@@ -12,6 +12,7 @@ mod api;
 mod app_passwords;
 mod collections;
 mod login;
+mod trash;
 
 use calcraft_core::api::Me;
 use calcraft_ui::{ApiFailure, Page, sso, text as t};
@@ -233,6 +234,7 @@ fn Shell() -> impl IntoView {
                     Page::Overview => view! { <collections::Overview /> }.into_any(),
                     Page::Settings => view! { <account::Settings /> }.into_any(),
                     Page::AppPasswords => view! { <app_passwords::AppPasswords /> }.into_any(),
+                    Page::Trash => view! { <trash::Trash /> }.into_any(),
                     Page::Admin => view! { <admin::Admin /> }.into_any(),
                 }
             }}

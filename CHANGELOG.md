@@ -9,6 +9,24 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 
 ### Added
 
+- Trash: DAV and web UI deletions of calendar objects, contacts and whole
+  collections move them into the owner's trash for
+  `storage.trash_retention_days` (default 30, `0` = final deletes as
+  before). Sync clients still see a normal deletion. New **Trash** page and
+  REST endpoints `GET /api/v1/trash`, `POST /api/v1/trash/{id}/restore`,
+  `DELETE /api/v1/trash/{id}` and `DELETE /api/v1/trash`; restores go back to
+  the original collection and name (409 with `name_taken`, `uid_taken`,
+  `collection_exists`, `collection_in_trash`, `collection_deleted` or
+  `invalid_target` on conflicts; objects of a permanently deleted collection
+  can be restored into another one with `?collection=`), keep ETag and
+  modification time, and appear as new changes for sync clients. The trash
+  counts towards the storage quota and holds at most 101 000 rows per user
+  (the oldest entries are dropped early; large ones are left to the
+  background purge so a delete never blocks the database for long); expired
+  and emptied entries are purged in small batches at startup, hourly and
+  shortly after emptying. With `trash_retention_days = 0` all remaining
+  entries are purged at startup (logged as a warning). Database migration
+  `0006_trash`; backups include the trash.
 - DAV `MOVE` and `COPY` (RFC 4918 §9.8/§9.9) for calendar objects and vCards
   between the user's own collections of the same kind, e.g. moving an event
   to another calendar. `Destination` is an absolute path or a URI on the
