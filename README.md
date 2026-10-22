@@ -309,6 +309,73 @@ that redirect URI, `[security] secure_cookies = false` and
 the issuer everywhere: Keycloak derives `iss` from the URL it is called with.
 Stop the container with `docker stop kc`.
 
+### Calendar subscriptions (webcal)
+
+Users can subscribe to published calendars (`webcal://` or `https://` links to an
+iCalendar feed, e.g. holidays, sports schedules, a shared Outlook or Google
+calendar). The **server** fetches the feed and stores its events in a read-only
+calendar, so every CalDAV client (Apple Calendar, Thunderbird, DAVx⁵, …) shows it
+like any other calendar and syncs it with `sync-collection`; clients never contact
+the feed themselves. Subscriptions are **off by default** because the server then
+makes outbound requests to addresses its users choose:
+
+```toml
+[subscriptions]
+enabled = true
+# Optional: only these hosts (also after redirects), or never these.
+# allowed_hosts = ["calendar.google.com", "*.example.org"]
+# denied_hosts = ["intranet.example.org"]
+```
+
+In the web UI: *Overview → Subscribed calendars → Subscribe to calendar* (link, name,
+color, refresh interval), with the last refresh, errors, *Refresh now* (at most once
+a minute) and *Unsubscribe*. REST API: `GET/POST /api/v1/subscriptions`,
+`PATCH/DELETE /api/v1/subscriptions/{slug}`, `POST /api/v1/subscriptions/{slug}/refresh`.
+
+- **Refreshing:** in the background, per subscription every 15 minutes to 7 days
+  (the owner's choice, otherwise the feed's `REFRESH-INTERVAL` / `X-PUBLISHED-TTL`,
+  otherwise `default_refresh_minutes`, 6 hours), with random jitter, at most
+  `max_concurrent_fetches` (2) at a time and conditional requests (`If-None-Match`,
+  `If-Modified-Since`). Only events that really changed get a new ETag and sync
+  revision, so clients do not download the whole calendar on every refresh. A feed
+  that fails (unreachable, HTTP error, not iCalendar, too large, quota) keeps its
+  last good content; the error is shown to the owner and retries back off (15
+  minutes, doubling, up to a day).
+- **Limits:** the feed goes through the same parser and validation as an import
+  (1 MiB per event, 10 000 events), counts towards the owner's storage quota, and
+  may have at most `max_bytes` (10 MiB). Each user may have `max_per_user` (20)
+  subscriptions and 10 subscribe attempts per 10 minutes.
+- **Read-only:** PUT, DELETE, COPY/MOVE into and PROPPATCH of a subscription answer
+  `403` with `DAV:need-privileges`, and `current-user-privilege-set` only contains
+  `read`. Name and color can be changed in the web UI. Unsubscribing (or deleting
+  the calendar) removes it permanently instead of moving it to the trash:
+  subscribing again restores the content.
+- **Feed URLs can contain secrets** (many services put an access token into the
+  link). They are stored in the database (and therefore in backups) and shown only
+  to their owner; logs only ever contain the host name.
+
+**SSRF protection** (lessons from Nextcloud, OX and others, see
+[docs/security/angriffshistorie.md](docs/security/angriffshistorie.md)): only
+`https` (`webcal` means https; plain `http` only with `allow_http = true`); no user
+name or password in the URL; only `allowed_ports` (443, plus 80 with `allow_http`);
+at most 2048 characters; host names must be fully qualified ASCII names (`xn--` form
+for internationalised names) – numeric forms like `2130706433`, `0x7f.1` or `127.1`,
+single-label names and `localhost`, `.local`, `.internal`, `.home.arpa` are refused.
+CalCraft resolves the name itself and refuses it if **any** of its addresses is not
+public: loopback, private (RFC 1918), carrier-grade NAT, link-local (including the
+cloud metadata address `169.254.169.254`), `0.0.0.0/8`, multicast, broadcast and
+reserved, documentation and benchmarking ranges, IPv6 outside `2000::/3`
+(`::1`, `fc00::/7` incl. `fd00:ec2::254`, `fe80::/10`, NAT64 `64:ff9b::/96`), 6to4,
+Teredo and other `2001::/23` assignments; IPv4-mapped IPv6 addresses are judged by
+their IPv4 address. The connection then goes to exactly the checked address (with
+the real name for TLS SNI, certificate check and `Host`), so DNS rebinding cannot
+redirect it. Redirects are followed manually (at most `max_redirects`, 3) and every
+hop is checked again; https → http is never followed. Every fetch has one deadline
+(`timeout_secs`, 30 s, plus 10 s per connection attempt), a size limit, no cookies,
+no credentials and the fixed User-Agent `calcraft/<version>`. Error messages are
+generic (`fetch_failed`) so that the server cannot be used to scan ports.
+Subscriptions with their own credentials (HTTP Basic) are not supported.
+
 ### Import and export
 
 Calendars can be exported and imported as iCalendar (`ics`), jCal (`jcal`), xCal
@@ -439,6 +506,9 @@ German):
   session cookies, a required CSRF header on state-changing API requests,
   plus `X-Frame-Options`, `Referrer-Policy` and optional HSTS
   (`security.hsts`).
+- **Calendar subscriptions:** off by default; the server fetches feeds only
+  from public addresses it resolved and checked itself, pinned against DNS
+  rebinding, with every redirect checked again (see *Calendar subscriptions*).
 - **Operations:** global and per-client request limits, `X-Forwarded-For`
   only from `server.trusted_proxies`, a verified backup before every
   database migration, and logs without secrets or contents (tested).

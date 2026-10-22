@@ -7,6 +7,41 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 
 ## [Unreleased]
 
+### Added
+
+- Calendar subscriptions (webcal/ICS feeds), off by default
+  (`[subscriptions] enabled`): the server fetches a feed and stores its events
+  in a read-only calendar that every CalDAV client syncs like any other
+  (sync-collection included). Web UI section *Subscribed calendars* on the
+  overview page and REST endpoints `GET/POST /api/v1/subscriptions`,
+  `PATCH/DELETE /api/v1/subscriptions/{slug}` and
+  `POST /api/v1/subscriptions/{slug}/refresh` (errors `invalid_url`,
+  `blocked_address`, `fetch_failed`, `not_icalendar`, `too_large`,
+  `limit_reached`, `rate_limited`). Refreshes run in the background (15 minutes
+  to 7 days, the feed's `REFRESH-INTERVAL`/`X-PUBLISHED-TTL` within these
+  bounds, default 6 hours, jitter, two fetches at a time, conditional
+  requests); only changed events get a new ETag and sync revision; a broken
+  feed keeps its last good content and backs off. SSRF protection: https only
+  (http only with `allow_http`), allowed ports, no user info, strict host
+  syntax, own DNS resolution with every address checked against private,
+  loopback, link-local, metadata, CGNAT, multicast, documentation, NAT64, 6to4,
+  Teredo and IPv4-mapped ranges, connection pinned to the checked address
+  (DNS rebinding), redirects followed manually and checked again (at most 3,
+  never https → http), deadline, size limit (10 MiB), no cookies or
+  credentials, fixed User-Agent; optional `allowed_hosts`/`denied_hosts`.
+  Limits: 20 subscriptions and 10 subscribe attempts per 10 minutes per user,
+  quota and object limits as for imports. Feed URLs are shown only to their
+  owner and never logged (host only). Database migration `0009_subscriptions`.
+- DAV: collections can be read-only (subscriptions): writes answer `403` with
+  `DAV:need-privileges`, `current-user-privilege-set` lists `read` only;
+  `CollectionInfo` in the REST API has a new `read_only` field.
+
+### Changed
+
+- Deleting a subscription calendar (DAV, REST API or web UI) removes it
+  permanently instead of moving it into the trash; trash entries cannot be
+  restored into a subscription.
+
 ## [0.1.0-alpha.1] – 2026-10-22
 
 First pre-release, for testing only – not for production use (open points:

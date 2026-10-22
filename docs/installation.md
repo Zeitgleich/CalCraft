@@ -628,6 +628,37 @@ sudo ufw enable
 Check from another machine that `http://cal.example.com:5232/` is **not**
 reachable.
 
+**Outbound connections.** CalCraft itself only connects out for features you
+enable: single sign-on (your identity provider), the update check
+(`api.github.com`, port 443) and calendar subscriptions (`[subscriptions]`,
+off by default). With subscriptions enabled the server fetches the feeds its
+users enter. CalCraft refuses private, loopback, link-local and cloud metadata
+addresses itself (after resolving the name and for every redirect, see the
+README), but an egress firewall is a good second line: allow outbound 443
+(and 80 only if you set `allow_http = true`) and block your internal networks
+for the CalCraft service user or container, for example:
+
+```bash
+# Example for a dedicated service user "calcraft" (nftables/iptables owner match):
+sudo iptables -A OUTPUT -m owner --uid-owner calcraft -d 10.0.0.0/8 -j REJECT
+```
+
+```bash
+sudo iptables -A OUTPUT -m owner --uid-owner calcraft -d 172.16.0.0/12 -j REJECT
+```
+
+```bash
+sudo iptables -A OUTPUT -m owner --uid-owner calcraft -d 192.168.0.0/16 -j REJECT
+```
+
+```bash
+sudo iptables -A OUTPUT -m owner --uid-owner calcraft -d 169.254.0.0/16 -j REJECT
+```
+
+Keep exceptions you need (e.g. a local identity provider or DNS resolver) in
+front of these rules. `allowed_hosts` restricts subscriptions to known feed
+providers if your users only need a few.
+
 ## 12. Connect clients
 
 1. Open `https://cal.example.com/` in a browser and log in.

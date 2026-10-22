@@ -811,6 +811,32 @@ async fn refresh_now_is_rate_limited() {
     let _guard = service.claim(sub.collection.id).unwrap();
     let err = feed_error(service.refresh(sub.collection.id).await.unwrap_err());
     assert_eq!(err, SubscriptionError::RateLimited);
+
+    // Subscribe attempts are limited per user, failed ones included (each
+    // one makes the server send a request).
+    server.respond(|_| response("404 Not Found", "", b""));
+    let mut attempts = 1; // the successful one above
+    loop {
+        let mut next = request(&url);
+        next.slug = None;
+        match service.create(&user, next).await {
+            Err(ServiceError::Feed(SubscriptionError::HttpStatus(404))) => attempts += 1,
+            Err(ServiceError::Feed(SubscriptionError::RateLimited)) => break,
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(attempts <= MAX_CREATE_ATTEMPTS);
+    }
+    assert_eq!(attempts, MAX_CREATE_ATTEMPTS);
+    let requests = server.requests().len();
+    let mut next = request(&url);
+    next.slug = None;
+    assert!(service.create(&user, next).await.is_err());
+    assert_eq!(server.requests().len(), requests, "no request once limited");
+    // The same slug as an existing calendar is refused before fetching.
+    assert!(matches!(
+        service.create(&user, request(&url)).await,
+        Err(ServiceError::Store(StoreError::CollectionExists))
+    ));
 }
 
 #[tokio::test]

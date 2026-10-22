@@ -127,6 +127,37 @@ check = false
 # Hours between checks (1-168); a random delay of up to 10 % is added.
 interval_hours = 24
 
+[subscriptions]
+# Calendar subscriptions (webcal/ICS feeds fetched by the server and shown as
+# read-only calendars). Off by default: when on, the server sends requests to
+# feed URLs its users enter - only to public addresses (private, loopback,
+# link-local, metadata and similar addresses are refused, also after DNS
+# resolution and redirects). Feed URLs may contain secret tokens; they are stored
+# in the database and never logged (only the host).
+enabled = false
+# Also allow plain http:// feeds (webcal:// always means https).
+allow_http = false
+# Ports feeds may use; empty: 443, plus 80 if allow_http.
+allowed_ports = []
+# If not empty, only these hosts (also for redirects): "example.com" exactly,
+# "*.example.com" any subdomain.
+allowed_hosts = []
+# Hosts that may never be subscribed to (same syntax).
+denied_hosts = []
+# Largest feed in bytes (64 KiB to 20 MiB).
+max_bytes = 10485760
+# Subscriptions per user (1-100).
+max_per_user = 20
+# Refresh interval if neither the user nor the feed sets one, in minutes
+# (15-10080); a feed's REFRESH-INTERVAL/X-PUBLISHED-TTL is used within these bounds.
+default_refresh_minutes = 360
+# Feeds fetched at the same time (1-16).
+max_concurrent_fetches = 2
+# Deadline for one fetch including redirects and the body, in seconds (5-120).
+timeout_secs = 30
+# Redirects followed per fetch (0-5); every hop is checked again.
+max_redirects = 3
+
 [logging]
 # Filter syntax of tracing-subscriber; RUST_LOG takes precedence.
 level = "info"

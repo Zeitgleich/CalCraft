@@ -20,7 +20,7 @@ pub mod fetch;
 pub mod ssrf;
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
@@ -46,6 +46,13 @@ pub const COMPONENTS: &str = "VEVENT,VTODO";
 /// Shortest time between two refreshes of one subscription ("refresh now"
 /// included).
 pub const MIN_REFRESH_GAP_SECS: i64 = 60;
+/// Subscribe attempts (that fetch something) per user within
+/// [`CREATE_WINDOW_SECS`]: failed attempts are not limited by the
+/// per-user cap, and every attempt makes the server send a request.
+pub const MAX_CREATE_ATTEMPTS: u32 = 10;
+const CREATE_WINDOW_SECS: i64 = 600;
+/// Users tracked for the attempt limit before stale entries are dropped.
+const MAX_TRACKED_USERS: usize = 10_000;
 /// How often the background task looks for due subscriptions.
 const TICK: Duration = Duration::from_secs(60);
 /// Due subscriptions picked up per tick.
@@ -71,7 +78,7 @@ pub enum SubscriptionError {
     TooLarge,
     #[error("limit reached: {0}")]
     LimitReached(&'static str),
-    #[error("the subscription was refreshed less than a minute ago")]
+    #[error("too many attempts; please wait a moment")]
     RateLimited,
 }
 
@@ -164,6 +171,9 @@ pub struct Subscriptions {
     default_refresh_secs: i64,
     fetches: Semaphore,
     in_flight: Mutex<HashSet<i64>>,
+    /// Per user: start of the window and subscribe attempts in it.
+    create_attempts: Mutex<HashMap<i64, (i64, u32)>>,
+    max_create_attempts: u32,
     /// [`MIN_REFRESH_GAP_SECS`]; lowered by tests only.
     min_gap: i64,
 }
@@ -238,6 +248,8 @@ impl Subscriptions {
             default_refresh_secs: clamp_interval(config.default_refresh_secs()),
             fetches: Semaphore::new(config.max_concurrent_fetches),
             in_flight: Mutex::new(HashSet::new()),
+            create_attempts: Mutex::new(HashMap::new()),
+            max_create_attempts: MAX_CREATE_ATTEMPTS,
             min_gap: MIN_REFRESH_GAP_SECS,
         })
     }
@@ -253,8 +265,30 @@ impl Subscriptions {
         let mut this = Self::with_fetcher(store, config, fetcher);
         if let Some(inner) = Arc::get_mut(&mut this) {
             inner.min_gap = 0;
+            inner.max_create_attempts = u32::MAX;
         }
         this
+    }
+
+    /// Counts a subscribe attempt of `user`; `false` once the limit for
+    /// the current window is reached.
+    fn allow_create(&self, user: i64, now: i64) -> bool {
+        let mut attempts = self
+            .create_attempts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if attempts.len() >= MAX_TRACKED_USERS {
+            attempts.retain(|_, (start, _)| now - *start < CREATE_WINDOW_SECS);
+        }
+        let entry = attempts.entry(user).or_insert((now, 0));
+        if now - entry.0 >= CREATE_WINDOW_SECS {
+            *entry = (now, 0);
+        }
+        if entry.1 >= self.max_create_attempts {
+            return false;
+        }
+        entry.1 += 1;
+        true
     }
 
     pub fn store(&self) -> &Store {
@@ -348,6 +382,18 @@ impl Subscriptions {
         }
         let url = self.fetcher.policy().parse_url(request.url)?;
         let slug = request.slug.clone().unwrap_or_else(new_slug);
+        // Checked before fetching anything; the store checks again.
+        if self
+            .store
+            .collection(owner.id, calcraft_core::CollectionKind::Calendar, &slug)
+            .await?
+            .is_some()
+        {
+            return Err(StoreError::CollectionExists.into());
+        }
+        if !self.allow_create(owner.id, now()) {
+            return Err(SubscriptionError::RateLimited.into());
+        }
         // Placeholder collection for validation: the real one is created
         // together with the objects.
         let placeholder = calcraft_store::Collection {
