@@ -627,8 +627,8 @@ impl Store {
         }
 
         let Some(item) = sqlx::query(
-            "SELECT uid, etag, component, range_start, range_end, content FROM items \
-             WHERE collection_id = ? AND name = ?",
+            "SELECT uid, etag, component, range_start, range_end, recurring, index_version, \
+               content FROM items WHERE collection_id = ? AND name = ?",
         )
         .bind(source_collection)
         .bind(source_name)
@@ -642,6 +642,8 @@ impl Store {
         let component: String = item.try_get("component")?;
         let range_start: Option<i64> = item.try_get("range_start")?;
         let range_end: Option<i64> = item.try_get("range_end")?;
+        let recurring: bool = item.try_get("recurring")?;
+        let index_version: i64 = item.try_get("index_version")?;
         let content: Vec<u8> = item.try_get("content")?;
         check(source_precondition, Some(&etag))?;
 
@@ -727,11 +729,13 @@ impl Store {
 
         let revision = bump_revision(&mut tx, destination_collection).await?;
         sqlx::query(
-            "INSERT INTO items (collection_id, name, uid, etag, component, range_start, range_end, content, revision) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+            "INSERT INTO items (collection_id, name, uid, etag, component, range_start, range_end, \
+               recurring, index_version, content, revision) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (collection_id, name) DO UPDATE SET \
                uid = excluded.uid, etag = excluded.etag, component = excluded.component, \
                range_start = excluded.range_start, range_end = excluded.range_end, \
+               recurring = excluded.recurring, index_version = excluded.index_version, \
                content = excluded.content, revision = excluded.revision, \
                modified_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
         )
@@ -742,6 +746,8 @@ impl Store {
         .bind(&component)
         .bind(range_start)
         .bind(range_end)
+        .bind(recurring)
+        .bind(index_version)
         .bind(&content)
         .bind(revision)
         .execute(&mut *tx)
@@ -1491,6 +1497,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transfers_keep_the_time_range_index() {
+        let (store, cal, _) = setup().await;
+        let work = calendar(&store, cal.owner_id, "work", "VEVENT,VTODO").await;
+        let mut new = item("u", "\"e\"", Some(5), Some(9));
+        new.recurring = true;
+        new.index_version = 1;
+        store
+            .put_item(cal.id, "a.ics", &new, &Precondition::None)
+            .await
+            .unwrap();
+        let none = Precondition::None;
+        store
+            .copy_item(&transfer(
+                cal.owner_id,
+                (cal.id, "a.ics"),
+                (work.id, "b.ics"),
+                &none,
+                false,
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let found = store
+            .query_candidates(work.id, None, Some(6), Some(7), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].recurring);
+        // Copies keep their index version: nothing to re-index.
+        assert!(store.stale_index(1, 0, 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn move_logs_removal_and_addition() {
         let (store, cal, _) = setup().await;
         let work = calendar(&store, cal.owner_id, "work", "VEVENT,VTODO").await;
@@ -1532,7 +1571,7 @@ mod tests {
         // Time range and UID travel with the object.
         assert_eq!(
             store
-                .query_item_meta(work.id, Some("VEVENT"), Some(0), Some(6), 10)
+                .query_candidates(work.id, Some("VEVENT"), Some(0), Some(6), None, 10)
                 .await
                 .unwrap()
                 .len(),
