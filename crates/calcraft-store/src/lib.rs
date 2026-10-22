@@ -625,7 +625,8 @@ mod tests {
             .create_user(&name("waiting"), "hash", None)
             .await
             .unwrap();
-        drop(store);
-        std::fs::remove_dir_all(&dir).unwrap();
+        // Close the pools first: Windows refuses to delete open files.
+        store.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
