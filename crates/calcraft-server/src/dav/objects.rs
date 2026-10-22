@@ -27,7 +27,10 @@ pub(crate) fn etag(content: &[u8]) -> String {
     format!("\"{}\"", &blake3::hash(content).to_hex()[..32])
 }
 
-fn header(headers: &HeaderMap, name: impl axum::http::header::AsHeaderName) -> Option<&str> {
+pub(super) fn header(
+    headers: &HeaderMap,
+    name: impl axum::http::header::AsHeaderName,
+) -> Option<&str> {
     headers
         .get(name)
         .and_then(|v| v.to_str().ok())
@@ -35,7 +38,7 @@ fn header(headers: &HeaderMap, name: impl axum::http::header::AsHeaderName) -> O
 }
 
 /// A conditional header in a form that is not supported.
-struct UnsupportedCondition;
+pub(super) struct UnsupportedCondition;
 
 impl IntoResponse for UnsupportedCondition {
     fn into_response(self) -> Response {
@@ -70,7 +73,7 @@ fn etag_list(value: &str, weak: bool) -> Result<Vec<String>, UnsupportedConditio
 }
 
 /// Reads `If-Match` / `If-None-Match` (RFC 9110 §13.1.1, §13.1.2).
-fn precondition(headers: &HeaderMap) -> Result<Precondition, UnsupportedCondition> {
+pub(super) fn precondition(headers: &HeaderMap) -> Result<Precondition, UnsupportedCondition> {
     match (header(headers, IF_MATCH), header(headers, IF_NONE_MATCH)) {
         (None, None) => Ok(Precondition::None),
         (None, Some("*")) => Ok(Precondition::MustNotExist),
@@ -135,16 +138,32 @@ impl std::fmt::Display for Rejection {
 }
 
 /// XML prefix of the precondition namespace for a collection kind.
-fn ns(kind: CollectionKind) -> &'static str {
+pub(super) fn ns(kind: CollectionKind) -> &'static str {
     match kind {
         CollectionKind::Calendar => "c",
         CollectionKind::Addressbook => "card",
     }
 }
 
+/// Largest accepted object for a collection kind.
+pub(crate) fn max_object_size(kind: CollectionKind, max_vcard_bytes: usize) -> usize {
+    match kind {
+        CollectionKind::Calendar => MAX_OBJECT_SIZE,
+        CollectionKind::Addressbook => max_vcard_bytes,
+    }
+}
+
 /// Validates an object for the target collection. This is the one check
-/// for stored objects: DAV PUT and imports both use it.
-pub(crate) fn check_object(collection: &Collection, body: &[u8]) -> Result<Validated, Rejection> {
+/// for stored objects: DAV PUT and imports both use it. vCards may be up
+/// to `max_vcard_bytes` (`storage.max_vcard_bytes`) large.
+pub(crate) fn check_object(
+    collection: &Collection,
+    body: &[u8],
+    max_vcard_bytes: usize,
+) -> Result<Validated, Rejection> {
+    if body.len() > max_object_size(collection.kind, max_vcard_bytes) {
+        return Err(Rejection::TooLarge);
+    }
     let invalid = |err| match err {
         IcalError::TooLarge => Rejection::TooLarge,
         err => Rejection::Invalid(err),
@@ -176,9 +195,13 @@ pub(crate) fn check_object(collection: &Collection, body: &[u8]) -> Result<Valid
 
 /// Validates the body for the target collection. On failure returns the
 /// precondition element to report (RFC 4791 §5.3.2.1, RFC 6352 §6.3.2.1).
-fn validate(collection: &Collection, body: &[u8]) -> Result<Validated, &'static str> {
+fn validate(
+    collection: &Collection,
+    body: &[u8],
+    max_vcard_bytes: usize,
+) -> Result<Validated, &'static str> {
     let calendar = collection.kind == CollectionKind::Calendar;
-    check_object(collection, body).map_err(|rejection| match rejection {
+    check_object(collection, body, max_vcard_bytes).map_err(|rejection| match rejection {
         Rejection::TooLarge if calendar => "<c:max-resource-size/>",
         Rejection::TooLarge => "<card:max-resource-size/>",
         Rejection::UnsupportedComponent => "<c:supported-calendar-component/>",
@@ -213,11 +236,12 @@ pub async fn put(ctx: Ctx<'_>, resource: Resource, request: Request) -> Response
         Err(err) => return err.into_response(),
     };
     let too_large = format!("<{}:max-resource-size/>", ns(kind));
-    let body = match read_body(request, MAX_OBJECT_SIZE).await {
+    let max_vcard_bytes = ctx.state.max_vcard_bytes;
+    let body = match read_body(request, max_object_size(kind, max_vcard_bytes)).await {
         Ok(body) => body,
         Err(_) => return dav_error(StatusCode::FORBIDDEN, &too_large),
     };
-    let validated = match validate(&collection, &body) {
+    let validated = match validate(&collection, &body, max_vcard_bytes) {
         Ok(validated) => validated,
         Err(condition) => return dav_error(StatusCode::FORBIDDEN, condition),
     };

@@ -1,0 +1,2 @@
+# Fuzz seeds keep their CRLF line endings (RFC 5545/6350 content lines).
+fuzz/seeds/** -text

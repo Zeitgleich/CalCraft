@@ -3,7 +3,9 @@
 //! Every DAV method the server routes is sent to every kind of resource
 //! path – owned by the requesting user (alice), by another user (bob) and by
 //! a user that does not exist (carol), plus path-traversal and
-//! percent-encoding tricks – with every kind of credential. For each request
+//! percent-encoding tricks – with every kind of credential. COPY and MOVE
+//! are sent with every `Destination` variant (own, another user's, nobody's,
+//! a missing collection, traversal, another host or scheme). For each request
 //! the test asserts
 //!
 //! * the exact status code (a small model of the DAV semantics for alice's
@@ -618,8 +620,136 @@ enum Case {
     Mkcalendar,
     MkcolExtended,
     MkcolPlain,
+    Copy(Dest),
+    Move(Dest),
     /// A method the server does not implement.
     Unknown(&'static str),
+}
+
+/// `Destination` variants of COPY and MOVE, relative to the kind of the
+/// request path (calendar or address book).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Dest {
+    /// A new object in alice's second collection, as absolute URI.
+    Own,
+    /// A new object in alice's second collection, as absolute path.
+    OwnPath,
+    /// An existing object of alice, with `Overwrite: F`.
+    OwnExistingNoOverwrite,
+    /// The request path itself.
+    Same,
+    /// A new object in bob's collection.
+    Foreign,
+    /// Bob's existing object (would be overwritten).
+    ForeignExisting,
+    /// Bob's object via a percent-encoded user name.
+    ForeignEncoded,
+    /// A collection of a user that does not exist.
+    Nobody,
+    /// A collection of alice that does not exist.
+    MissingCollection,
+    /// `..` segments into bob's collection.
+    Traversal,
+    /// Encoded `..%2f` into bob's collection.
+    EncodedTraversal,
+    /// Alice's own collection on another host.
+    OtherHost,
+    /// Another scheme.
+    OtherScheme,
+}
+
+const DESTS: [Dest; 13] = [
+    Dest::Own,
+    Dest::OwnPath,
+    Dest::OwnExistingNoOverwrite,
+    Dest::Same,
+    Dest::Foreign,
+    Dest::ForeignExisting,
+    Dest::ForeignEncoded,
+    Dest::Nobody,
+    Dest::MissingCollection,
+    Dest::Traversal,
+    Dest::EncodedTraversal,
+    Dest::OtherHost,
+    Dest::OtherScheme,
+];
+
+impl Dest {
+    /// Headers (`Destination`, maybe `Overwrite`) for a request to `target`.
+    fn headers(self, target: &Target) -> Vec<(String, String)> {
+        let card = target.is_addressbook_path();
+        let (home, own2, bob_existing, file) = if card {
+            (
+                "addressbooks",
+                ALICE.ab2,
+                "default/zqbobmark-card.vcf",
+                "zzmoved.vcf",
+            )
+        } else {
+            (
+                "calendars",
+                ALICE.cal2,
+                "default/zqbobmark-ev1.ics",
+                "zzmoved.ics",
+            )
+        };
+        let own_existing = if card {
+            format!("/dav/addressbooks/alice/default/{}", ALICE.card)
+        } else {
+            format!("/dav/calendars/alice/{}/{}", ALICE.cal2, ALICE.event2)
+        };
+        let destination = match self {
+            Self::Own => format!("http://localhost/dav/{home}/alice/{own2}/{file}"),
+            Self::OwnPath => format!("/dav/{home}/alice/{own2}/{file}"),
+            Self::OwnExistingNoOverwrite => own_existing,
+            Self::Same => format!("http://localhost{}", target.path),
+            Self::Foreign => format!("/dav/{home}/bob/default/{file}"),
+            Self::ForeignExisting => format!("http://localhost/dav/{home}/bob/{bob_existing}"),
+            Self::ForeignEncoded => format!("/dav/{home}/%62ob/{bob_existing}"),
+            Self::Nobody => format!("/dav/{home}/{NOBODY}/default/{file}"),
+            Self::MissingCollection => format!("/dav/{home}/alice/zz-none/{file}"),
+            Self::Traversal => format!("/dav/{home}/alice/default/../../bob/default/{file}"),
+            Self::EncodedTraversal => {
+                format!("/dav/{home}/alice/default/..%2f..%2fbob%2fdefault%2f{file}")
+            }
+            Self::OtherHost => format!("http://evil.example/dav/{home}/alice/{own2}/{file}"),
+            Self::OtherScheme => format!("ftp://localhost/dav/{home}/alice/{own2}/{file}"),
+        };
+        let mut headers = vec![
+            ("host".to_owned(), "localhost".to_owned()),
+            ("destination".to_owned(), destination),
+        ];
+        if self == Self::OwnExistingNoOverwrite {
+            headers.push(("overwrite".to_owned(), "F".to_owned()));
+        }
+        headers
+    }
+
+    /// Expected status for a COPY (`copy`) or MOVE of alice's own object at
+    /// `target`.
+    fn status(self, copy: bool, target: &Target) -> u16 {
+        // The source already is in the destination collection, or is the
+        // destination object itself.
+        let in_cal2 = target.path.contains(ALICE.cal2);
+        let card = target.is_addressbook_path();
+        match self {
+            // A copy into the same collection would duplicate the UID.
+            Self::Own | Self::OwnPath if copy && in_cal2 => 403,
+            Self::Own | Self::OwnPath => 201,
+            Self::OwnExistingNoOverwrite if card || in_cal2 => 403,
+            Self::OwnExistingNoOverwrite => 412,
+            Self::Same => 403,
+            // Not one of alice's collections: one indistinguishable answer.
+            Self::Foreign
+            | Self::ForeignExisting
+            | Self::ForeignEncoded
+            | Self::Nobody
+            | Self::MissingCollection
+            | Self::EncodedTraversal => 409,
+            Self::Traversal => 400,
+            Self::OtherHost | Self::OtherScheme => 502,
+        }
+    }
 }
 
 const READ_CASES: &[Case] = &[
@@ -648,10 +778,19 @@ const REPORT_CASES: &[Case] = &[
     Case::SyncInitial,
     Case::SyncForeignToken,
 ];
+/// COPY and MOVE with every destination variant.
+const COPY_MOVE_CASES: [Case; 26] = {
+    let mut cases = [Case::Options; 26];
+    let mut i = 0;
+    while i < DESTS.len() {
+        cases[2 * i] = Case::Copy(DESTS[i]);
+        cases[2 * i + 1] = Case::Move(DESTS[i]);
+        i += 1;
+    }
+    cases
+};
 /// Unimplemented methods, sent to every target.
 const UNKNOWN_CASES: &[Case] = &[
-    Case::Unknown("MOVE"),
-    Case::Unknown("COPY"),
     Case::Unknown("LOCK"),
     Case::Unknown("UNLOCK"),
     Case::Unknown("POST"),
@@ -712,6 +851,8 @@ impl Case {
             | Self::SyncForeignToken => "REPORT",
             Self::Mkcalendar => "MKCALENDAR",
             Self::MkcolExtended | Self::MkcolPlain => "MKCOL",
+            Self::Copy(_) => "COPY",
+            Self::Move(_) => "MOVE",
             Self::Unknown(method) => method,
         }
     }
@@ -766,6 +907,7 @@ impl Case {
                 )]),
                 String::new(),
             ),
+            Self::Copy(dest) | Self::Move(dest) => (dest.headers(target), String::new()),
             Self::DeleteIfMatch => (h(&[("if-match", "*")]), String::new()),
             Self::Put | Self::PutIfNoneMatch => {
                 let (content_type, body) = if card {
@@ -843,9 +985,10 @@ impl Case {
     }
 
     /// Expected status for an authenticated request by alice to her own
-    /// resource of kind `res`.
-    fn own_status(self, res: Res) -> u16 {
+    /// resource `target`.
+    fn own_status(self, target: &Target) -> u16 {
         use Res::*;
+        let res = target.res;
         let object = matches!(res, CalObject | CardObject);
         let missing = matches!(res, MissingCalObject | MissingCardObject);
         let collection = matches!(res, Calendar | Addressbook);
@@ -922,6 +1065,13 @@ impl Case {
                     405
                 }
             }
+            Self::Copy(dest) | Self::Move(dest) => match () {
+                () if object => dest.status(matches!(self, Self::Copy(_)), target),
+                // Collections cannot be copied or moved.
+                () if collection => 403,
+                () if missing || unmapped => 404,
+                () => 405,
+            },
             Self::Unknown(_) => 405,
         }
     }
@@ -1020,7 +1170,7 @@ async fn run_dav_matrix(cases: &[Case]) -> Stats {
                 } else if !cred.valid() {
                     401
                 } else if target.resolvable() {
-                    case.own_status(target.res)
+                    case.own_status(target)
                 } else {
                     404
                 };
@@ -1122,6 +1272,80 @@ async fn dav_matrix_reports() {
 }
 
 #[tokio::test]
+async fn dav_matrix_copy_move() {
+    report("copy/move", &run_dav_matrix(&COPY_MOVE_CASES).await);
+}
+
+/// A COPY/MOVE `Destination` that is not one of alice's collections –
+/// bob's (existing or not, with or without overwriting), nobody's, alice's
+/// missing one, encoded variants – gets one byte-identical answer, and
+/// nothing changes for either user.
+#[tokio::test]
+async fn dav_copy_move_foreign_destination_is_indistinguishable() {
+    let fx = fixture().await;
+    let alice_before = snapshot(&fx.store, &fx.alice, &fx.alice_session).await;
+    let sources = [
+        "/dav/calendars/alice/default/alice-ev1.ics",
+        "/dav/addressbooks/alice/default/alice-card.vcf",
+    ];
+    let mut count = 0;
+    for source in sources {
+        let (home, file, existing) = if source.contains("/addressbooks/") {
+            ("addressbooks", "x.vcf", "zqbobmark-card.vcf")
+        } else {
+            ("calendars", "x.ics", "zqbobmark-ev1.ics")
+        };
+        let destinations = [
+            format!("/dav/{home}/alice/zz-none/{file}"),
+            format!("http://localhost/dav/{home}/alice/zz-none/{file}"),
+            format!("/dav/{home}/bob/default/{file}"),
+            format!("/dav/{home}/bob/default/{existing}"),
+            format!("/dav/{home}/bob/zz-none/{file}"),
+            format!("/dav/{home}/bob/{}/{file}", BOB.cal2),
+            format!("/dav/{home}/bob/{}/{file}", BOB.ab2),
+            format!("/dav/{home}/%62ob/default/{existing}"),
+            format!("/dav/{home}/BOB/default/{existing}"),
+            format!("/dav/{home}/{NOBODY}/default/{file}"),
+            format!("/dav/{home}/{NOBODY}/zz-none/{file}"),
+            format!("/dav/{home}/alice/default/..%2f..%2fbob%2fdefault%2f{existing}"),
+            format!("/dav/{home}/alice/default/%252e%252e%252fbob%252f{existing}"),
+            format!("/dav/{home}/bob/default/{existing}/extra"),
+            "/dav/calendars/bob%2fdefault/x.ics".to_owned(),
+            "/api/v1/calendars".to_owned(),
+        ];
+        let mut first: Option<Reply> = None;
+        for method in ["COPY", "MOVE"] {
+            for destination in &destinations {
+                for overwrite in ["T", "F"] {
+                    let headers = vec![
+                        ("authorization".to_owned(), basic("alice", ALICE_PW)),
+                        ("host".to_owned(), "localhost".to_owned()),
+                        ("destination".to_owned(), destination.clone()),
+                        ("overwrite".to_owned(), overwrite.to_owned()),
+                    ];
+                    let reply = send(&fx.app, method, source, &headers, "").await;
+                    let context = format!("{method} {source} -> {destination} ({overwrite})");
+                    assert_eq!(reply.status, 409, "{context}: {}", reply.body);
+                    fx.assert_no_leak(&format!("{headers:?}"), &reply, &context);
+                    match &first {
+                        Some(first) => assert_eq!(&reply, first, "{context}"),
+                        None => first = Some(reply),
+                    }
+                    count += 1;
+                }
+            }
+        }
+    }
+    fx.assert_bob_unchanged("foreign destinations").await;
+    assert_eq!(
+        snapshot(&fx.store, &fx.alice, &fx.alice_session).await,
+        alice_before,
+        "alice's data changed"
+    );
+    println!("authz matrix copy/move destinations: {count} requests");
+}
+
+#[tokio::test]
 async fn dav_matrix_unknown_methods() {
     report("unknown", &run_dav_matrix(UNKNOWN_CASES).await);
 }
@@ -1167,7 +1391,7 @@ async fn dav_other_registered_methods_are_refused() {
 /// the "unknown" methods must really be unknown.
 #[test]
 fn dav_matrix_covers_every_allowed_method() {
-    let covered: BTreeSet<&str> = [READ_CASES, WRITE_CASES, REPORT_CASES]
+    let covered: BTreeSet<&str> = [READ_CASES, WRITE_CASES, REPORT_CASES, &COPY_MOVE_CASES]
         .concat()
         .iter()
         .map(|case| case.method())
@@ -1205,7 +1429,14 @@ async fn dav_wrong_passwords_are_rejected_everywhere() {
         "/dav/addressbooks/bob/default/",
         "/dav/calendars/carol/default/zqbobmark-ev1.ics",
     ];
-    let all_cases: Vec<Case> = [READ_CASES, WRITE_CASES, REPORT_CASES, UNKNOWN_CASES].concat();
+    let all_cases: Vec<Case> = [
+        READ_CASES,
+        WRITE_CASES,
+        REPORT_CASES,
+        &COPY_MOVE_CASES,
+        UNKNOWN_CASES,
+    ]
+    .concat();
     let representative: Vec<&Target> = targets
         .iter()
         .filter(|t| representative.contains(&t.path.as_str()))

@@ -1,6 +1,6 @@
 //! Content-line parser (RFC 5545 §3.1) producing a component tree.
 
-use crate::{IcalError, MAX_OBJECT_SIZE};
+use crate::{IcalError, MAX_OBJECT_SIZE, MAX_VCARD_SIZE};
 
 pub(crate) const MAX_DEPTH: usize = 8;
 const MAX_COMPONENTS: usize = 1_000;
@@ -65,9 +65,21 @@ const OBJECT_LIMITS: Limits = Limits {
     max_properties: MAX_PROPERTIES,
 };
 
+/// Limits for a single stored vCard, which may embed photos.
+const VCARD_LIMITS: Limits = Limits {
+    max_size: MAX_VCARD_SIZE,
+    ..OBJECT_LIMITS
+};
+
 /// Parses an iCalendar stream with exactly one top-level component.
 pub fn parse(data: &[u8]) -> Result<Component, IcalError> {
     let mut roots = parse_with(data, &OBJECT_LIMITS, false)?;
+    roots.pop().ok_or(IcalError::Malformed("no component"))
+}
+
+/// Like [`parse`], but with the larger size limit of a vCard.
+pub(crate) fn parse_vcard(data: &[u8]) -> Result<Component, IcalError> {
+    let mut roots = parse_with(data, &VCARD_LIMITS, false)?;
     roots.pop().ok_or(IcalError::Malformed("no component"))
 }
 

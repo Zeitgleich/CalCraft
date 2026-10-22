@@ -138,6 +138,34 @@ host or a Docker bridge must be listed, otherwise all users share the proxy's li
 CalCraft logs a warning once when it ignores `X-Forwarded-For` (see
 `docs/installation.md`).
 
+### Object sizes, contact photos and groups
+
+| Limit | Default | Setting |
+|---|---|---|
+| Request body | 10 MiB | `server.max_body_bytes` |
+| Calendar object | 1 MiB | fixed (`CALDAV:max-resource-size`) |
+| vCard incl. embedded photos | 2 MiB (less if `server.max_body_bytes` is smaller) | `storage.max_vcard_bytes`, 64 KiB – 10 MiB, at most `server.max_body_bytes` (`CARDDAV:max-resource-size`) |
+| Storage per user | 512 MiB | fixed, counts the stored bytes (base64 photos included) |
+
+Larger objects are rejected with `403` and the `max-resource-size` precondition;
+a body announced larger than `server.max_body_bytes` gets `413`. A reverse proxy
+must allow at least `server.max_body_bytes` (see `docs/installation.md`).
+
+Photos and logos (`PHOTO`, `LOGO`) are accepted embedded – vCard 3.0
+`ENCODING=b;TYPE=JPEG:<base64>` (also `ENCODING=BASE64`), vCard 4.0
+`data:image/…;base64,…` – if the base64 is syntactically valid, every declared
+type (all `TYPE` values, the `data:` media type) is JPEG, PNG, GIF or WebP, and
+the magic number of the first (at most 12) decoded bytes is one of them, with or
+without a declared type; `ENCODING`/`VALUE` must not contradict each other. Or as
+an `http`/`https` URI, which is stored but never fetched. Empty values are accepted, as they occur in exports. Anything else
+(`javascript:`, `file:`, SVG, invalid base64) is rejected with
+`CARDDAV:valid-address-data`. Apart from that magic number, image bytes are never
+decoded or interpreted, and photos are never served as `image/*`.
+Groups – vCard 4.0 `KIND:group` with `MEMBER`, Apple's
+`X-ADDRESSBOOKSERVER-KIND:group` with `X-ADDRESSBOOKSERVER-MEMBER` – are ordinary
+vCards with their own UID. Like every object they are stored and returned
+byte for byte as uploaded.
+
 ### Backups and upgrades
 
 ```sh

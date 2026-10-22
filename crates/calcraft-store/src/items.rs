@@ -71,6 +71,30 @@ pub enum Precondition {
     IfNoneMatch(Vec<String>),
 }
 
+/// A `COPY` or `MOVE` of one object between collections of one owner.
+#[derive(Debug, Clone, Copy)]
+pub struct Transfer<'a> {
+    /// Owner of both collections; the store checks it again.
+    pub owner_id: i64,
+    pub source_collection: i64,
+    pub source_name: &'a str,
+    /// `If-Match` / `If-None-Match` of the request, evaluated on the source.
+    pub source_precondition: &'a Precondition,
+    pub destination_collection: i64,
+    pub destination_name: &'a str,
+    /// `Overwrite: T`: an existing destination is replaced.
+    pub overwrite: bool,
+}
+
+/// Result of a successful [`Store::copy_item`] / [`Store::move_item`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferOutcome {
+    /// `false` if an existing destination was replaced.
+    pub created: bool,
+    /// Entity tag of the destination (the content is unchanged).
+    pub etag: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PutOutcome {
     Created,
@@ -448,6 +472,210 @@ impl Store {
         Ok(true)
     }
 
+    /// Copies an object to another (or the same) collection of the same
+    /// owner (WebDAV `COPY`, RFC 4918 §9.8). See [`Store::move_item`].
+    pub async fn copy_item(&self, request: &Transfer<'_>) -> Result<Option<TransferOutcome>> {
+        self.transfer_item(request, false).await
+    }
+
+    /// Moves an object to another (or the same) collection of the same
+    /// owner (WebDAV `MOVE`, RFC 4918 §9.9) in one transaction: the
+    /// destination is created or replaced, the source removed with a
+    /// tombstone, and both collections get a change-log entry and a new sync
+    /// revision. Returns `None` if the source does not exist.
+    ///
+    /// The source is removed here explicitly, not through
+    /// [`Store::delete_item`]: a moved object was not deleted by the user and
+    /// must never be treated like a deletion (e.g. end up in a trash).
+    pub async fn move_item(&self, request: &Transfer<'_>) -> Result<Option<TransferOutcome>> {
+        self.transfer_item(request, true).await
+    }
+
+    async fn transfer_item(
+        &self,
+        request: &Transfer<'_>,
+        remove_source: bool,
+    ) -> Result<Option<TransferOutcome>> {
+        let Transfer {
+            owner_id,
+            source_collection,
+            source_name,
+            source_precondition,
+            destination_collection,
+            destination_name,
+            overwrite,
+        } = *request;
+        let same_collection = source_collection == destination_collection;
+        if same_collection && source_name == destination_name {
+            return Err(StoreError::SameResource);
+        }
+        // IMMEDIATE: all checks and both writes are one atomic step (see
+        // `put_item`). Parallel MOVEs of one object are serialised; all but
+        // the first find no source.
+        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+
+        // Both collections must belong to the owner and be of one kind. The
+        // caller resolved them for the owner already; this keeps the queries
+        // scoped and covers collections deleted in the meantime.
+        let collection = |id: i64| {
+            sqlx::query("SELECT kind, components FROM collections WHERE id = ? AND owner_id = ?")
+                .bind(id)
+                .bind(owner_id)
+        };
+        let Some(source) = collection(source_collection)
+            .fetch_optional(&mut *tx)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let Some(destination) = collection(destination_collection)
+            .fetch_optional(&mut *tx)
+            .await?
+        else {
+            return Err(StoreError::MissingDestination);
+        };
+        let kind: String = destination.try_get("kind")?;
+        if source.try_get::<String, _>("kind")? != kind {
+            return Err(StoreError::MissingDestination);
+        }
+
+        let Some(item) = sqlx::query(
+            "SELECT uid, etag, component, range_start, range_end, content FROM items \
+             WHERE collection_id = ? AND name = ?",
+        )
+        .bind(source_collection)
+        .bind(source_name)
+        .fetch_optional(&mut *tx)
+        .await?
+        else {
+            return Ok(None);
+        };
+        let uid: String = item.try_get("uid")?;
+        let etag: String = item.try_get("etag")?;
+        let component: String = item.try_get("component")?;
+        let range_start: Option<i64> = item.try_get("range_start")?;
+        let range_end: Option<i64> = item.try_get("range_end")?;
+        let content: Vec<u8> = item.try_get("content")?;
+        check(source_precondition, Some(&etag))?;
+
+        if kind == CollectionKind::Calendar.as_str() {
+            let components: String = destination.try_get("components")?;
+            if !components.split(',').any(|c| c == component) {
+                return Err(StoreError::UnsupportedComponent);
+            }
+        }
+
+        let existing = sqlx::query("SELECT 1 FROM items WHERE collection_id = ? AND name = ?")
+            .bind(destination_collection)
+            .bind(destination_name)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some();
+        if existing && !overwrite {
+            return Err(StoreError::PreconditionFailed);
+        }
+
+        // The UID must stay unique in the destination; the source itself
+        // does not count when it is moved within its collection.
+        let conflict: Option<String> = sqlx::query(
+            "SELECT name FROM items WHERE collection_id = ?1 AND uid = ?2 AND name != ?3 \
+               AND NOT (?4 AND collection_id = ?5 AND name = ?6)",
+        )
+        .bind(destination_collection)
+        .bind(&uid)
+        .bind(destination_name)
+        .bind(remove_source)
+        .bind(source_collection)
+        .bind(source_name)
+        .fetch_optional(&mut *tx)
+        .await?
+        .map(|row| row.try_get("name"))
+        .transpose()?;
+        if let Some(other) = conflict {
+            return Err(StoreError::UidConflict(other));
+        }
+
+        if !existing && !(remove_source && same_collection) {
+            let count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM items WHERE collection_id = ?")
+                .bind(destination_collection)
+                .fetch_one(&mut *tx)
+                .await?
+                .try_get("n")?;
+            if count >= MAX_ITEMS_PER_COLLECTION {
+                return Err(StoreError::Limit("too many objects in collection"));
+            }
+        }
+
+        // A copy adds its size to the owner's usage (objects plus trash). A
+        // move stays within the owner's collections and never increases it,
+        // so it is not counted twice.
+        if !remove_source {
+            let used: i64 = sqlx::query(
+                "SELECT COALESCE(SUM(length(i.content)), 0) AS used FROM items i \
+                 JOIN collections c ON c.id = i.collection_id \
+                 WHERE c.owner_id = ?1 AND NOT (i.collection_id = ?2 AND i.name = ?3)",
+            )
+            .bind(owner_id)
+            .bind(destination_collection)
+            .bind(destination_name)
+            .fetch_one(&mut *tx)
+            .await?
+            .try_get("used")?;
+            // The trash counts towards the quota, as for PUT.
+            let used = used.saturating_add(crate::trash::trash_bytes(&mut *tx, owner_id).await?);
+            let size = i64::try_from(content.len()).unwrap_or(i64::MAX);
+            if used.saturating_add(size) > self.settings.quota_bytes() {
+                return Err(StoreError::Limit("storage quota exceeded"));
+            }
+        }
+
+        if remove_source {
+            // Removed first: within one collection the UID must stay unique.
+            sqlx::query("DELETE FROM items WHERE collection_id = ? AND name = ?")
+                .bind(source_collection)
+                .bind(source_name)
+                .execute(&mut *tx)
+                .await?;
+            let revision = bump_revision(&mut tx, source_collection).await?;
+            record_change(&mut tx, source_collection, revision, source_name, true).await?;
+        }
+
+        let revision = bump_revision(&mut tx, destination_collection).await?;
+        sqlx::query(
+            "INSERT INTO items (collection_id, name, uid, etag, component, range_start, range_end, content, revision) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (collection_id, name) DO UPDATE SET \
+               uid = excluded.uid, etag = excluded.etag, component = excluded.component, \
+               range_start = excluded.range_start, range_end = excluded.range_end, \
+               content = excluded.content, revision = excluded.revision, \
+               modified_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+        )
+        .bind(destination_collection)
+        .bind(destination_name)
+        .bind(&uid)
+        .bind(&etag)
+        .bind(&component)
+        .bind(range_start)
+        .bind(range_end)
+        .bind(&content)
+        .bind(revision)
+        .execute(&mut *tx)
+        .await?;
+        record_change(
+            &mut tx,
+            destination_collection,
+            revision,
+            destination_name,
+            false,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(Some(TransferOutcome {
+            created: !existing,
+            etag,
+        }))
+    }
+
     /// Changes after revision `since`, oldest first, at most `limit` rows.
     /// Live objects come with their current metadata (one joined query).
     pub async fn changes_since(
@@ -521,6 +749,19 @@ impl Store {
         .await?;
         rows.iter().map(meta_from_row).collect()
     }
+}
+
+async fn bump_revision(
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    collection_id: i64,
+) -> Result<i64> {
+    Ok(sqlx::query(
+        "UPDATE collections SET sync_revision = sync_revision + 1 WHERE id = ? RETURNING sync_revision",
+    )
+    .bind(collection_id)
+    .fetch_one(&mut **tx)
+    .await?
+    .try_get("sync_revision")?)
 }
 
 pub(crate) async fn record_change(
@@ -1020,5 +1261,330 @@ mod tests {
                 .is_none()
         );
         assert!(store.item(work.id, "x.ics").await.unwrap().is_none());
+    }
+
+    async fn calendar(store: &Store, owner_id: i64, slug: &str, components: &str) -> Collection {
+        store
+            .create_collection(
+                owner_id,
+                CollectionKind::Calendar,
+                &slug.parse().unwrap(),
+                None,
+                None,
+                None,
+                components,
+            )
+            .await
+            .unwrap()
+    }
+
+    fn transfer<'a>(
+        owner_id: i64,
+        from: (i64, &'a str),
+        to: (i64, &'a str),
+        precondition: &'a Precondition,
+        overwrite: bool,
+    ) -> Transfer<'a> {
+        Transfer {
+            owner_id,
+            source_collection: from.0,
+            source_name: from.1,
+            source_precondition: precondition,
+            destination_collection: to.0,
+            destination_name: to.1,
+            overwrite,
+        }
+    }
+
+    async fn revision(store: &Store, collection: &Collection) -> i64 {
+        store
+            .collection(collection.owner_id, collection.kind, &collection.slug)
+            .await
+            .unwrap()
+            .unwrap()
+            .sync_revision
+    }
+
+    #[tokio::test]
+    async fn move_logs_removal_and_addition() {
+        let (store, cal, _) = setup().await;
+        let work = calendar(&store, cal.owner_id, "work", "VEVENT,VTODO").await;
+        store
+            .put_item(
+                cal.id,
+                "a.ics",
+                &item("u", "\"e\"", Some(5), Some(9)),
+                &Precondition::None,
+            )
+            .await
+            .unwrap();
+        let (before_cal, before_work) =
+            (revision(&store, &cal).await, revision(&store, &work).await);
+        let none = Precondition::None;
+        let outcome = store
+            .move_item(&transfer(
+                cal.owner_id,
+                (cal.id, "a.ics"),
+                (work.id, "b.ics"),
+                &none,
+                true,
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            outcome,
+            TransferOutcome {
+                created: true,
+                etag: "\"e\"".into()
+            }
+        );
+        assert!(store.item(cal.id, "a.ics").await.unwrap().is_none());
+        assert_eq!(
+            store.item(work.id, "b.ics").await.unwrap().unwrap().etag,
+            "\"e\""
+        );
+        // Time range and UID travel with the object.
+        assert_eq!(
+            store
+                .query_item_meta(work.id, Some("VEVENT"), Some(0), Some(6), 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .item_name_by_uid(work.id, "u")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("b.ics")
+        );
+        assert_eq!(revision(&store, &cal).await, before_cal + 1);
+        assert_eq!(revision(&store, &work).await, before_work + 1);
+        let removed = store.changes_since(cal.id, before_cal, 10).await.unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(
+            (removed[0].name.as_str(), removed[0].meta.is_none()),
+            ("a.ics", true)
+        );
+        let added = store.changes_since(work.id, before_work, 10).await.unwrap();
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].name, "b.ics");
+        assert_eq!(added[0].meta.as_ref().unwrap().etag, "\"e\"");
+        // The source is gone: a second move finds nothing.
+        assert_eq!(
+            store
+                .move_item(&transfer(
+                    cal.owner_id,
+                    (cal.id, "a.ics"),
+                    (work.id, "c.ics"),
+                    &none,
+                    true
+                ))
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_within_a_collection_keeps_the_uid() {
+        let (store, cal, _) = setup().await;
+        store
+            .put_item(
+                cal.id,
+                "a.ics",
+                &item("u", "\"e\"", None, None),
+                &Precondition::None,
+            )
+            .await
+            .unwrap();
+        let none = Precondition::None;
+        let renamed = transfer(
+            cal.owner_id,
+            (cal.id, "a.ics"),
+            (cal.id, "b.ics"),
+            &none,
+            true,
+        );
+        // A copy would duplicate the UID in the collection.
+        assert!(matches!(
+            store.copy_item(&renamed).await,
+            Err(StoreError::UidConflict(name)) if name == "a.ics"
+        ));
+        assert!(store.move_item(&renamed).await.unwrap().unwrap().created);
+        assert_eq!(store.items(cal.id).await.unwrap().len(), 1);
+        assert!(matches!(
+            store
+                .move_item(&transfer(
+                    cal.owner_id,
+                    (cal.id, "b.ics"),
+                    (cal.id, "b.ics"),
+                    &none,
+                    true
+                ))
+                .await,
+            Err(StoreError::SameResource)
+        ));
+    }
+
+    #[tokio::test]
+    async fn copy_and_overwrite_rules() {
+        let (store, cal, _) = setup().await;
+        let work = calendar(&store, cal.owner_id, "work", "VEVENT").await;
+        let todos = calendar(&store, cal.owner_id, "todos", "VTODO").await;
+        store
+            .put_item(
+                cal.id,
+                "a.ics",
+                &item("u", "\"e1\"", None, None),
+                &Precondition::None,
+            )
+            .await
+            .unwrap();
+        store
+            .put_item(
+                work.id,
+                "x.ics",
+                &item("other", "\"e2\"", None, None),
+                &Precondition::None,
+            )
+            .await
+            .unwrap();
+        let none = Precondition::None;
+        let owner = cal.owner_id;
+        // Overwrite F on an existing destination.
+        assert!(matches!(
+            store
+                .copy_item(&transfer(
+                    owner,
+                    (cal.id, "a.ics"),
+                    (work.id, "x.ics"),
+                    &none,
+                    false
+                ))
+                .await,
+            Err(StoreError::PreconditionFailed)
+        ));
+        // Source preconditions.
+        let wrong = Precondition::IfMatch(vec!["\"nope\"".into()]);
+        assert!(matches!(
+            store
+                .copy_item(&transfer(
+                    owner,
+                    (cal.id, "a.ics"),
+                    (work.id, "y.ics"),
+                    &wrong,
+                    true
+                ))
+                .await,
+            Err(StoreError::PreconditionFailed)
+        ));
+        let right = Precondition::IfMatch(vec!["\"e1\"".into()]);
+        let replaced = store
+            .copy_item(&transfer(
+                owner,
+                (cal.id, "a.ics"),
+                (work.id, "x.ics"),
+                &right,
+                true,
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!replaced.created);
+        assert_eq!(
+            store.item(work.id, "x.ics").await.unwrap().unwrap().etag,
+            "\"e1\""
+        );
+        assert!(store.item(cal.id, "a.ics").await.unwrap().is_some());
+        // The UID is now used in `work`: a second copy conflicts.
+        assert!(matches!(
+            store.copy_item(&transfer(owner, (cal.id, "a.ics"), (work.id, "z.ics"), &none, true)).await,
+            Err(StoreError::UidConflict(name)) if name == "x.ics"
+        ));
+        // Component set of the destination.
+        assert!(matches!(
+            store
+                .move_item(&transfer(
+                    owner,
+                    (cal.id, "a.ics"),
+                    (todos.id, "a.ics"),
+                    &none,
+                    true
+                ))
+                .await,
+            Err(StoreError::UnsupportedComponent)
+        ));
+        assert!(store.item(cal.id, "a.ics").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn transfers_stay_within_one_owner_and_kind() {
+        let (store, alice, bob) = setup().await;
+        store
+            .put_item(
+                alice.id,
+                "a.ics",
+                &item("u", "\"e\"", None, None),
+                &Precondition::None,
+            )
+            .await
+            .unwrap();
+        let none = Precondition::None;
+        // Into bob's calendar, even with alice as owner.
+        assert!(matches!(
+            store
+                .move_item(&transfer(
+                    alice.owner_id,
+                    (alice.id, "a.ics"),
+                    (bob.id, "a.ics"),
+                    &none,
+                    true
+                ))
+                .await,
+            Err(StoreError::MissingDestination)
+        ));
+        // As bob: alice's source does not exist for him.
+        assert_eq!(
+            store
+                .move_item(&transfer(
+                    bob.owner_id,
+                    (alice.id, "a.ics"),
+                    (bob.id, "a.ics"),
+                    &none,
+                    true
+                ))
+                .await
+                .unwrap(),
+            None
+        );
+        // Into alice's address book.
+        let book = store
+            .collection(
+                alice.owner_id,
+                CollectionKind::Addressbook,
+                &DEFAULT_COLLECTION_SLUG.parse().unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            store
+                .copy_item(&transfer(
+                    alice.owner_id,
+                    (alice.id, "a.ics"),
+                    (book.id, "a.ics"),
+                    &none,
+                    true
+                ))
+                .await,
+            Err(StoreError::MissingDestination)
+        ));
+        assert!(store.item(alice.id, "a.ics").await.unwrap().is_some());
+        assert!(store.items(bob.id).await.unwrap().is_empty());
+        assert!(store.items(book.id).await.unwrap().is_empty());
     }
 }

@@ -127,6 +127,90 @@ pub async fn resolve(
     })
 }
 
+/// Maximum length of a `Destination` header.
+const MAX_DESTINATION_LEN: usize = 2048;
+
+/// Why a `Destination` header was refused before resolving it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DestinationError {
+    /// Not an absolute URI or absolute path, or with query, fragment, user
+    /// info or dot segments (400).
+    Malformed,
+    /// Another scheme or host than the request: another server (502,
+    /// RFC 4918 §9.8.5).
+    OtherServer,
+}
+
+/// Lower-cased authority without the default port of `scheme`.
+fn normalize_authority(authority: &str, scheme: Option<&str>) -> String {
+    let authority = authority.to_ascii_lowercase();
+    let default = match scheme {
+        Some("http") => &[":80"][..],
+        Some(_) => &[":443"][..],
+        // The request's own scheme is not known behind a TLS-terminating
+        // reverse proxy: accept either default port.
+        None => &[":80", ":443"][..],
+    };
+    default
+        .iter()
+        .find_map(|port| authority.strip_suffix(port))
+        .map_or(authority.clone(), str::to_owned)
+}
+
+/// The raw path of a `Destination` header (RFC 4918 §10.3), for
+/// [`resolve`]. An absolute URI must name the host the request was sent to
+/// (`request_authority`: the `Host` header, which the documented nginx and
+/// Apache setups pass through unchanged, or the HTTP/2 authority); its
+/// scheme may be `http` or `https`, since the reverse proxy terminates TLS.
+/// The path is not decoded here: [`resolve`] applies exactly the rules of
+/// request paths.
+pub fn destination_path<'a>(
+    value: &'a str,
+    request_authority: Option<&str>,
+) -> Result<&'a str, DestinationError> {
+    if value.is_empty()
+        || value.len() > MAX_DESTINATION_LEN
+        || !value.bytes().all(|b| b.is_ascii_graphic())
+    {
+        return Err(DestinationError::Malformed);
+    }
+    let path = if value.starts_with('/') {
+        // `//host/…` is a network-path reference, not a path.
+        if value.starts_with("//") {
+            return Err(DestinationError::Malformed);
+        }
+        value
+    } else {
+        let (scheme, rest) = value.split_once("://").ok_or(DestinationError::Malformed)?;
+        let scheme = scheme.to_ascii_lowercase();
+        if scheme != "http" && scheme != "https" {
+            return Err(DestinationError::OtherServer);
+        }
+        let (authority, path) = match rest.find('/') {
+            Some(i) => rest.split_at(i),
+            None => (rest, "/"),
+        };
+        if authority.is_empty() || authority.contains(['@', '?', '#']) {
+            return Err(DestinationError::Malformed);
+        }
+        let same = request_authority.is_some_and(|own| {
+            normalize_authority(authority, Some(&scheme)) == normalize_authority(own, None)
+        });
+        if !same {
+            return Err(DestinationError::OtherServer);
+        }
+        path
+    };
+    let dot_segment = |segment: &str| {
+        let segment = segment.to_ascii_lowercase().replace("%2e", ".");
+        segment == "." || segment == ".."
+    };
+    if path.contains(['?', '#']) || path.split('/').any(dot_segment) {
+        return Err(DestinationError::Malformed);
+    }
+    Ok(path)
+}
+
 /// Extracts the object name from an href that must point into `collection_href`.
 /// Accepts absolute URLs by ignoring scheme and host.
 pub fn item_name_from_href(href: &str, collection_href: &str) -> Option<String> {
@@ -227,6 +311,66 @@ mod tests {
         }
         let long = format!("/dav/calendars/alice/default/{}.ics", "a".repeat(300));
         assert!(parse_target(&long).is_none());
+    }
+
+    #[test]
+    fn parses_destinations() {
+        let host = Some("cal.example.com");
+        let path = "/dav/calendars/alice/work/x.ics";
+        for value in [
+            path.to_owned(),
+            format!("https://cal.example.com{path}"),
+            format!("http://cal.example.com{path}"),
+            format!("HTTPS://Cal.Example.COM{path}"),
+            format!("https://cal.example.com:443{path}"),
+            format!("http://cal.example.com:80{path}"),
+        ] {
+            assert_eq!(destination_path(&value, host), Ok(path), "{value}");
+        }
+        assert_eq!(
+            destination_path("http://localhost:5232/dav/", Some("localhost:5232")),
+            Ok("/dav/")
+        );
+        assert_eq!(destination_path("https://cal.example.com", host), Ok("/"));
+        // The request may carry the default port in Host.
+        assert_eq!(
+            destination_path("https://cal.example.com/dav/", Some("cal.example.com:443")),
+            Ok("/dav/")
+        );
+
+        use DestinationError::{Malformed, OtherServer};
+        for (value, error) in [
+            ("", Malformed),
+            ("dav/calendars/alice/work/x.ics", Malformed),
+            ("//evil.example/dav/", Malformed),
+            ("/dav/calendars/alice/work/x.ics?x=1", Malformed),
+            ("/dav/calendars/alice/work/x.ics#f", Malformed),
+            ("/dav/calendars/alice/../bob/default/x.ics", Malformed),
+            ("/dav/calendars/alice/work/./x.ics", Malformed),
+            ("/dav/calendars/alice/%2e%2e/bob/default/x.ics", Malformed),
+            ("/dav/calendars/alice/work/%2E%2e", Malformed),
+            ("/dav/calendars/alice/work/x y.ics", Malformed),
+            ("https://alice@cal.example.com/dav/", Malformed),
+            ("https:///dav/", Malformed),
+            (
+                "https://evil.example/dav/calendars/alice/work/x.ics",
+                OtherServer,
+            ),
+            ("https://cal.example.com.evil.example/dav/", OtherServer),
+            ("https://cal.example.com:8443/dav/", OtherServer),
+            ("http://cal.example.com:443/dav/", OtherServer),
+            ("ftp://cal.example.com/dav/", OtherServer),
+            ("javascript://cal.example.com/dav/", OtherServer),
+        ] {
+            assert_eq!(destination_path(value, host), Err(error), "{value}");
+        }
+        assert_eq!(destination_path(&"/".repeat(3000), host), Err(Malformed));
+        // Without a request authority, only paths can be checked.
+        assert_eq!(destination_path(path, None), Ok(path));
+        assert_eq!(
+            destination_path(&format!("https://cal.example.com{path}"), None),
+            Err(OtherServer)
+        );
     }
 
     #[test]

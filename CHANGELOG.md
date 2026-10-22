@@ -27,6 +27,36 @@ follow [Semantic Versioning](https://semver.org/). Release process:
   shortly after emptying. With `trash_retention_days = 0` all remaining
   entries are purged at startup (logged as a warning). Database migration
   `0006_trash`; backups include the trash.
+- DAV `MOVE` and `COPY` (RFC 4918 §9.8/§9.9) for calendar objects and vCards
+  between the user's own collections of the same kind, e.g. moving an event
+  to another calendar. `Destination` is an absolute path or a URI on the
+  request's host (`http` or `https`; other hosts/schemes: `502`), decoded
+  like request paths; `..`, query, fragment and user info: `400`.
+  `Overwrite: T|F` (default `T`), `If-Match`/`If-None-Match` apply to the
+  source, `Depth` must be absent or `0`. Answers: `201`/`204` with the
+  (unchanged) `ETag`; `412` for `Overwrite: F` on an existing object or a
+  failed condition; `409` if the destination is not an object path in one
+  of the user's collections – a missing collection and another user's
+  collection get the same answer; `403` for source = destination,
+  collections as source or destination, `no-uid-conflict`,
+  `supported-calendar-component` and a calendar object into an address book
+  (or back); `507` when a copy exceeds the quota (a move is not counted
+  twice). Source removal, destination write, tombstone, change-log entries
+  and sync tokens of both collections happen in one transaction; a moved
+  object never counts as deleted by the user. Moving or copying whole
+  collections, other users' collections and other servers are not supported.
+- CardDAV contact photos: vCards may be up to `storage.max_vcard_bytes`
+  (default 2 MiB, or `server.max_body_bytes` if smaller; an explicit value
+  must be at most 10 MiB and `server.max_body_bytes`) instead of 1 MiB;
+  `CARDDAV:max-resource-size` reports it. `PHOTO`/`LOGO` must be empty,
+  valid base64 of JPEG, PNG, GIF or WebP (vCard 3.0 `ENCODING=b`, vCard 4.0
+  `data:image/…` URI; every declared `TYPE` and the magic number of the
+  first bytes are checked, with or without a declared type) or an
+  `http`/`https` URI (never fetched); `javascript:`, `file:`, SVG and
+  invalid base64 are rejected. vCard 4.0 `MEMBER` requires
+  `KIND:group`. Tests for Apple and vCard 4.0 groups; the store's
+  `test-hooks` feature can lower the quota for quota tests.
+
 - Request limits: at most `server.max_concurrent_requests` (256) requests at
   once (`503`), per client 32 concurrent requests and 120 burst / 20 per
   second (`429`), 20 failed logins per client in 15 minutes; IPv6 per /64,

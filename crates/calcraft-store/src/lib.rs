@@ -34,7 +34,9 @@ pub use backup::{
     BackupInfo, DEFAULT_ACQUIRE_TIMEOUT, RestoreInfo, StoreOptions, backup_database,
     latest_migration, pre_migration_backups, restore_database,
 };
-pub use items::{Change, Item, ItemMeta, NewItem, Precondition, PutOutcome};
+pub use items::{
+    Change, Item, ItemMeta, NewItem, Precondition, PutOutcome, Transfer, TransferOutcome,
+};
 pub use items::{MAX_BYTES_PER_USER, MAX_ITEMS_PER_COLLECTION};
 pub use oidc::{ApprovedBinding, OidcBinding};
 #[cfg(feature = "test-hooks")]
@@ -78,6 +80,16 @@ pub enum StoreError {
     UidConflict(String),
     #[error("collection already exists")]
     CollectionExists,
+    /// COPY/MOVE: the destination collection does not exist (or is not one
+    /// of the owner's collections of the source's kind).
+    #[error("destination collection does not exist")]
+    MissingDestination,
+    /// COPY/MOVE: source and destination are the same resource.
+    #[error("source and destination are the same")]
+    SameResource,
+    /// COPY/MOVE: the destination calendar does not accept the component type.
+    #[error("component type not supported by the destination")]
+    UnsupportedComponent,
     #[error("limit reached: {0}")]
     Limit(&'static str),
     /// A trash entry cannot be restored (see [`TrashConflict`]).
@@ -345,6 +357,18 @@ impl Store {
     #[cfg(feature = "test-hooks")]
     pub fn simulate_failure(&self, failure: SimulatedFailure) {
         self.simulation.set(failure);
+    }
+
+    /// Lowers the storage quota per user to `bytes` (0: the real quota),
+    /// so quota tests need not write 512 MiB (feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    pub fn set_quota_for_tests(&self, bytes: i64) {
+        let bytes = if bytes > 0 {
+            bytes
+        } else {
+            items::MAX_BYTES_PER_USER
+        };
+        self.settings.quota_bytes.store(bytes, Ordering::Relaxed);
     }
 
     /// Creates a user with a default calendar and address book.
