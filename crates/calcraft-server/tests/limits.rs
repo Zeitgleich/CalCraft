@@ -127,8 +127,44 @@ async fn ipv6_clients_share_a_limit_per_network() {
 }
 
 #[tokio::test]
-async fn forwarded_for_is_ignored_without_trusted_proxies() {
+async fn loopback_proxies_are_trusted_by_default() {
     let app = app(&rate_limited(1)).await;
+    // A reverse proxy on the same host: each forwarded client counts alone.
+    for (peer, client) in [("127.0.0.1", "198.51.100.1"), ("::1", "198.51.100.2")] {
+        assert_eq!(
+            status(&app, from(peer, get_forwarded("/healthz", client))).await,
+            StatusCode::OK,
+            "{peer} {client}"
+        );
+    }
+    assert_eq!(
+        status(
+            &app,
+            from("127.0.0.1", get_forwarded("/healthz", "198.51.100.1"))
+        )
+        .await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // Other peers are not trusted (and trigger the configuration warning).
+    for client in ["198.51.100.3", "198.51.100.4"] {
+        let expected = if client.ends_with('3') {
+            StatusCode::OK
+        } else {
+            StatusCode::TOO_MANY_REQUESTS
+        };
+        assert_eq!(
+            status(&app, from("203.0.113.8", get_forwarded("/healthz", client))).await,
+            expected,
+            "{client}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn forwarded_for_is_ignored_without_trusted_proxies() {
+    let mut config = rate_limited(1);
+    config.server.trusted_proxies = Vec::new();
+    let app = app(&config).await;
     assert_eq!(
         status(
             &app,

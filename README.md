@@ -108,10 +108,13 @@ CalCraft rejects excess requests immediately instead of queueing them:
 IPv6 clients count per /64 (`client_ipv6_prefix`). The per-client tables are capped
 (`max_tracked_clients`, idle entries are evicted), so address hopping cannot exhaust
 memory. The client is the TCP peer address; `X-Forwarded-For` is only used when the
-peer is listed in `server.trusted_proxies` (empty by default), read from the right
-and skipping trusted proxies, so entries a client adds itself are ignored. Behind a
-reverse proxy on the same host set `trusted_proxies = ["127.0.0.1/32", "::1/128"]`,
-otherwise all users share the proxy's limits (see `docs/installation.md`).
+peer is listed in `server.trusted_proxies`, read from the right and skipping trusted
+proxies, so entries a client adds itself are ignored. The default
+`["127.0.0.1/32", "::1/128"]` fits a reverse proxy on the same host; a local process
+could then choose its client address, set `[]` if that matters. A proxy on another
+host or a Docker bridge must be listed, otherwise all users share the proxy's limits;
+CalCraft logs a warning once when it ignores `X-Forwarded-For` (see
+`docs/installation.md`).
 
 ### Backups and upgrades
 

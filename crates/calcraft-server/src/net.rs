@@ -54,6 +54,21 @@ impl Cidr {
         Some(Self { network, prefix })
     }
 
+    /// `127.0.0.1/32` and `::1/128`: the default of
+    /// `server.trusted_proxies`, for a reverse proxy on the same host.
+    pub fn loopback() -> Vec<Self> {
+        vec![
+            Self {
+                network: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                prefix: 32,
+            },
+            Self {
+                network: IpAddr::V6(Ipv6Addr::LOCALHOST),
+                prefix: 128,
+            },
+        ]
+    }
+
     pub fn contains(&self, ip: IpAddr) -> bool {
         let ip = ip.to_canonical();
         same_family(ip, self.network) && mask(ip, self.prefix) == self.network
@@ -67,8 +82,10 @@ impl FromStr for Cidr {
         let error = || CidrError(text.chars().take(64).collect());
         let (address, prefix) = match text.split_once('/') {
             Some((address, prefix)) => {
+                // Plain decimal without leading zeros (`/024` is rejected).
                 if prefix.is_empty()
                     || prefix.len() > 3
+                    || (prefix.len() > 1 && prefix.starts_with('0'))
                     || !prefix.bytes().all(|b| b.is_ascii_digit())
                 {
                     return Err(error());
@@ -281,6 +298,7 @@ mod tests {
         assert!(!cidr("0.0.0.0/0").contains(ip("::1")));
         assert!(cidr("::/0").contains(ip("2001:db8::1")));
         assert_eq!(cidr("::ffff:10.0.0.0/104"), cidr("10.0.0.0/8"));
+        assert_eq!(Cidr::loopback(), [cidr("127.0.0.1/32"), cidr("::1/128")]);
     }
 
     #[test]
@@ -295,6 +313,8 @@ mod tests {
             "10.0.0.1/8",
             "192.0.2.0/+8",
             "192.0.2.0/0024",
+            "192.0.2.0/024",
+            "192.0.2.0/00",
             " 192.0.2.0/24",
             "192.0.2.0/24 ",
             "192.0.2.0/24/8",

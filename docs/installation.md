@@ -226,7 +226,7 @@ bind = "127.0.0.1:5232"
 max_body_bytes = 10485760
 request_timeout_secs = 30
 # The reverse proxy (section 9/10) runs on this host: take the client address
-# from its X-Forwarded-For header.
+# from its X-Forwarded-For header (this is the default).
 trusted_proxies = ["127.0.0.1/32", "::1/128"]
 
 [storage]
@@ -280,14 +280,20 @@ Notes:
   until the window ends. IPv6 clients count per /64. See
   `calcraft.example.toml` for the keys; raise the per-client values if many
   users share one public address.
-- `trusted_proxies` decides whose `X-Forwarded-For` header is believed. It is
-  empty by default, so every request counts for the TCP peer, which behind a
-  reverse proxy is the proxy itself: then all users share one set of
-  per-client limits. List exactly the proxies in front of CalCraft, and only
-  if they append the client address (both configurations below do). Never
-  list networks that clients can send requests from directly.
+- `trusted_proxies` decides whose `X-Forwarded-For` header is believed. The
+  default is loopback (`127.0.0.1/32`, `::1/128`), which fits the proxy on the
+  same host used here. Requests from other peers count for the TCP peer; if
+  that is a proxy not listed, all users share one set of per-client limits,
+  and CalCraft logs a warning once ("ignoring X-Forwarded-For …"). List
+  exactly the proxies in front of CalCraft, and only if they append the
+  client address (both configurations below do). Never list networks that
+  clients can send requests from directly.
+- Trade-off of the default: every local process can send requests with a
+  chosen `X-Forwarded-For`, i.e. evade the per-client limits or use up the
+  failed logins of another address. On hosts with untrusted local users
+  and no local proxy, set `trusted_proxies = []`.
 - With Docker (section 4b), the proxy's connections arrive from the bridge
-  gateway, usually `172.17.0.1`:
+  gateway, usually `172.17.0.1`, which is not trusted by default:
   `-e 'CALCRAFT_SERVER__TRUSTED_PROXIES=["172.17.0.1/32"]'`. Run with
   `CALCRAFT_LOGGING__LEVEL=calcraft_server=debug` once to see the `client`
   field of the request spans and check that it shows real client addresses.
@@ -497,7 +503,7 @@ Notes:
 - Keep `X-Forwarded-For $proxy_add_x_forwarded_for`: it appends the address
   nginx received the request from, which CalCraft uses as client address for
   its per-client limits when `server.trusted_proxies` contains nginx's
-  address (`127.0.0.1/32`, `::1/128`, see section 5). Do not replace it with
+  address (default `127.0.0.1/32`, `::1/128`, see section 5). Do not replace it with
   `$http_x_forwarded_for`, which passes the client's own value unchecked.
   CalCraft reads `X-Forwarded-For` only, not `X-Real-IP` or `Forwarded`.
 - If nginx itself sits behind another proxy or a load balancer, add that one
@@ -584,7 +590,8 @@ Notes:
 - `mod_proxy` appends the client address to `X-Forwarded-For` by default
   (`ProxyAddHeaders On`); keep it that way and do not set the header with
   `RequestHeader`. With `server.trusted_proxies = ["127.0.0.1/32", "::1/128"]`
-  (section 5) CalCraft then applies its per-client limits to the real client.
+  (the default, section 5) CalCraft then applies its per-client limits to the
+  real client.
   Do not combine it with `mod_remoteip` rewriting the header.
 - Over HTTP/2, Apache passes oversized uploads on and CalCraft rejects them;
   the client then sees `502` instead of `413`. The request is refused either

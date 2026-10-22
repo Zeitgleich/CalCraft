@@ -260,6 +260,10 @@ pub async fn totp_enable(
             "two-factor authentication is already enabled",
         ));
     }
+    // A client with too many failed logins cannot guess codes here either.
+    if state.auth.client_blocked(client) {
+        return Err(ApiError::InvalidCredentials);
+    }
     // Proves that the authenticator app was set up correctly.
     let accepted = match totp_verify(&totp.secret, &request.code, now()) {
         Some(step) => state.store.accept_totp_step(user.id, step).await?,

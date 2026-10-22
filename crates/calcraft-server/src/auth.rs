@@ -277,14 +277,8 @@ impl Authenticator {
         username: &Username,
         client: Option<ClientKey>,
     ) -> Result<Attempt<'_>, Refusal> {
-        if let Some(client) = client {
-            let blocked = self
-                .client_failures
-                .lock()
-                .map_or(true, |table| table.is_blocked(client, Instant::now()));
-            if blocked {
-                return Err(Refusal::Client);
-            }
+        if self.client_blocked(client) {
+            return Err(Refusal::Client);
         }
         let Ok(mut failures) = self.failures.lock() else {
             return Err(Refusal::Account);
@@ -522,6 +516,15 @@ impl Authenticator {
         }
     }
 
+    /// Whether `client` has used up its failed logins (`false` if unknown).
+    pub fn client_blocked(&self, client: Option<ClientKey>) -> bool {
+        client.is_some_and(|client| {
+            self.client_failures
+                .lock()
+                .map_or(true, |table| table.is_blocked(client, Instant::now()))
+        })
+    }
+
     /// Records a failed attempt of `client` (known or unknown username).
     pub fn record_client_failure(&self, client: Option<ClientKey>) {
         let Some(client) = client else {
@@ -653,6 +656,8 @@ mod tests {
             auth.reserve(&"alice".parse().unwrap(), client(1)),
             Err(Refusal::Client)
         ));
+        assert!(auth.client_blocked(client(1)));
+        assert!(!auth.client_blocked(client(2)) && !auth.client_blocked(None));
         // Requests without a known client only use the account lockout.
         assert!(matches!(
             auth.authenticate(Some(good.as_bytes()), None).await,

@@ -34,11 +34,15 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::{
     config::ServerConfig,
-    net::{Cidr, ClientIp, ClientKey, client_ip},
+    net::{Cidr, ClientIp, ClientKey, X_FORWARDED_FOR, client_ip, is_trusted},
 };
 
 /// How often idle entries are swept from the client tables.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+/// Least time between two extra sweeps of a full client table; in between,
+/// a new client evicts a single entry. Bounds the work an address sprayer
+/// can cause under the table lock.
+const FULL_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 /// Fixed-point scale of the token bucket (milli-tokens).
 const TOKEN: u64 = 1000;
 /// Least time between two "server overloaded" warnings in the log.
@@ -46,6 +50,17 @@ const OVERLOAD_WARN_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Paths exempt from the overall limit.
 const HEALTH_PATHS: &[&str] = &["/healthz", "/readyz"];
+
+/// Milli-tokens of `bucket` at `now`: tokens/s × TOKEN per 1e9 ns, capped
+/// at `burst`.
+fn refilled(bucket: &Bucket, burst: u64, rate: u64, now: Instant) -> u64 {
+    let elapsed = now.saturating_duration_since(bucket.updated).as_nanos();
+    let added = elapsed.saturating_mul(u128::from(rate)) / 1_000_000;
+    u64::try_from(added)
+        .unwrap_or(u64::MAX)
+        .saturating_add(bucket.tokens)
+        .min(burst)
+}
 
 /// Outcome of [`ClientTable::admit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +94,8 @@ pub struct ClientTable {
     /// Tokens per second.
     rate: u64,
     last_sweep: Instant,
+    /// Last sweep because the table was full.
+    last_full_sweep: Option<Instant>,
 }
 
 impl ClientTable {
@@ -90,6 +107,7 @@ impl ClientTable {
             burst: u64::from(burst.max(1)) * TOKEN,
             rate: u64::from(rate.max(1)),
             last_sweep: now,
+            last_full_sweep: None,
         }
     }
 
@@ -102,27 +120,15 @@ impl ClientTable {
     }
 
     fn refilled(&self, bucket: &Bucket, now: Instant) -> u64 {
-        let elapsed = now.saturating_duration_since(bucket.updated).as_nanos();
-        // tokens/s * TOKEN milli-tokens per 1e9 ns.
-        let added = elapsed.saturating_mul(u128::from(self.rate)) / 1_000_000;
-        u64::try_from(added)
-            .unwrap_or(u64::MAX)
-            .saturating_add(bucket.tokens)
-            .min(self.burst)
-    }
-
-    /// An entry without requests in flight and with a full bucket is
-    /// indistinguishable from a new one and can be dropped without loss.
-    fn is_idle(&self, bucket: &Bucket, now: Instant) -> bool {
-        bucket.in_flight == 0 && self.refilled(bucket, now) == self.burst
+        refilled(bucket, self.burst, self.rate, now)
     }
 
     fn sweep(&mut self, now: Instant) {
-        let entries = std::mem::take(&mut self.entries);
-        self.entries = entries
-            .into_iter()
-            .filter(|(_, bucket)| !self.is_idle(bucket, now))
-            .collect();
+        let (burst, rate) = (self.burst, self.rate);
+        // An entry without requests in flight and with a full bucket is
+        // indistinguishable from a new one and can be dropped without loss.
+        self.entries
+            .retain(|_, bucket| bucket.in_flight > 0 || refilled(bucket, burst, rate, now) < burst);
         self.last_sweep = now;
     }
 
@@ -131,9 +137,15 @@ impl ClientTable {
         if self.entries.len() < self.capacity {
             return true;
         }
-        self.sweep(now);
-        if self.entries.len() < self.capacity {
-            return true;
+        let sweep_due = self
+            .last_full_sweep
+            .is_none_or(|at| now.saturating_duration_since(at) >= FULL_SWEEP_INTERVAL);
+        if sweep_due {
+            self.last_full_sweep = Some(now);
+            self.sweep(now);
+            if self.entries.len() < self.capacity {
+                return true;
+            }
         }
         let oldest = self
             .entries
@@ -249,20 +261,30 @@ impl FailureTable {
 
     /// Records a failed attempt of `key`. Returns `true` when this failure
     /// blocked the client.
+    ///
+    /// When the table is full, expired entries go first, then the oldest
+    /// entry that is not blocked. Blocked entries are never evicted, so
+    /// spraying new addresses cannot unblock a client. If every entry is
+    /// blocked, the new key is not tracked: per-client counting fails open
+    /// for it (the per-account lockout still applies) instead of letting a
+    /// sprayer block new clients.
     pub fn record(&mut self, key: ClientKey, now: Instant) -> bool {
-        let window = self.window;
+        let (window, max_failures) = (self.window, self.max_failures);
         if !self.entries.contains_key(&key) && self.entries.len() >= self.capacity {
             self.entries
                 .retain(|_, f| now.saturating_duration_since(f.since) < window);
             if self.entries.len() >= self.capacity {
-                // The entry closest to expiry goes.
                 let oldest = self
                     .entries
                     .iter()
+                    .filter(|(_, f)| f.count < max_failures)
                     .min_by_key(|(_, f)| f.since)
                     .map(|(key, _)| *key);
-                if let Some(oldest) = oldest {
-                    self.entries.remove(&oldest);
+                match oldest {
+                    Some(oldest) => {
+                        self.entries.remove(&oldest);
+                    }
+                    None => return false,
                 }
             }
         }
@@ -287,6 +309,7 @@ pub struct Limiter {
     ipv6_prefix: u8,
     last_overload_warning: Mutex<Option<Instant>>,
     missing_peer_warned: AtomicBool,
+    untrusted_forwarded_warned: AtomicBool,
 }
 
 impl Limiter {
@@ -304,6 +327,7 @@ impl Limiter {
             ipv6_prefix: config.client_ipv6_prefix,
             last_overload_warning: Mutex::new(None),
             missing_peer_warned: AtomicBool::new(false),
+            untrusted_forwarded_warned: AtomicBool::new(false),
         })
     }
 
@@ -354,11 +378,22 @@ pub async fn resolve_client(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let ip = client_ip(
-        limiter.peer(&request),
-        request.headers(),
-        &limiter.trusted_proxies,
-    );
+    let peer = limiter.peer(&request);
+    if request.headers().contains_key(X_FORWARDED_FOR)
+        && !is_trusted(&limiter.trusted_proxies, peer)
+        && !limiter
+            .untrusted_forwarded_warned
+            .swap(true, Ordering::Relaxed)
+    {
+        // Once per process: a reverse proxy that is not trusted makes all
+        // users share its per-client limits.
+        tracing::warn!(
+            %peer,
+            "ignoring X-Forwarded-For from a peer not in server.trusted_proxies; \
+             if CalCraft runs behind this reverse proxy, add it to server.trusted_proxies"
+        );
+    }
+    let ip = client_ip(peer, request.headers(), &limiter.trusted_proxies);
     let client = ClientIp {
         ip,
         key: ClientKey::new(ip, limiter.ipv6_prefix),
@@ -521,6 +556,32 @@ mod tests {
     }
 
     #[test]
+    fn full_table_is_swept_at_most_once_per_second() {
+        let t0 = Instant::now();
+        let mut table = ClientTable::new(3, 10, 1, 1000, t0);
+        let fill = |table: &mut ClientTable, keys: std::ops::Range<u32>, at: Instant| {
+            for n in keys {
+                assert_eq!(table.admit(key(n), at), Admission::Admitted);
+                table.release(key(n));
+            }
+        };
+        fill(&mut table, 0..3, t0);
+        // 10 ms later every bucket is full again: the sweep empties the table.
+        let t1 = t0 + Duration::from_millis(10);
+        fill(&mut table, 10..11, t1);
+        assert_eq!(table.len(), 1);
+        fill(&mut table, 11..13, t1);
+        // Full again within the second: a new client evicts one entry only,
+        // although all others are idle.
+        let t2 = t1 + Duration::from_millis(10);
+        fill(&mut table, 20..21, t2);
+        assert_eq!(table.len(), 3);
+        // After a second, the next full table is swept again.
+        fill(&mut table, 30..31, t1 + FULL_SWEEP_INTERVAL);
+        assert_eq!(table.len(), 1);
+    }
+
+    #[test]
     fn idle_entries_are_swept_periodically() {
         let t0 = Instant::now();
         let mut table = ClientTable::new(100, 10, 2, 1, t0);
@@ -565,5 +626,34 @@ mod tests {
             assert!(table.len() <= 2);
         }
         assert!(!table.is_empty());
+    }
+
+    #[test]
+    fn spraying_cannot_unblock_a_client() {
+        let t0 = Instant::now();
+        let window = Duration::from_secs(900);
+        let mut table = FailureTable::new(2, 2, window);
+        table.record(key(1), t0);
+        assert!(table.record(key(1), t0));
+        // Thousands of new addresses only evict each other.
+        for n in 10..10_000 {
+            table.record(key(n), t0 + Duration::from_secs(1));
+            assert!(table.is_blocked(key(1), t0 + Duration::from_secs(1)));
+            assert!(table.len() <= 2);
+        }
+        // With every entry blocked, new clients are not tracked (fail open
+        // for them) and blocked ones stay blocked.
+        table.record(key(2), t0);
+        assert!(table.record(key(2), t0));
+        let t1 = t0 + Duration::from_secs(2);
+        assert!(table.is_blocked(key(1), t1) && table.is_blocked(key(2), t1));
+        for _ in 0..5 {
+            assert!(!table.record(key(3), t1));
+        }
+        assert!(!table.is_blocked(key(3), t1));
+        assert_eq!(table.len(), 2);
+        // Once the window ends, there is room again.
+        assert!(!table.record(key(3), t0 + window));
+        assert!(!table.is_blocked(key(1), t0 + window));
     }
 }

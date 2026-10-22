@@ -66,7 +66,9 @@ pub struct ServerConfig {
     /// then least recently seen entries are evicted beyond that.
     pub max_tracked_clients: usize,
     /// Reverse proxies (CIDR ranges) whose `X-Forwarded-For` header is used
-    /// to determine the client address. Empty: the header is never used.
+    /// to determine the client address. Default: loopback, for a reverse
+    /// proxy on the same host (only local processes can connect from
+    /// there). Empty: the header is never used.
     pub trusted_proxies: Vec<Cidr>,
 }
 
@@ -86,7 +88,7 @@ impl Default for ServerConfig {
             max_login_failures_per_client: 20,
             client_ipv6_prefix: 64,
             max_tracked_clients: 10_000,
-            trusted_proxies: Vec::new(),
+            trusted_proxies: Cidr::loopback(),
         }
     }
 }
@@ -560,6 +562,11 @@ impl Config {
                 "server: max_concurrent_requests (1 000 000) or max_tracked_clients (10 000 000) too large",
             ));
         }
+        if server.max_tracked_clients < server.max_concurrent_requests {
+            return Err(ConfigError::Invalid(
+                "server.max_tracked_clients must be at least server.max_concurrent_requests",
+            ));
+        }
         if !CLIENT_IPV6_PREFIX.contains(&server.client_ipv6_prefix) {
             return Err(ConfigError::Invalid(
                 "server.client_ipv6_prefix must be between 32 and 128",
@@ -632,8 +639,11 @@ mod tests {
         assert_eq!(server.client_rate_per_second, 20);
         assert_eq!(server.max_login_failures_per_client, 20);
         assert_eq!(server.client_ipv6_prefix, 64);
-        // No proxy is trusted unless configured.
-        assert!(server.trusted_proxies.is_empty());
+        // A reverse proxy on the same host is trusted by default.
+        assert_eq!(server.trusted_proxies, Cidr::loopback());
+        // Trusting nobody has to be configured explicitly.
+        let config = from_toml("[server]\ntrusted_proxies = []\n").unwrap();
+        assert!(config.server.trusted_proxies.is_empty());
 
         let config =
             from_toml("[server]\ntrusted_proxies = [\"127.0.0.1/32\", \"::1\", \"10.0.0.0/8\"]\n")
@@ -654,6 +664,7 @@ mod tests {
             "max_login_failures_per_client = 0",
             "max_tracked_clients = 0",
             "max_concurrent_requests = 2000000",
+            "max_tracked_clients = 255",
             "client_ipv6_prefix = 31",
             "client_ipv6_prefix = 129",
             "trusted_proxies = [\"10.0.0.1/8\"]",

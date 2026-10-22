@@ -33,13 +33,17 @@ client_ipv6_prefix = 64
 # evicted beyond that, so memory stays bounded.
 max_tracked_clients = 10000
 # Reverse proxies whose X-Forwarded-For header is used (CIDR ranges or single
-# addresses). Empty (default): the header is ignored and the TCP peer is the
-# client. With a proxy on the same host:
-# trusted_proxies = ["127.0.0.1/32", "::1/128"]
+# addresses). The default trusts loopback, i.e. a reverse proxy on the same
+# host. Trade-off: any local process can then send X-Forwarded-For and choose
+# its client address (evade the per-client limits, or use up another
+# address's failed logins). Set [] to never use the header, e.g. when nothing
+# runs in front of CalCraft and untrusted local users exist. A proxy elsewhere
+# (other host, Docker bridge) must be listed explicitly. CalCraft warns once
+# when it receives X-Forwarded-For from a peer that is not listed.
 # Only list proxies that append the address they received the request from
 # (nginx: $proxy_add_x_forwarded_for, Apache mod_proxy: default). Otherwise
 # clients can choose their address and evade the per-client limits.
-trusted_proxies = []
+trusted_proxies = ["127.0.0.1/32", "::1/128"]
 
 [storage]
 # SQLite database file, created with owner-only permissions on first start.
