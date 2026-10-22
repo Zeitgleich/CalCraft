@@ -25,7 +25,10 @@ pub(crate) fn etag(content: &[u8]) -> String {
     format!("\"{}\"", &blake3::hash(content).to_hex()[..32])
 }
 
-fn header(headers: &HeaderMap, name: impl axum::http::header::AsHeaderName) -> Option<&str> {
+pub(super) fn header(
+    headers: &HeaderMap,
+    name: impl axum::http::header::AsHeaderName,
+) -> Option<&str> {
     headers
         .get(name)
         .and_then(|v| v.to_str().ok())
@@ -33,7 +36,7 @@ fn header(headers: &HeaderMap, name: impl axum::http::header::AsHeaderName) -> O
 }
 
 /// A conditional header in a form that is not supported.
-struct UnsupportedCondition;
+pub(super) struct UnsupportedCondition;
 
 impl IntoResponse for UnsupportedCondition {
     fn into_response(self) -> Response {
@@ -68,7 +71,7 @@ fn etag_list(value: &str, weak: bool) -> Result<Vec<String>, UnsupportedConditio
 }
 
 /// Reads `If-Match` / `If-None-Match` (RFC 9110 §13.1.1, §13.1.2).
-fn precondition(headers: &HeaderMap) -> Result<Precondition, UnsupportedCondition> {
+pub(super) fn precondition(headers: &HeaderMap) -> Result<Precondition, UnsupportedCondition> {
     match (header(headers, IF_MATCH), header(headers, IF_NONE_MATCH)) {
         (None, None) => Ok(Precondition::None),
         (None, Some("*")) => Ok(Precondition::MustNotExist),
@@ -133,7 +136,7 @@ impl std::fmt::Display for Rejection {
 }
 
 /// XML prefix of the precondition namespace for a collection kind.
-fn ns(kind: CollectionKind) -> &'static str {
+pub(super) fn ns(kind: CollectionKind) -> &'static str {
     match kind {
         CollectionKind::Calendar => "c",
         CollectionKind::Addressbook => "card",

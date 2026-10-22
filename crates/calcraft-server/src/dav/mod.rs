@@ -5,6 +5,7 @@
 //! cannot be probed. Resolution and the ownership check live in [`paths`].
 
 mod collections;
+mod copymove;
 mod objects;
 mod paths;
 mod propfind;
@@ -33,7 +34,7 @@ pub use paths::valid_item_name;
 /// authorization matrix test (`tests/authz_matrix.rs`) fails for any method
 /// listed here that it does not cover.
 pub const ALLOWED_METHODS: &str =
-    "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, REPORT, MKCALENDAR, MKCOL";
+    "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, REPORT, MKCALENDAR, MKCOL, COPY, MOVE";
 /// DAV compliance classes.
 const DAV_CLASSES: &str = "1, 3, calendar-access, addressbook, extended-mkcol";
 const WWW_AUTHENTICATE_VALUE: &str = "Basic realm=\"CalCraft\", charset=\"UTF-8\"";
@@ -81,6 +82,8 @@ pub async fn handle(State(state): State<AppState>, request: Request) -> Response
         "HEAD" => objects::get(ctx, resource, false).await,
         "PUT" => objects::put(ctx, resource, request).await,
         "DELETE" => objects::delete(ctx, resource, request).await,
+        "COPY" => copymove::handle(ctx, resource, request, copymove::Mode::Copy).await,
+        "MOVE" => copymove::handle(ctx, resource, request, copymove::Mode::Move).await,
         _ => method_not_allowed(),
     }
 }

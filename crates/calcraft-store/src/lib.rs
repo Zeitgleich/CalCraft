@@ -25,7 +25,9 @@ pub use backup::{
     BackupInfo, DEFAULT_ACQUIRE_TIMEOUT, RestoreInfo, StoreOptions, backup_database,
     latest_migration, pre_migration_backups, restore_database,
 };
-pub use items::{Change, Item, ItemMeta, NewItem, Precondition, PutOutcome};
+pub use items::{
+    Change, Item, ItemMeta, NewItem, Precondition, PutOutcome, Transfer, TransferOutcome,
+};
 pub use oidc::{ApprovedBinding, OidcBinding};
 #[cfg(feature = "test-hooks")]
 pub use test_hooks::SimulatedFailure;
@@ -64,6 +66,16 @@ pub enum StoreError {
     UidConflict(String),
     #[error("collection already exists")]
     CollectionExists,
+    /// COPY/MOVE: the destination collection does not exist (or is not one
+    /// of the owner's collections of the source's kind).
+    #[error("destination collection does not exist")]
+    MissingDestination,
+    /// COPY/MOVE: source and destination are the same resource.
+    #[error("source and destination are the same")]
+    SameResource,
+    /// COPY/MOVE: the destination calendar does not accept the component type.
+    #[error("component type not supported by the destination")]
+    UnsupportedComponent,
     #[error("limit reached: {0}")]
     Limit(&'static str),
     #[error("{0}")]
