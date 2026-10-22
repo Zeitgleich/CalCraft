@@ -9,7 +9,7 @@
 
 Self-hosted CalDAV/CardDAV server written in Rust, with an optional web interface.
 
-> **Status:** first pre-release, 0.1.0-alpha.1. Not ready for production use;
+> **Status:** pre-release, 0.1.0-alpha.2. Not ready for production use;
 > what is still missing is tracked in [docs/produktionsreife.md](docs/produktionsreife.md) (German).
 
 ## Goals
@@ -502,21 +502,21 @@ e.g. `CALCRAFT_SERVER__BIND=0.0.0.0:5232`.
 
 ## Tests
 
-Numbers as of 2026-10-22 (version 0.1.0-alpha.1); they are not updated
+Numbers as of 2026-10-22 (version 0.1.0-alpha.2); they are not updated
 automatically.
 
-`cargo test --workspace --all-features` runs **426 tests** (1 of them
-ignored by default, see below): 278 unit tests in the crates' `src/` and
-148 integration tests in `tests/` directories. There are no doc tests.
+`cargo test --workspace --all-features` runs **536 tests** (1 of them
+ignored by default, see below): 362 unit tests in the crates' `src/` and
+174 integration tests in `tests/` directories. There are no doc tests.
 
 | Crate | Unit | Integration |
 |---|---:|---:|
-| calcraft-core | 5 | – |
-| calcraft-dav | 28 | – |
-| calcraft-ical | 78 | 12 |
-| calcraft-server | 86 | 136 |
-| calcraft-store | 61 | – |
-| calcraft-ui (host tests) | 18 | – |
+| calcraft-core | 6 | – |
+| calcraft-dav | 34 | – |
+| calcraft-ical | 79 | 12 |
+| calcraft-server | 138 | 162 |
+| calcraft-store | 82 | – |
+| calcraft-ui (host tests) | 21 | – |
 | calcraft-web | 2 | – |
 
 Integration suites of `calcraft-server` (`crates/calcraft-server/tests/`):
@@ -528,12 +528,13 @@ Integration suites of `calcraft-server` (`crates/calcraft-server/tests/`):
   from `api::ROUTES`. It checks exact status codes, byte-identical answers
   for foreign and nonexistent resources, that marker strings from the other
   user's data never leak, and that the other user's data is unchanged after
-  every write. One run sends about 42 600 requests and makes over 163 000
+  every write. One run sends about 43 300 requests and makes over 166 000
   counted assertions. A DAV method or REST route without a matrix entry
   makes it fail.
 - **Protocols:** `dav.rs`, `caldav.rs`, `carddav_sync.rs`,
   `carddav_photos.rs` (photos, groups, size limits), `recurrence.rs` (RRULE
-  expansion, time zones, budgets), `move_copy.rs`, `trash.rs`, `http.rs`.
+  expansion, time zones, budgets), `move_copy.rs`, `trash.rs`, `http.rs`,
+  `dead_properties.rs` (calendar order and client-defined properties).
 - **API and authentication:** `api.rs`, `oidc.rs` (against a mock IdP).
 - **Limits and robustness:** `limits.rs` (global and per-client request
   limits, login throttling), `stress.rs` (32 parallel writers: no lost
@@ -543,7 +544,12 @@ Integration suites of `calcraft-server` (`crates/calcraft-server/tests/`):
 - **Logs:** `log_secrets.rs` checks that passwords, tokens, TOTP and
   recovery codes, cookies and calendar/contact contents never reach the
   logs.
-- **Data:** `backup.rs`, `transfer.rs` (import/export); `calcraft-ical` has
+- **Subscriptions:** `subscriptions.rs` (subscription calendars are
+  read-only for every DAV client), `subscription_logs.rs` (feed URLs never
+  reach the logs); the SSRF rules and fetches against a local server are
+  unit tests in `src/subscriptions/`.
+- **Data:** `backup.rs`, `transfer.rs` (import/export), `migrate.rs`
+  (`calcraft migrate` against a fake CalDAV/CardDAV server behind TLS); `calcraft-ical` has
   its own `transfer.rs` for the format conversions.
 
 Further checks:

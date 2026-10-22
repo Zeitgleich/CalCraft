@@ -6,8 +6,10 @@ Alternative zu Radicale und Baïkal. Lizenz: **AGPL-3.0-or-later**.
 **Freigabe:** Anforderungen, Ist-Stand und Fahrplan bis zur stabilen Version stehen in
 [docs/produktionsreife.md](docs/produktionsreife.md) und haben Vorrang vor neuen Funktionen.
 
-**Stand 22.10.2026:** erste Vorabversion **0.1.0-alpha.1** (M0–M4b, M5a, M6a, Phase 2 und aus
-Phase 3 Papierkorb, `MOVE`/`COPY`, CardDAV-Fotos/-Gruppen, RRULE-Expansion mit Zeitzonen).
+**Stand 22.10.2026:** Vorabversion **0.1.0-alpha.2** (M0–M4b, M5a, M6 mit Webcal-Abos und
+`calcraft migrate`, Phase 2 und aus Phase 3 Papierkorb, `MOVE`/`COPY`, CardDAV-Fotos/-Gruppen,
+RRULE-Expansion mit Zeitzonen, Kalender-Reihenfolge und Dead Properties; dazu systemd-Dienst,
+`/readyz` mit Schreibzustand und SSO-Status in der Web-UI).
 Nicht für den Produktivbetrieb.
 
 ## 1. Ziele
