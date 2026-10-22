@@ -7,7 +7,7 @@ use sqlx::sqlite::SqlitePoolOptions;
 #[cfg(feature = "test-hooks")]
 use std::sync::{
     Arc,
-    atomic::{AtomicU8, Ordering},
+    atomic::{AtomicI64, AtomicU8, Ordering},
 };
 
 /// Storage failures that can be simulated, see [`crate::Store::simulate_failure`].
@@ -28,6 +28,9 @@ pub(crate) struct Simulation {
     /// 0: never used (hooks do nothing), else `SimulatedFailure` + 1.
     #[cfg(feature = "test-hooks")]
     state: Arc<AtomicU8>,
+    /// Simulated per-user quota in bytes; 0: the real one.
+    #[cfg(feature = "test-hooks")]
+    quota: Arc<AtomicI64>,
 }
 
 impl Simulation {
@@ -61,6 +64,24 @@ impl Simulation {
             SimulatedFailure::Full => 3,
         };
         self.state.store(state, Ordering::Release);
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn set_quota(&self, bytes: i64) {
+        self.quota.store(bytes, Ordering::Release);
+    }
+
+    /// The simulated quota, if one is set.
+    #[cfg_attr(not(feature = "test-hooks"), allow(clippy::unused_self))]
+    pub(crate) fn quota(&self) -> Option<i64> {
+        #[cfg(feature = "test-hooks")]
+        {
+            let bytes = self.quota.load(Ordering::Acquire);
+            if bytes > 0 {
+                return Some(bytes);
+            }
+        }
+        None
     }
 }
 

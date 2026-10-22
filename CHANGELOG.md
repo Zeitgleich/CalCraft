@@ -9,6 +9,24 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 
 ### Added
 
+- DAV `MOVE` and `COPY` (RFC 4918 §9.8/§9.9) for calendar objects and vCards
+  between the user's own collections of the same kind, e.g. moving an event
+  to another calendar. `Destination` is an absolute path or a URI on the
+  request's host (`http` or `https`; other hosts/schemes: `502`), decoded
+  like request paths; `..`, query, fragment and user info: `400`.
+  `Overwrite: T|F` (default `T`), `If-Match`/`If-None-Match` apply to the
+  source, `Depth` must be absent or `0`. Answers: `201`/`204` with the
+  (unchanged) `ETag`; `412` for `Overwrite: F` on an existing object or a
+  failed condition; `409` if the destination is not an object path in one
+  of the user's collections – a missing collection and another user's
+  collection get the same answer; `403` for source = destination,
+  collections as source or destination, `no-uid-conflict`,
+  `supported-calendar-component` and a calendar object into an address book
+  (or back); `507` when a copy exceeds the quota (a move is not counted
+  twice). Source removal, destination write, tombstone, change-log entries
+  and sync tokens of both collections happen in one transaction; a moved
+  object never counts as deleted by the user. Moving or copying whole
+  collections, other users' collections and other servers are not supported.
 - Request limits: at most `server.max_concurrent_requests` (256) requests at
   once (`503`), per client 32 concurrent requests and 120 burst / 20 per
   second (`429`), 20 failed logins per client in 15 minutes; IPv6 per /64,

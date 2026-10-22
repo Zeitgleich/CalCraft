@@ -493,8 +493,13 @@ Notes:
 
 - Proxy **everything** under `/` to CalCraft, including `/.well-known/caldav`
   and `/.well-known/carddav` (CalCraft redirects them to `/dav/`) and all DAV
-  methods (`PROPFIND`, `REPORT`, `MKCALENDAR`, …); nginx passes them through
-  by default. Do not add `limit_except` or WAF rules that block them.
+  methods (`PROPFIND`, `REPORT`, `MKCALENDAR`, `MOVE`, `COPY`, …); nginx
+  passes them through by default. Do not add `limit_except` or WAF rules that
+  block them.
+- Keep `proxy_set_header Host $host`: `MOVE` and `COPY` only accept a
+  `Destination` on the host the request was sent to (other hosts get `502`).
+  If the public URL has a non-default port (e.g. `:8443`), use
+  `proxy_set_header Host $http_host` so that the port is passed on.
 - Do **not** add a `Strict-Transport-Security` header in nginx; CalCraft sends
   it itself when `security.hsts = true`. Do not add your own
   `Content-Security-Policy` either, CalCraft sets a strict one.
@@ -584,8 +589,10 @@ Notes:
 - `nocanon` and `AllowEncodedSlashes NoDecode` make Apache pass request paths
   unchanged; without them, clients with unusual object names can get 404s.
 - If `mod_security` or another WAF is active, make sure it allows the DAV
-  methods (`PROPFIND`, `PROPPATCH`, `REPORT`, `MKCALENDAR`, `MKCOL`) and XML
-  request bodies for this virtual host.
+  methods (`PROPFIND`, `PROPPATCH`, `REPORT`, `MKCALENDAR`, `MKCOL`, `MOVE`,
+  `COPY`) and XML request bodies for this virtual host.
+- Keep `ProxyPreserveHost On`: `MOVE` and `COPY` compare the host in the
+  `Destination` header with the `Host` header (other hosts get `502`).
 - As with nginx: no own HSTS or CSP headers, no caching, keep `Authorization`.
 - `mod_proxy` appends the client address to `X-Forwarded-For` by default
   (`ProxyAddHeaders On`); keep it that way and do not set the header with
@@ -758,6 +765,7 @@ while it is off.
 | `413 Request Entity Too Large` (Apache over HTTP/2: `502`) on large uploads or imports | Raise `client_max_body_size` (nginx) / `LimitRequestBody` (Apache) to at least `server.max_body_bytes`. |
 | DAV client finds no calendars | Use the server root `https://cal.example.com/` (not a sub-path). Test discovery: `curl -i https://cal.example.com/.well-known/caldav` must answer `301` with `Location: /dav/`. |
 | `405 Method Not Allowed` for `PROPFIND`/`REPORT` | A WAF or proxy rule blocks DAV methods; allow them for this host. |
+| Moving an event to another calendar fails with `502` | The proxy does not pass the public host name (and port) in `Host`: `proxy_set_header Host $host` (or `$http_host` with a non-default port) for nginx, `ProxyPreserveHost On` for Apache. |
 | Objects with special characters in their name return 404 (Apache) | Add `nocanon` and `AllowEncodedSlashes NoDecode` (section 10). |
 | Web UI login loops back to the login page | The site must be served over HTTPS (session cookies are `Secure`). For local tests over plain HTTP on another host set `security.secure_cookies = false`. |
 | Startup fails with `unknown field` | A configuration key is misspelled; `calcraft check-config` shows which one. |
