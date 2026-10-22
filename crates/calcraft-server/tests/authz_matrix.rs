@@ -410,6 +410,9 @@ async fn fixture() -> Fixture {
     config.server.client_rate_burst = u32::MAX;
     config.server.client_rate_per_second = u32::MAX;
     config.server.max_login_failures_per_client = u32::MAX;
+    // Many Argon2 runs queue behind a few hash permits; on a slow runner
+    // (Windows, debug build) the default 30 s turned the last ones into 408.
+    config.server.request_timeout_secs = 300;
     #[allow(unused_mut)]
     let mut state = AppState::new(store.clone()).unwrap();
     // Subscriptions enabled with the production rules: alice's attempt to
