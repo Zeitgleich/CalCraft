@@ -41,7 +41,7 @@ pub use items::{
     StaleIndex, Transfer, TransferOutcome,
 };
 pub use items::{MAX_BYTES_PER_USER, MAX_ITEMS_PER_COLLECTION};
-pub use oidc::{ApprovedBinding, OidcBinding};
+pub use oidc::{ApprovedBinding, OidcBinding, OidcIdentityInfo};
 #[cfg(feature = "test-hooks")]
 pub use test_hooks::SimulatedFailure;
 pub use trash::{

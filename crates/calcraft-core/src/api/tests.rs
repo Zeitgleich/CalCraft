@@ -17,3 +17,21 @@ fn collection_kind_is_lowercase() {
         serde_json::from_str(r#"{"kind":"addressbook","slug":"team"}"#).unwrap();
     assert_eq!(create.kind, CollectionKind::Addressbook);
 }
+
+#[test]
+fn sso_fields_are_optional_for_older_servers() {
+    let me: Me = serde_json::from_str(
+        r#"{"username":"a","display_name":null,"is_admin":false,"totp_enabled":false}"#,
+    )
+    .unwrap();
+    assert_eq!(me.sso, None);
+    let user: AdminUser = serde_json::from_str(
+        r#"{"username":"a","display_name":null,"is_admin":false,"disabled":false,"totp_enabled":false}"#,
+    )
+    .unwrap();
+    assert!(!user.sso_linked);
+    let link: SsoLink =
+        serde_json::from_str(r#"{"linked":false,"issuer":"https://idp.example"}"#).unwrap();
+    assert_eq!(link.linked_at, None);
+    assert_eq!(link.last_login_at, None);
+}
