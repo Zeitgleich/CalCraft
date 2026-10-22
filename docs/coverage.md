@@ -41,25 +41,30 @@ Hinweise zur Interpretation:
   `main.rs`) erscheinen deshalb als ungetestet, obwohl ein Teil davon dort
   durchlaufen wird.
 
-## Stand 22.10.2026
+## Stand 22.10.2026 (0.1.0-alpha.1)
 
-Gemessen auf `main` (b771c22) mit Rust 1.99.1 und cargo-llvm-cov 0.9.1,
-`cargo llvm-cov --workspace --all-features`, macOS. Alle Tests grün.
+Gemessen auf `main` (2f432f0) plus Versionsanhebung auf 0.1.0-alpha.1 mit
+Rust 1.99.1 und cargo-llvm-cov 0.9.1, `cargo llvm-cov --workspace
+--all-features`, macOS. Alle Tests grün (425 bestanden, 1 ignoriert).
 
 | Crate | Zeilen abgedeckt | Abdeckung |
 | --- | ---: | ---: |
 | calcraft-core | 90 / 93 | 96,8 % |
 | calcraft-dav | 725 / 747 | 97,1 % |
-| calcraft-ical | 2961 / 3154 | 93,9 % |
-| calcraft-server | 4886 / 5602 | 87,2 % |
-| calcraft-store | 2353 / 2503 | 94,0 % |
-| calcraft-ui | 254 / 289 | 87,9 % |
-| calcraft-web | 42 / 61 | 68,9 % |
-| **gesamt** | **11311 / 12449** | **90,9 %** |
+| calcraft-ical | 4507 / 4746 | 95,0 % |
+| calcraft-server | 6443 / 7280 | 88,5 % |
+| calcraft-store | 3814 / 4009 | 95,1 % |
+| calcraft-ui | 406 / 455 | 89,2 % |
+| calcraft-web | 52 / 71 | 73,2 % |
+| **gesamt** | **16037 / 17401** | **92,2 %** |
+
+Vorherige Messung (22.10.2026, b771c22, vor Papierkorb, MOVE/COPY,
+Kontaktfotos und RRULE-Expansion): 11311 / 12449 Zeilen, 90,9 %.
 
 Auffällige Dateien: `calcraft-server/src/users.rs` 0 %,
-`transfer_cmd.rs` 0 %, `main.rs` 14 %, `backup_cmd.rs` 74 %, `https.rs` 81 %,
-`calcraft-store/src/backup.rs` 85 %, `oidc/mod.rs` 89 %.
+`transfer_cmd.rs` 0 %, `main.rs` 13 %, `trash.rs` 61 %, `backup_cmd.rs` 74 %,
+`https.rs` 81 %, `calcraft-store/src/backup.rs` 85 %,
+`calcraft-ical/src/xcal.rs` 84 %, `jcal.rs` 87 %, `oidc/mod.rs` 89 %.
 
 ## Kritische Pfade ohne Tests
 
@@ -67,47 +72,53 @@ Nach Risiko geordnet (Authentifizierung, Autorisierung, DAV-Schreibpfade,
 Store-Transaktionen, Backup). Zeilenangaben beziehen sich auf den oben
 genannten Stand.
 
-1. **Deaktivieren eines Benutzers über die Admin-API widerruft die Sitzungen**
-   (`api/admin.rs:100-103`, `delete_sessions_of`): nicht getestet. Ein
-   Regressionsfehler ließe deaktivierte Benutzer mit bestehender Sitzung
-   weiterarbeiten. Ebenso ungetestet: die Fehlerabbildung der
-   Passwortrichtlinie beim Anlegen (`api/admin.rs:56-69`).
+1. **Benutzerverwaltung über die Admin-API** (`api/admin.rs`): Setzen bzw.
+   Entziehen des Admin-Rechts (`103`) und die Fehlerabbildung der
+   Passwortrichtlinie beim Anlegen (`56-69`) sind ungetestet. (Das
+   Widerrufen der Sitzungen beim Deaktivieren läuft inzwischen in den Tests.)
 2. **Zwei-Faktor-Verwaltung:** `totp_disable` komplett
-   (`api/account.rs:279-288`), falscher Code bei `totp_enable` inkl.
-   `record_failure` (`244-249`), erneutes Setup bei aktiver 2FA (`212-220`).
+   (`api/account.rs:342-358`), erneutes Setup bei aktiver 2FA (`244-252`)
+   sowie die seltenen Ausgänge von `totp_enable` (bereits aktiv, kein
+   Setup, schon benutzter Zeitschritt, Store-Fehler: `312-327`).
 3. **Login-Sperre (`auth.rs`):** Überlauf der Fehlertabelle
-   (`MAX_TRACKED`, `243-248`), Zurücksetzen nach Ablauf des Sperrfensters
-   (`256-257`, `450-451`), `clear_failures` bei laufenden Versuchen
-   (`466-468`), Datenbankfehler beim App-Passwort (`294-304`) und beim
-   Laden der Anmeldedaten (`346-348`).
+   (`MAX_TRACKED`, `750-755`), Zurücksetzen nach Ablauf des Sperrfensters
+   (`761-762`), Datenbankfehler beim Laden der Anmeldedaten (`523-525`,
+   `562-564`) und beim App-Passwort (`529-531`), Abbildung von
+   Store-Fehlern (`storage_outcome`, `142-150`).
 4. **OIDC-Signaturprüfung (`oidc/jwt.rs`):** RS384/RS512/PS256/PS384/PS512
    und ES384 werden nie verifiziert (`114-119`, `130-135`); JWK-Filter
    `use != "sig"` und `key_ops` ohne `verify` (`201-206`) sowie unbekannte
    Kurven (`213`) sind ungetestet.
-5. **OIDC-Provider (`oidc/mod.rs`):** Discovery-Cache und Wartezeit nach
-   Fehlschlag (`345-359`), Rückfall auf gecachte Schlüssel bei
+5. **OIDC-Provider (`oidc/mod.rs`):** Wartezeit nach fehlgeschlagener
+   Discovery (`374-377`), Aufwärmen beim Start (`warm_up`, `345-359`), Rückfall auf gecachte Schlüssel bei
    JWKS-Fehler (`431-441`), `client_secret_post` (`582-590`) und
    `client_secret_file` (`254-269`).
-6. **Tombstone-Bereinigung im Store** (`calcraft-store/src/items.rs:543-564`):
+6. **Tombstone-Bereinigung im Store** (`calcraft-store/src/items.rs:895-916`):
    das Löschen alter Tombstones oberhalb `MAX_TOMBSTONES` samt Setzen von
    `sync_floor` läuft in keinem Test; davon hängt die Ungültigkeit alter
    Sync-Tokens ab.
 7. **Restore-Vorbedingungen und Fehlerpfade** (`backup.rs`): fehlende
    Sicherung, Sicherung = Datenbank, `-wal` neben der Sicherung
-   (`552-567`); Abbruch, wenn die Kopie der alten Datenbank fehlschlägt
-   (Platte voll, `612-620`), sowie Fehler beim Entfernen der Seitendateien
-   bzw. beim Umbenennen (`631-636`).
+   (`602-619`); Abbruch, wenn die Kopie der alten Datenbank fehlschlägt
+   (Platte voll, `661-665`), sowie Fehler beim Entfernen der Seitendateien
+   bzw. beim Umbenennen (`679-687`).
 8. **Backup-Prüfung und Sperren** (`backup.rs`): fehlgeschlagener
-   `integrity_check` und „keine CalCraft-Datenbank“ (`517-527`), Ziel
-   existiert ohne `--force` (`474-477`), exklusiv gesperrte Datenbank
-   (`293-297`, `429-432`), Abbruch der Öffnungsschleife bei parallelen
-   Migrationen (`340-343`).
+   `integrity_check` und „keine CalCraft-Datenbank“ (`568-578`), Ziel
+   existiert ohne `--force` (`525-528`), exklusiv gesperrte Datenbank
+   (`328-332`, `480-483`), Fehler beim Öffnen der Schreibverbindung
+   (`351-354`).
 9. **DAV-Schreibpfade** (`dav/objects.rs`, `dav/report.rs`): `DELETE` einer
-   Collection mit ETag in `If-Match` → 412 (`objects.rs:280`), ungültige
+   Collection mit ETag in `If-Match` → 412 (`objects.rs:316`), ungültige
    Bedingungs-Header (leere/zu viele ETags, `If-Match` und `If-None-Match`
-   zugleich: `65`, `79`, `262`), Store-Fehler beim `DELETE` (`284`);
-   REPORT-Limit 507 und nicht unterstützter Report (`report.rs:55-57`, `61`).
+   zugleich: `70`, `84`), Store-Fehler beim `DELETE` (`310`, `325`);
+   REPORT-Limit 507 und nicht unterstützter Report (`report.rs:76-81`).
 10. **Fehlerabbildung der REST-API** (`api/mod.rs`): `StoreError::Limit` →
-    507 und 413 bei zu großen Bodys (`208-223`), interne Store-Fehler → 500
-    (`236-241`); dazu die CLI-Pfade `users.rs` (0 %) und `transfer_cmd.rs`
-    (0 %), die nur über das nicht instrumentierte Binary laufen.
+    507 und 413 bei zu großen Bodys (`226-235`, `266-269`), interne
+    Store-Fehler und `Busy` → 500/503 (`237-246`, `274-280`); dazu die
+    CLI-Pfade `users.rs` (0 %) und `transfer_cmd.rs` (0 %), die nur über das
+    nicht instrumentierte Binary laufen.
+11. **Hintergrund-Bereinigung des Papierkorbs** (`calcraft-server/src/trash.rs:58-105`):
+    der stündliche Lauf (`spawn_purge`, `purge_and_log`) und die Warnung bei
+    `trash_retention_days = 0` mit vorhandenen Einträgen laufen in keinem
+    Test; die Löschlogik selbst ist im Store getestet
+    (`calcraft-store/src/trash.rs`, 94 %).

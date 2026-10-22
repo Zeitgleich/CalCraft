@@ -9,7 +9,8 @@
 
 Self-hosted CalDAV/CardDAV server written in Rust, with an optional web interface.
 
-> **Status:** early development (milestone M4: REST API and first web UI). Not ready for production use.
+> **Status:** first pre-release, 0.1.0-alpha.1. Not ready for production use;
+> what is still missing is tracked in [docs/produktionsreife.md](docs/produktionsreife.md) (German).
 
 ## Goals
 
@@ -346,7 +347,111 @@ See [`calcraft.example.toml`](calcraft.example.toml). Every setting can be overr
 environment variables with the prefix `CALCRAFT_` and `__` as separator,
 e.g. `CALCRAFT_SERVER__BIND=0.0.0.0:5232`.
 
+## Tests
+
+Numbers as of 2026-10-22 (version 0.1.0-alpha.1); they are not updated
+automatically.
+
+`cargo test --workspace --all-features` runs **426 tests** (1 of them
+ignored by default, see below): 278 unit tests in the crates' `src/` and
+148 integration tests in `tests/` directories. There are no doc tests.
+
+| Crate | Unit | Integration |
+|---|---:|---:|
+| calcraft-core | 5 | – |
+| calcraft-dav | 28 | – |
+| calcraft-ical | 78 | 12 |
+| calcraft-server | 86 | 136 |
+| calcraft-store | 61 | – |
+| calcraft-ui (host tests) | 18 | – |
+| calcraft-web | 2 | – |
+
+Integration suites of `calcraft-server` (`crates/calcraft-server/tests/`):
+
+- **Authorization matrix** (`authz_matrix.rs`): every routed DAV method and
+  unknown methods × every kind of path (own, another user's, a nonexistent
+  user's, traversal and percent-encoding variants) × every kind of
+  credential; COPY/MOVE with 13 `Destination` variants; every REST route
+  from `api::ROUTES`. It checks exact status codes, byte-identical answers
+  for foreign and nonexistent resources, that marker strings from the other
+  user's data never leak, and that the other user's data is unchanged after
+  every write. One run sends about 42 600 requests and makes over 163 000
+  counted assertions. A DAV method or REST route without a matrix entry
+  makes it fail.
+- **Protocols:** `dav.rs`, `caldav.rs`, `carddav_sync.rs`,
+  `carddav_photos.rs` (photos, groups, size limits), `recurrence.rs` (RRULE
+  expansion, time zones, budgets), `move_copy.rs`, `trash.rs`, `http.rs`.
+- **API and authentication:** `api.rs`, `oidc.rs` (against a mock IdP).
+- **Limits and robustness:** `limits.rs` (global and per-client request
+  limits, login throttling), `stress.rs` (32 parallel writers: no lost
+  updates, no 500; a heavier variant with 64 writers is `#[ignore]`d),
+  `failures.rs` (read-only database, full disk, aborted uploads).
+- **Logs:** `log_secrets.rs` checks that passwords, tokens, TOTP and
+  recovery codes, cookies and calendar/contact contents never reach the
+  logs.
+- **Data:** `backup.rs`, `transfer.rs` (import/export); `calcraft-ical` has
+  its own `transfer.rs` for the format conversions.
+
+Further checks:
+
+- **Fuzzing** (`fuzz/`, cargo-fuzz): 4 targets (`ical_object`, `dav_xml`,
+  `recurrence`, `import`). CI runs `ical_object`, `dav_xml` and
+  `recurrence` for 60 s each on every change and for 20 min each nightly;
+  `import` is run manually.
+- **CI** on Linux, macOS and Windows: `cargo fmt`, Clippy, all tests with
+  all features and DAV-only, wasm build of the web UI, a client
+  compatibility run with python-caldav, an upgrade test from every older
+  migration state and a backup/restore smoke test with the real binary.
+- **cargo-deny** (advisories, licenses, sources) on every change and an
+  advisory check daily; **CodeQL** (`security-extended`) for Rust and the
+  workflows on every pull request and weekly.
+- **Coverage:** 92.2 % of lines (16 037 of 17 401), measured with
+  `cargo llvm-cov --workspace --all-features`; per crate and known gaps in
+  [docs/coverage.md](docs/coverage.md). CI measures it on every pull request.
+
 ## Security
+
+What CalCraft does, in short (details: [docs/produktionsreife.md](docs/produktionsreife.md),
+German):
+
+- **Authentication:** passwords hashed with Argon2id (with a dummy hash for
+  unknown users against timing); per-device app passwords, stored only as
+  hashes; TOTP two-factor authentication with hashed recovery codes;
+  lockout per account (5 failures in 15 minutes) plus a throttle per client
+  address (20 in 15 minutes, also for unknown names). A request cancelled
+  after the password comparison has started still counts as a failure.
+  OpenID Connect with PKCE; SSO accounts are bound to issuer + subject,
+  and an existing local account is only linked after an explicit operator
+  approval for one subject.
+- **Authorization:** every DAV path is resolved against the authenticated
+  owner in one place; another user's resources answer exactly like
+  nonexistent ones. The authorization matrix test (see *Tests*) enforces
+  this for every method and route.
+- **Input handling:** XML without DTDs or entities, with depth, element
+  and size limits; iCalendar and vCard are validated on upload, with
+  limits for size, components, properties and parameters; request body,
+  REPORT and import budgets; recurrence expansion with CPU budgets per
+  object and per REPORT (see [docs/caldav.md](docs/caldav.md)); contact
+  photos are checked against JPEG/PNG/GIF/WebP magic numbers, never decoded
+  and never served as images.
+- **Web UI and API:** strict Content Security Policy (no inline scripts or
+  styles, same origin only), `HttpOnly`, `SameSite=Strict` and `Secure`
+  session cookies, a required CSRF header on state-changing API requests,
+  plus `X-Frame-Options`, `Referrer-Policy` and optional HSTS
+  (`security.hsts`).
+- **Operations:** global and per-client request limits, `X-Forwarded-For`
+  only from `server.trusted_proxies`, a verified backup before every
+  database migration, and logs without secrets or contents (tested).
+- **Supply chain:** few dependencies, each justified; no `unsafe` code
+  (`forbid`); cargo-deny on every change, advisories also daily;
+  Dependabot; all GitHub Actions pinned to commit hashes; CodeQL. Release archives carry SHA-256
+  checksums and Sigstore build provenance, the Docker image is signed with
+  cosign (keyless) – see [docs/release-verification.md](docs/release-verification.md).
+- **Process:** changes go through pull requests with the full CI; known
+  attacks on other calendar and contact servers are collected in
+  [docs/security/angriffshistorie.md](docs/security/angriffshistorie.md)
+  (German) together with the countermeasures and regression tests derived
+  from them.
 
 Please report vulnerabilities privately, see [SECURITY.md](SECURITY.md).
 
