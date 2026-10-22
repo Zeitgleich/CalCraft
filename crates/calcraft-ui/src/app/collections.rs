@@ -60,7 +60,7 @@ pub fn Overview() -> impl IntoView {
                     if items.get().is_none() {
                         view! { <p class="muted">{t::LOADING}</p> }.into_any()
                     } else if list.is_empty() {
-                        view! { <p class="muted">{empty}</p> }.into_any()
+                        view! { <p class="muted empty">{empty}</p> }.into_any()
                     } else {
                         view! {
                             <ul class="items">
@@ -89,7 +89,8 @@ pub fn Overview() -> impl IntoView {
     }
 }
 
-/// Color square, drawn as SVG so that no `style` attribute is needed.
+/// Color accent along the left edge of the card, drawn as SVG so that no
+/// `style` attribute is needed (the shape comes from the stylesheet).
 #[component]
 fn Swatch(color: Option<String>) -> impl IntoView {
     let color = color.filter(|c| is_valid_color(c));
@@ -99,7 +100,7 @@ fn Swatch(color: Option<String>) -> impl IntoView {
         "swatch none"
     };
     view! {
-        <svg class=class viewBox="0 0 1 1" aria-hidden="true">
+        <svg class=class viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true">
             <rect width="1" height="1" fill=color.unwrap_or_else(|| "none".to_owned()) />
         </svg>
     }

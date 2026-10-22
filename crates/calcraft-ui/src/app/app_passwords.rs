@@ -60,7 +60,7 @@ pub fn AppPasswords() -> impl IntoView {
             {move || match items.get() {
                 None => view! { <p class="muted">{t::LOADING}</p> }.into_any(),
                 Some(list) if list.is_empty() => {
-                    view! { <p class="muted">{t::NO_APP_PASSWORDS}</p> }.into_any()
+                    view! { <p class="muted empty">{t::NO_APP_PASSWORDS}</p> }.into_any()
                 }
                 Some(list) => {
                     view! {
