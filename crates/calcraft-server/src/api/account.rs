@@ -13,7 +13,7 @@ use calcraft_core::{
         RecoveryCodes, TotpDisable, TotpEnable, TotpSetup,
     },
 };
-use calcraft_store::{RECOVERY_CODES, User};
+use calcraft_store::{RECOVERY_CODES, TotpEnableOutcome, User};
 
 use super::{ApiError, ApiJson, Client, SESSION_TTL, SessionUser, session_cookie};
 use crate::{
@@ -293,25 +293,32 @@ pub async fn totp_enable(
     attempt.mark_known();
     attempt.arm();
     // Proves that the authenticator app was set up correctly.
-    let step = totp_verify(&totp.secret, &request.code, now());
-    let accepted = match step {
-        Some(step) => state.store.accept_totp_step(user.id, step).await,
-        None => Ok(false),
+    let Some(step) = totp_verify(&totp.secret, &request.code, now()) else {
+        attempt.fail();
+        return Err(ApiError::InvalidCredentials);
     };
-    match accepted {
-        Ok(true) => attempt.settle(),
-        // A valid code that was just used: a concurrent (double) submit
-        // enabled 2FA with it. Not a guess.
-        Ok(false)
-            if step.is_some()
-                && matches!(state.store.totp_state(user.id).await, Ok(Some(t)) if t.enabled) =>
-        {
+    let codes: Vec<String> = (0..RECOVERY_CODES).map(|_| random_token::<10>()).collect();
+    let hashes: Vec<String> = codes.iter().map(|code| hash_secret(code)).collect();
+    // Accepting the step and enabling is one transaction, so of a double
+    // submit exactly one request enables and the other sees it enabled.
+    let outcome = state
+        .store
+        .enable_totp_with_step(user.id, &totp.secret, step, &hashes)
+        .await;
+    match outcome {
+        Ok(TotpEnableOutcome::Enabled) => attempt.settle(),
+        // A valid code: not a guess.
+        Ok(TotpEnableOutcome::AlreadyEnabled) => {
             attempt.settle();
             return Err(ApiError::Conflict(
                 "two-factor authentication is already enabled",
             ));
         }
-        Ok(false) => {
+        Ok(TotpEnableOutcome::NotSetUp) => {
+            attempt.settle();
+            return Err(ApiError::BadRequest("call totp/setup first"));
+        }
+        Ok(TotpEnableOutcome::StepUsed) => {
             attempt.fail();
             return Err(ApiError::InvalidCredentials);
         }
@@ -321,14 +328,6 @@ pub async fn totp_enable(
         }
     }
     drop(attempt);
-    let codes: Vec<String> = (0..RECOVERY_CODES).map(|_| random_token::<10>()).collect();
-    let hashes: Vec<String> = codes.iter().map(|code| hash_secret(code)).collect();
-    // Only one of concurrent enable requests wins (it sets the flag).
-    if !state.store.enable_totp(user.id, &hashes).await? {
-        return Err(ApiError::Conflict(
-            "two-factor authentication is already enabled",
-        ));
-    }
     Ok(Json(RecoveryCodes {
         codes: codes.iter().map(|c| format_recovery_code(c)).collect(),
     }))

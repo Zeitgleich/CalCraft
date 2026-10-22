@@ -448,6 +448,14 @@ impl Authenticator {
     /// The user, if the credentials are valid and can be checked without
     /// Argon2: an app password, or an account password in the cache.
     /// `None` also for storage errors; the counted path reports those.
+    ///
+    /// This compares before any attempt is reserved or armed, and a wrong
+    /// value here is not counted (the counted path below repeats the check).
+    /// That is acceptable: app password secrets have 160 bits, so guessing
+    /// them is hopeless; the cache only holds digests of the current correct
+    /// passwords, so it confirms nothing new to a guesser and can only make
+    /// a correct password cheaper; and every Argon2 comparison runs on the
+    /// counted, armed path.
     async fn verify_cheaply(&self, credentials: &BasicCredentials) -> Option<User> {
         let username = &credentials.username;
         if let Some((id, secret)) = parse_app_password(&credentials.password) {
@@ -506,6 +514,17 @@ impl Authenticator {
         secret: &str,
     ) -> AuthOutcome {
         let username = &attempt.username;
+        // Whether the account exists is checked before comparing, so that
+        // between a wrong comparison and the bookkeeping there is no await
+        // at which a cancelled request could escape it. (Failures are only
+        // counted for existing accounts, see `check_first_factor_reserved`.)
+        let exists = match self.store.user_credentials(username).await {
+            Ok(record) => record.is_some(),
+            Err(err) => {
+                attempt.settle();
+                return storage_outcome(&err, "failed to load user");
+            }
+        };
         match self.app_password_user(id, secret, username).await {
             Err(err) => {
                 attempt.settle();
@@ -517,10 +536,7 @@ impl Authenticator {
                 AuthOutcome::Authenticated(user)
             }
             Ok(None) => {
-                // Compared and wrong: from here on even a cancelled request counts.
-                attempt.arm();
-                // Count only for existing accounts (see `check_first_factor_reserved`).
-                if matches!(self.store.user_credentials(username).await, Ok(Some(_))) {
+                if exists {
                     attempt.mark_known();
                 }
                 attempt.fail();

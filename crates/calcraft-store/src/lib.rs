@@ -18,7 +18,9 @@ mod items;
 mod oidc;
 mod test_hooks;
 
-pub use accounts::{AppPassword, MAX_APP_PASSWORDS, RECOVERY_CODES, Session, TotpState};
+pub use accounts::{
+    AppPassword, MAX_APP_PASSWORDS, RECOVERY_CODES, Session, TotpEnableOutcome, TotpState,
+};
 pub use backup::{
     BackupInfo, DEFAULT_ACQUIRE_TIMEOUT, RestoreInfo, StoreOptions, backup_database,
     latest_migration, pre_migration_backups, restore_database,

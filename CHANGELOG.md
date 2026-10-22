@@ -43,9 +43,11 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 - Login attempts cancelled while credentials are compared (client hangs
   up, request timeout) count as failures; cancelled while still waiting
   for a hash permit or the database, they count for nothing, so others
-  cannot lock an account by keeping the server busy. Database overload
-  during login answers 503 with `Retry-After`; pool waits end after at most
-  10 s (half the request timeout if that is shorter).
+  cannot lock an account by keeping the server busy. Waiting for a database
+  connection ends after at most 10 s (half the request timeout if that is
+  shorter) with 503 and `Retry-After` instead of the 408 request timeout;
+  waits for a login slot or a password-hash permit are still bounded by the
+  request timeout (408).
 - Cancelled requests keep their Argon2 permit until hashing ends, so no
   more than four password hashes run at once.
 - Creating or renaming collections, creating users and OIDC link approvals
