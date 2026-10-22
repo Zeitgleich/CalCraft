@@ -556,15 +556,18 @@ impl Config {
                 "server: request and login limits must be greater than 0",
             ));
         }
-        // Bounded by the semaphore and by memory for the client table.
-        if server.max_concurrent_requests > 1_000_000 || server.max_tracked_clients > 10_000_000 {
+        // Bounded by the semaphore and by the eviction scan over a full client
+        // table, which runs under its lock for every new client.
+        if server.max_concurrent_requests > 1_000_000 || server.max_tracked_clients > 100_000 {
             return Err(ConfigError::Invalid(
-                "server: max_concurrent_requests (1 000 000) or max_tracked_clients (10 000 000) too large",
+                "server: max_concurrent_requests (1 000 000) or max_tracked_clients (100 000) too large",
             ));
         }
-        if server.max_tracked_clients < server.max_concurrent_requests {
+        // Health checks bypass the global limit but still occupy client entries,
+        // so leave room for them beyond the in-flight requests.
+        if server.max_tracked_clients < server.max_concurrent_requests.saturating_mul(2) {
             return Err(ConfigError::Invalid(
-                "server.max_tracked_clients must be at least server.max_concurrent_requests",
+                "server.max_tracked_clients must be at least twice server.max_concurrent_requests",
             ));
         }
         if !CLIENT_IPV6_PREFIX.contains(&server.client_ipv6_prefix) {
@@ -665,6 +668,8 @@ mod tests {
             "max_tracked_clients = 0",
             "max_concurrent_requests = 2000000",
             "max_tracked_clients = 255",
+            "max_tracked_clients = 511",
+            "max_tracked_clients = 100001",
             "client_ipv6_prefix = 31",
             "client_ipv6_prefix = 129",
             "trusted_proxies = [\"10.0.0.1/8\"]",

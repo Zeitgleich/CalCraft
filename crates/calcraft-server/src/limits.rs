@@ -40,8 +40,8 @@ use crate::{
 /// How often idle entries are swept from the client tables.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 /// Least time between two extra sweeps of a full client table; in between,
-/// a new client evicts a single entry. Bounds the work an address sprayer
-/// can cause under the table lock.
+/// a new client evicts a single entry, which still scans the table once
+/// (O(`max_tracked_clients`), capped at 100 000 by the configuration).
 const FULL_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 /// Fixed-point scale of the token bucket (milli-tokens).
 const TOKEN: u64 = 1000;
