@@ -41,6 +41,23 @@ pub const LOGIN_ENTER_CODE: &str = "Enter the code from your authenticator app o
 pub const LOGGED_OUT: &str = "You have been logged out.";
 pub const TOTP_CODE: &str = "Two-factor code";
 pub const TOTP_CODE_HINT: &str = "6-digit code from your authenticator app, or a recovery code.";
+pub const SSO_LOGIN_GENERIC: &str = "Sign in with single sign-on";
+pub const LOGIN_OR_PASSWORD: &str = "or with username and password";
+pub const LOGIN_NO_METHOD: &str =
+    "No login method is enabled on this server. Please contact your administrator.";
+
+// Single sign-on errors (`/?sso_error=<code>`)
+pub const SSO_ERR_INVALID_REQUEST: &str =
+    "The single sign-on login could not be completed (it may have expired). Please try again.";
+pub const SSO_ERR_DENIED: &str = "The single sign-on login was cancelled or refused.";
+pub const SSO_ERR_UNAVAILABLE: &str = "Single sign-on is currently unavailable. Please try again later or contact your administrator.";
+pub const SSO_ERR_LOGIN_FAILED: &str =
+    "Single sign-on login failed. Please contact your administrator if this persists.";
+pub const SSO_ERR_NO_ACCOUNT: &str =
+    "There is no account for you on this server yet. Please ask your administrator to create one.";
+pub const SSO_ERR_ACCOUNT_EXISTS: &str = "An account with your username already exists but is not linked to single sign-on. Please ask your administrator to approve the link.";
+pub const SSO_ERR_LOCAL_2FA_REQUIRED: &str = "Your account uses two-factor authentication on this server, so it cannot log in with single sign-on. Please log in with your password and two-factor code.";
+pub const SSO_ERR_UNKNOWN: &str = "Single sign-on login failed.";
 
 // Overview
 pub const OVERVIEW_TITLE: &str = "Calendars and address books";
