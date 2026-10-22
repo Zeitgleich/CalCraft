@@ -9,6 +9,14 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 
 ### Added
 
+- CardDAV contact photos: vCards may be up to `storage.max_vcard_bytes`
+  (default 2 MiB, at most 10 MiB and `server.max_body_bytes`) instead of
+  1 MiB; `CARDDAV:max-resource-size` reports it. `PHOTO`/`LOGO` must be
+  valid base64 of JPEG, PNG, GIF or WebP (vCard 3.0 `ENCODING=b`, vCard 4.0
+  `data:` URI) or an `http`/`https` URI (never fetched); `javascript:`,
+  `file:`, SVG and invalid base64 are rejected. vCard 4.0 `MEMBER` requires
+  `KIND:group`. Tests for Apple and vCard 4.0 groups.
+
 - Request limits: at most `server.max_concurrent_requests` (256) requests at
   once (`503`), per client 32 concurrent requests and 120 burst / 20 per
   second (`429`), 20 failed logins per client in 15 minutes; IPv6 per /64,

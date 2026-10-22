@@ -150,5 +150,8 @@ jobs:
       - name: Fuzz each target for 60 seconds
         run: |
           for target in ical_object dav_xml; do
+            # Checked-in seeds (fuzz/seeds/<target>) start the corpus.
+            mkdir -p "fuzz/corpus/$target"
+            if [ -d "fuzz/seeds/$target" ]; then cp fuzz/seeds/"$target"/* "fuzz/corpus/$target/"; fi
             cargo +nightly fuzz run "$target" -- -max_total_time=60 -rss_limit_mb=1024
           done

@@ -1,0 +1,8 @@
+BEGIN:VCARD
+VERSION:4.0
+UID:urn:uuid:3b1c0e6a
+KIND:group
+FN:Team
+MEMBER:urn:uuid:2D7B4A8C
+MEMBER:mailto:a@example.com
+END:VCARD

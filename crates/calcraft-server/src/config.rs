@@ -109,7 +109,19 @@ pub struct StorageConfig {
     pub pre_migration_backup: bool,
     /// Number of pre-migration backups to keep; older ones are deleted.
     pub pre_migration_backups_keep: usize,
+    /// Largest accepted vCard in bytes (`CARDDAV:max-resource-size`),
+    /// including embedded photos. At most [`MAX_VCARD_BYTES`] and
+    /// `server.max_body_bytes`. Calendar objects are limited to 1 MiB.
+    pub max_vcard_bytes: usize,
 }
+
+/// Default of `storage.max_vcard_bytes`: room for a high-resolution
+/// contact photo (base64 adds a third).
+pub const DEFAULT_MAX_VCARD_BYTES: usize = 2 * 1024 * 1024;
+/// Upper bound of `storage.max_vcard_bytes`.
+pub const MAX_VCARD_BYTES: usize = calcraft_ical::MAX_VCARD_SIZE;
+/// Lower bound of `storage.max_vcard_bytes`.
+pub const MIN_VCARD_BYTES: usize = 64 * 1024;
 
 impl Default for StorageConfig {
     fn default() -> Self {
@@ -117,6 +129,7 @@ impl Default for StorageConfig {
             database: PathBuf::from("calcraft.db"),
             pre_migration_backup: true,
             pre_migration_backups_keep: 3,
+            max_vcard_bytes: DEFAULT_MAX_VCARD_BYTES,
         }
     }
 }
@@ -586,6 +599,17 @@ impl Config {
                 "storage.pre_migration_backups_keep must be at least 1",
             ));
         }
+        let vcard = self.storage.max_vcard_bytes;
+        if !(MIN_VCARD_BYTES..=MAX_VCARD_BYTES).contains(&vcard) {
+            return Err(ConfigError::Invalid(
+                "storage.max_vcard_bytes must be between 65536 (64 KiB) and 10485760 (10 MiB)",
+            ));
+        }
+        if vcard > self.server.max_body_bytes {
+            return Err(ConfigError::Invalid(
+                "storage.max_vcard_bytes must not exceed server.max_body_bytes",
+            ));
+        }
         if !UPDATE_INTERVAL_HOURS.contains(&self.updates.interval_hours) {
             return Err(ConfigError::Invalid(
                 "updates.interval_hours must be between 1 and 168",
@@ -691,6 +715,26 @@ mod tests {
                 .unwrap();
         assert!(!config.storage.store_options().pre_migration_backup);
         assert_eq!(config.storage.store_options().pre_migration_backups_keep, 5);
+    }
+
+    #[test]
+    fn vcard_limit_is_bounded() {
+        assert_eq!(
+            Config::default().storage.max_vcard_bytes,
+            DEFAULT_MAX_VCARD_BYTES
+        );
+        let config = from_toml("[storage]\nmax_vcard_bytes = 10485760\n").unwrap();
+        assert_eq!(config.storage.max_vcard_bytes, MAX_VCARD_BYTES);
+        for toml in [
+            "[storage]\nmax_vcard_bytes = 10485761\n",
+            "[storage]\nmax_vcard_bytes = 0\n",
+            "[storage]\nmax_vcard_bytes = 65535\n",
+            "[server]\nmax_body_bytes = 1048576\n",
+        ] {
+            assert!(from_toml(toml).is_err(), "{toml}");
+        }
+        from_toml("[server]\nmax_body_bytes = 1048576\n[storage]\nmax_vcard_bytes = 1048576\n")
+            .unwrap();
     }
 
     const OIDC: &str = r#"[oidc]
