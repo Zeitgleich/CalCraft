@@ -19,6 +19,10 @@ const BOOK: &str = "/dav/addressbooks/alice/default/";
 const NS: &str = r#"xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/" xmlns:ic="http://apple.com/ns/ical/" xmlns:x="urn:example:x""#;
 
 async fn app() -> Router {
+    app_and_store().await.0
+}
+
+async fn app_and_store() -> (Router, Store) {
     let store = Store::in_memory().await.unwrap();
     for (user, password) in [ALICE, BOB] {
         let hash = hash_password(password).unwrap();
@@ -27,7 +31,118 @@ async fn app() -> Router {
             .await
             .unwrap();
     }
-    router(&Config::default(), AppState::new(store).unwrap())
+    let app = router(&Config::default(), AppState::new(store.clone()).unwrap());
+    (app, store)
+}
+
+#[tokio::test]
+async fn names_that_are_not_xml_names_are_rejected() {
+    let app = app().await;
+    // `²` is alphanumeric, but not an XML name character.
+    for name in [
+        "<x:a²>v</x:a²>",
+        "<x:ok><x:b² /></x:ok>",
+        "<x:ok><x:c d²=\"1\"/></x:ok>",
+    ] {
+        let body = format!(
+            "<d:propertyupdate {NS}><d:set><d:prop>{name}</d:prop></d:set></d:propertyupdate>"
+        );
+        let (status, reply) = send(&app, ALICE, "PROPPATCH", CAL, None, &body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name}: {reply}");
+    }
+    let reply = propfind(&app, "/dav/calendars/alice/", "1", "").await;
+    assert!(!reply.contains("urn:example:x"), "{reply}");
+}
+
+#[tokio::test]
+async fn corrupt_stored_properties_are_left_out() {
+    let (app, store) = app_and_store().await;
+    let alice = store
+        .user_credentials(&"alice".parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap()
+        .user;
+    let cal = store
+        .collection(
+            alice.id,
+            calcraft_core::CollectionKind::Calendar,
+            &"default".parse().unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    // The store does not validate; rows like these could only come from a
+    // tampered or corrupted database.
+    let rows = [
+        ("urn:x", "bad-value", "<a²/>"),
+        ("urn:x", "unclosed", "<a xmlns=\"\">"),
+        ("urn:x", "a²", "1"),
+        ("relative", "ns", "1"),
+        ("urn:x", "good", "<b xmlns=\"urn:x\">fine</b>"),
+    ];
+    let changes: Vec<_> = rows
+        .iter()
+        .map(|(namespace, name, value)| calcraft_store::PropertyChange {
+            namespace,
+            name,
+            value: Some(value),
+        })
+        .collect();
+    store
+        .update_collection_with_properties(cal.id, None, None, None, &changes)
+        .await
+        .unwrap();
+    for (uri, depth) in [(CAL, "0"), ("/dav/calendars/alice/", "1")] {
+        let reply = propfind(&app, uri, depth, "").await;
+        assert!(
+            reply.contains(r#"<x:good xmlns:x="urn:x"><b xmlns="urn:x">fine</b></x:good>"#),
+            "{reply}"
+        );
+        for bad in ["²", "bad-value", "unclosed", "relative"] {
+            assert!(!reply.contains(bad), "{bad}: {reply}");
+        }
+        // The rest of the response is intact and well-formed.
+        assert!(
+            reply.contains("<d:displayname>Calendar</d:displayname>"),
+            "{reply}"
+        );
+        let limits = calcraft_ical::xml::XmlLimits {
+            max_len: reply.len(),
+            max_depth: 24,
+            max_nodes: 20_000,
+        };
+        calcraft_ical::xml::parse(reply.as_bytes(), &limits).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn large_calendar_timezone() {
+    let app = app().await;
+    // A VTIMEZONE with a long history: larger than the usual 16 KiB.
+    let tz = format!(
+        "BEGIN:VCALENDAR\nBEGIN:VTIMEZONE\nTZID:Long/History\n{}END:VTIMEZONE\nEND:VCALENDAR\n",
+        "BEGIN:STANDARD\nDTSTART:19700101T000000\nTZOFFSETFROM:+0100\nTZOFFSETTO:+0100\nEND:STANDARD\n"
+            .repeat(500)
+    );
+    assert!(tz.len() > 40 * 1024 && tz.len() < 64 * 1024);
+    let reply = proppatch(
+        &app,
+        CAL,
+        &format!("<c:calendar-timezone>{tz}</c:calendar-timezone>"),
+        "",
+    )
+    .await;
+    ok_only(&reply);
+    let reply = propfind(&app, CAL, "0", "<c:calendar-timezone/>").await;
+    assert!(
+        reply.contains(&format!("<c:calendar-timezone>{tz}</c:calendar-timezone>")),
+        "{}",
+        reply.len()
+    );
+    // Other properties keep the smaller limit.
+    let reply = proppatch(&app, CAL, &format!("<x:tz>{tz}</x:tz>"), "").await;
+    assert!(reply.contains("HTTP/1.1 507"), "{}", reply.len());
 }
 
 async fn send(
@@ -330,13 +445,13 @@ async fn limits() {
     // Replacing an existing one still works.
     ok_only(&proppatch(&app, CAL, "<x:p0>zero</x:p0>", "").await);
 
-    // Total size: 64 KiB per collection.
+    // Total size: 128 KiB per collection.
     let chunk = "v".repeat(15 * 1024);
-    let set: String = (0..4)
+    let set: String = (0..8)
         .map(|i| format!("<x:b{i}>{chunk}</x:b{i}>"))
         .collect();
     ok_only(&proppatch(&app, BOOK, &set, "").await);
-    let reply = proppatch(&app, BOOK, &format!("<x:b4>{chunk}</x:b4>"), "").await;
+    let reply = proppatch(&app, BOOK, &format!("<x:b8>{chunk}</x:b8>"), "").await;
     assert!(reply.contains("HTTP/1.1 507"), "{reply}");
 
     // MKCALENDAR: too large is refused and creates nothing.

@@ -49,7 +49,7 @@ pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
             let mut props = properties(&resource, user, ctx.state.max_vcard_bytes);
             if let Resource::Collection(collection) = &resource {
                 match ctx.state.store.dead_properties(collection.id).await {
-                    Ok(stored) => props.extend(dead_properties(&stored)),
+                    Ok(stored) => props.extend(dead_properties(collection.id, &stored)),
                     Err(err) => return store_error(err),
                 }
             }
@@ -77,6 +77,7 @@ pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
                         ctx.state.max_vcard_bytes,
                     );
                     props.extend(dead_properties(
+                        id,
                         stored.iter().filter(|(c, _)| *c == id).map(|(_, p)| p),
                     ));
                     responses.push(respond(&href, &props, &query));

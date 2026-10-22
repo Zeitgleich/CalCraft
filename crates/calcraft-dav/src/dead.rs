@@ -28,6 +28,18 @@ pub const MAX_NAMESPACE_LEN: usize = 256;
 pub const MAX_LOCAL_NAME_LEN: usize = 128;
 /// Largest serialised value of one dead property.
 pub const MAX_VALUE_BYTES: usize = 16 * 1024;
+/// Largest serialised value of `CALDAV:calendar-timezone`: a VTIMEZONE with
+/// its full history can exceed [`MAX_VALUE_BYTES`].
+pub const MAX_TIMEZONE_BYTES: usize = 64 * 1024;
+
+/// The value limit for a property name.
+pub fn max_value_bytes(name: &PropName) -> usize {
+    if name.is(crate::xml::NS_CALDAV, "calendar-timezone") {
+        MAX_TIMEZONE_BYTES
+    } else {
+        MAX_VALUE_BYTES
+    }
+}
 
 /// Why a property name cannot be used for a dead property.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,7 +76,7 @@ fn is_absolute_uri(value: &str) -> bool {
 /// Why a value cannot be stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueError {
-    /// Larger than [`MAX_VALUE_BYTES`] once serialised.
+    /// Larger than the limit once serialised.
     TooLarge,
     /// Contains a character XML 1.0 does not allow (e.g. from `&#1;`).
     InvalidCharacter,
@@ -76,26 +88,32 @@ pub struct XmlFragment(String);
 
 impl XmlFragment {
     /// Serialises the content (text and child elements) of `property`,
-    /// the property element of a PROPPATCH or MKCALENDAR body.
+    /// the property element of a PROPPATCH or MKCALENDAR body, with the
+    /// value limit for its name ([`max_value_bytes`]).
     pub fn from_property(property: &Node) -> Result<Self, ValueError> {
-        let mut out = String::new();
-        write_content(&mut out, property, None)?;
-        if out.len() > MAX_VALUE_BYTES {
-            return Err(ValueError::TooLarge);
-        }
-        Ok(Self(out))
+        let name = PropName::new(&property.namespace, &property.name);
+        Self::with_limit(property, max_value_bytes(&name))
+    }
+
+    fn with_limit(property: &Node, max: usize) -> Result<Self, ValueError> {
+        let mut writer = Writer {
+            out: String::new(),
+            max,
+        };
+        writer.content(property, None)?;
+        Ok(Self(writer.out))
     }
 
     /// Re-validates a value read from storage: it is parsed and serialised
     /// again, so only output of [`XmlFragment::from_property`] survives
     /// unchanged. `None` if it is not a valid fragment.
     pub fn from_stored(stored: &str) -> Option<Self> {
-        if stored.len() > MAX_VALUE_BYTES {
+        if stored.len() > MAX_TIMEZONE_BYTES {
             return None;
         }
         let wrapped = format!("<v xmlns=\"\">{stored}</v>");
         let root = tree::parse(wrapped.as_bytes(), wrapped.len()).ok()?;
-        Self::from_property(&root).ok()
+        Self::with_limit(&root, MAX_TIMEZONE_BYTES).ok()
     }
 
     pub fn as_str(&self) -> &str {
@@ -111,67 +129,78 @@ fn is_xml_char(c: char) -> bool {
     !matches!(c, '\u{0}'..='\u{8}' | '\u{B}' | '\u{C}' | '\u{E}'..='\u{1F}' | '\u{FFFE}' | '\u{FFFF}')
 }
 
-/// Escapes text or an attribute value. Whitespace that the parser would
-/// normalise is written as character references, so values round-trip.
-fn escape(out: &mut String, text: &str, attribute: bool) -> Result<(), ValueError> {
-    for c in text.chars() {
-        match c {
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '&' => out.push_str("&amp;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&apos;"),
-            '\r' => out.push_str("&#13;"),
-            '\n' if attribute => out.push_str("&#10;"),
-            '\t' if attribute => out.push_str("&#9;"),
-            c if is_xml_char(c) => out.push(c),
-            _ => return Err(ValueError::InvalidCharacter),
-        }
-        if out.len() > MAX_VALUE_BYTES {
-            return Err(ValueError::TooLarge);
-        }
-    }
-    Ok(())
+/// Serialises element content up to `max` bytes.
+struct Writer {
+    out: String,
+    max: usize,
 }
 
-fn write_content(out: &mut String, node: &Node, namespace: Option<&str>) -> Result<(), ValueError> {
-    // Whitespace between child elements is formatting, not content.
-    if node.children.is_empty() || !node.text.trim().is_empty() {
-        escape(out, &node.text, false)?;
+impl Writer {
+    fn check(&self) -> Result<(), ValueError> {
+        if self.out.len() > self.max {
+            Err(ValueError::TooLarge)
+        } else {
+            Ok(())
+        }
     }
-    for child in &node.children {
-        write_element(out, child, namespace)?;
-    }
-    Ok(())
-}
 
-/// Writes `node`; its namespace is declared unless the parent element
-/// already has it as default namespace.
-fn write_element(out: &mut String, node: &Node, parent: Option<&str>) -> Result<(), ValueError> {
-    // Names were checked by the parser (`calcraft_ical::xml::is_xml_name`).
-    out.push('<');
-    out.push_str(&node.name);
-    if parent != Some(node.namespace.as_str()) {
-        out.push_str(" xmlns=\"");
-        escape(out, &node.namespace, true)?;
-        out.push('"');
+    /// Escapes text or an attribute value. Whitespace that the parser would
+    /// normalise is written as character references, so values round-trip.
+    fn escape(&mut self, text: &str, attribute: bool) -> Result<(), ValueError> {
+        for c in text.chars() {
+            match c {
+                '<' => self.out.push_str("&lt;"),
+                '>' => self.out.push_str("&gt;"),
+                '&' => self.out.push_str("&amp;"),
+                '"' => self.out.push_str("&quot;"),
+                '\'' => self.out.push_str("&apos;"),
+                '\r' => self.out.push_str("&#13;"),
+                '\n' if attribute => self.out.push_str("&#10;"),
+                '\t' if attribute => self.out.push_str("&#9;"),
+                c if is_xml_char(c) => self.out.push(c),
+                _ => return Err(ValueError::InvalidCharacter),
+            }
+            self.check()?;
+        }
+        Ok(())
     }
-    for (name, value) in &node.attributes {
-        let _ = write!(out, " {name}=\"");
-        escape(out, value, true)?;
-        out.push('"');
+
+    fn content(&mut self, node: &Node, namespace: Option<&str>) -> Result<(), ValueError> {
+        // Whitespace between child elements is formatting, not content.
+        if node.children.is_empty() || !node.text.trim().is_empty() {
+            self.escape(&node.text, false)?;
+        }
+        for child in &node.children {
+            self.element(child, namespace)?;
+        }
+        Ok(())
     }
-    if node.children.is_empty() && node.text.is_empty() {
-        out.push_str("/>");
-    } else {
-        out.push('>');
-        write_content(out, node, Some(&node.namespace))?;
-        let _ = write!(out, "</{}>", node.name);
+
+    /// Writes `node`; its namespace is declared unless the parent element
+    /// already has it as default namespace.
+    fn element(&mut self, node: &Node, parent: Option<&str>) -> Result<(), ValueError> {
+        // Names were checked by the parser (`calcraft_ical::xml::is_xml_name`).
+        self.out.push('<');
+        self.out.push_str(&node.name);
+        if parent != Some(node.namespace.as_str()) {
+            self.out.push_str(" xmlns=\"");
+            self.escape(&node.namespace, true)?;
+            self.out.push('"');
+        }
+        for (name, value) in &node.attributes {
+            let _ = write!(self.out, " {name}=\"");
+            self.escape(value, true)?;
+            self.out.push('"');
+        }
+        if node.children.is_empty() && node.text.is_empty() {
+            self.out.push_str("/>");
+        } else {
+            self.out.push('>');
+            self.content(node, Some(&node.namespace))?;
+            let _ = write!(self.out, "</{}>", node.name);
+        }
+        self.check()
     }
-    if out.len() > MAX_VALUE_BYTES {
-        return Err(ValueError::TooLarge);
-    }
-    Ok(())
 }
 
 #[cfg(test)]

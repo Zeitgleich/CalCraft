@@ -17,16 +17,21 @@ follow [Semantic Versioning](https://semver.org/). Release process:
   as `CALDAV:calendar-timezone` and `CALDAV:schedule-calendar-transp`.
   Values are stored as canonical XML re-serialised from the parsed request,
   never as the bytes sent. Limits: 64 properties per collection, namespace
-  256 / local name 128 bytes, 16 KiB per value and 64 KiB per collection
-  (507 Insufficient Storage); namespaces must be absolute URIs or empty
-  (403). They survive restarts, are part of backups and are restored with a
-  collection from the trash. Migration `0010_dead_properties`.
+  256 / local name 128 bytes, 16 KiB per value (64 KiB for
+  `calendar-timezone`) and 128 KiB per collection (507 Insufficient
+  Storage); their bytes count towards the storage quota, including the trash.
+  Namespaces must be absolute URIs or empty (403). They survive restarts,
+  are part of backups and are restored with a collection from the trash. Migration `0010_dead_properties`.
 - The web UI and `GET /api/v1/collections` list calendars by
   `calendar-order`, then by name; `CollectionInfo` has a new field `order`.
   Reordering in the web UI itself is not available yet.
 
 ### Changed
 
+- The XML parser accepts exactly the XML 1.0 name characters in element and
+  attribute names (before: Rust's alphanumeric characters, e.g. `a²`, which
+  could not be written back as XML). Such requests now fail with 400.
+- PROPPATCH, MKCALENDAR and MKCOL bodies may be up to 128 KiB (was 64 KiB).
 - PROPPATCH answers protected properties (everything else in the `DAV:`,
   CalDAV and CardDAV namespaces, e.g. `resourcetype`, `getetag`,
   `sync-token`, `owner`, `current-user-privilege-set`,

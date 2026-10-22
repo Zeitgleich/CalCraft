@@ -80,8 +80,8 @@ fn check_len(value: &str) -> Result<(), XmlError> {
 }
 
 /// Element and attribute names are echoed into responses, so they must be
-/// valid XML names (letters, digits, `_`, `-`, `.`; no leading digit,
-/// hyphen or dot). quick-xml does not check this itself.
+/// valid XML names without prefix (see [`is_xml_name`]). quick-xml does not
+/// check this itself.
 fn check_name(name: &str) -> Result<(), XmlError> {
     check_len(name)?;
     if !is_xml_name(name) {
@@ -90,11 +90,29 @@ fn check_name(name: &str) -> Result<(), XmlError> {
     Ok(())
 }
 
-/// Whether `name` is an element or attribute name this parser accepts.
+/// `NameStartChar` of XML 1.0 (fifth edition, §2.3) without `:`.
+fn is_name_start_char(c: char) -> bool {
+    matches!(c,
+        'A'..='Z' | '_' | 'a'..='z'
+        | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{2FF}'
+        | '\u{370}'..='\u{37D}' | '\u{37F}'..='\u{1FFF}' | '\u{200C}'..='\u{200D}'
+        | '\u{2070}'..='\u{218F}' | '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}'
+        | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}' | '\u{10000}'..='\u{EFFFF}')
+}
+
+/// `NameChar` of XML 1.0 (fifth edition, §2.3) without `:`.
+fn is_name_char(c: char) -> bool {
+    is_name_start_char(c)
+        || matches!(c,
+            '-' | '.' | '0'..='9' | '\u{B7}' | '\u{300}'..='\u{36F}' | '\u{203F}'..='\u{2040}')
+}
+
+/// Whether `name` is an element or attribute name this parser accepts: an
+/// XML 1.0 name without `:` (an NCName). Exactly these names can be written
+/// back into a document and parsed again.
 pub fn is_xml_name(name: &str) -> bool {
     let mut chars = name.chars();
-    let valid_start = chars.next().is_some_and(|c| c.is_alphabetic() || c == '_');
-    valid_start && chars.all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    chars.next().is_some_and(is_name_start_char) && chars.all(is_name_char)
 }
 
 fn start_node(ns: ResolveResult<'_>, start: &BytesStart<'_>) -> Result<Node, XmlError> {

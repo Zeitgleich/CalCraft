@@ -126,12 +126,20 @@ Dead properties:
   element itself, whitespace between child elements and the position of
   text between child elements (it is kept in front of them). Characters
   XML 1.0 does not allow (e.g. `&#1;`) are rejected with 409.
-- **Limits**: 16 KiB per serialised value, 64 properties and 64 KiB
-  (namespaces, names and values) per collection, checked in the same
-  transaction as the change; beyond them the properties being set get 507
-  Insufficient Storage. They do not count towards the storage quota, which
-  covers object content; with at most 100 collections per user they are
-  bounded by 6.4 MiB.
+- **Limits**: 16 KiB per serialised value (64 KiB for
+  `CALDAV:calendar-timezone`, as a VTIMEZONE with its full history can be
+  large), 64 properties and 128 KiB (namespaces, names and values) per
+  collection. Their bytes count towards the owner's storage quota, also
+  while their collection is in the trash (its entry size includes them).
+  Limits and quota are checked in the same transaction as the change, before
+  anything is written; beyond them the properties being set get 507
+  Insufficient Storage. Removing or shrinking properties always works, also
+  above the quota.
+- **Names** of elements and attributes inside values (and of the
+  properties) must be XML 1.0 names; anything else is rejected by the parser
+  with 400. A stored property whose name or value does not pass these checks
+  again (e.g. a damaged database) is left out of PROPFIND responses and
+  logged with its collection id, instead of breaking the response.
 - **Scope**: only collections. PROPPATCH on calendar objects and contacts is
   not supported (405); their content is replaced on every PUT anyway.
 - They are part of backups (the whole database is copied) and go into the

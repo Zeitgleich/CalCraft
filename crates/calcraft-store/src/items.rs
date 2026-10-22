@@ -235,7 +235,13 @@ impl Store {
             Err(err) => return Err(err.into()),
         };
         let collection = collection_from_row(&row)?;
-        crate::properties::apply(&mut tx, collection.id, properties).await?;
+        crate::properties::apply(
+            &mut tx,
+            collection.id,
+            properties,
+            self.settings.quota_bytes(),
+        )
+        .await?;
         tx.commit().await?;
         Ok(collection)
     }
@@ -301,7 +307,13 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
         }
-        crate::properties::apply(&mut tx, collection_id, properties).await?;
+        crate::properties::apply(
+            &mut tx,
+            collection_id,
+            properties,
+            self.settings.quota_bytes(),
+        )
+        .await?;
         sqlx::query("UPDATE collections SET sync_revision = sync_revision + 1 WHERE id = ?")
             .bind(collection_id)
             .execute(&mut *tx)
@@ -531,7 +543,8 @@ impl Store {
         let owner_id: i64 = row.try_get("owner_id")?;
         let used = row
             .try_get::<i64, _>("used")?
-            .saturating_add(crate::trash::trash_bytes(&mut *tx, owner_id).await?);
+            .saturating_add(crate::trash::trash_bytes(&mut *tx, owner_id).await?)
+            .saturating_add(crate::properties::owner_bytes(&mut *tx, owner_id).await?);
         let size = i64::try_from(item.content.len()).unwrap_or(i64::MAX);
         if used.saturating_add(size) > self.settings.quota_bytes() {
             return Err(StoreError::Limit("storage quota exceeded"));
@@ -767,7 +780,9 @@ impl Store {
             .await?
             .try_get("used")?;
             // The trash counts towards the quota, as for PUT.
-            let used = used.saturating_add(crate::trash::trash_bytes(&mut *tx, owner_id).await?);
+            let used = used
+                .saturating_add(crate::trash::trash_bytes(&mut *tx, owner_id).await?)
+                .saturating_add(crate::properties::owner_bytes(&mut *tx, owner_id).await?);
             let size = i64::try_from(content.len()).unwrap_or(i64::MAX);
             if used.saturating_add(size) > self.settings.quota_bytes() {
                 return Err(StoreError::Limit("storage quota exceeded"));

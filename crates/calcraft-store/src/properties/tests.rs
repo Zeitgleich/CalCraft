@@ -158,18 +158,18 @@ async fn limits_roll_back_everything() {
         .await
         .unwrap();
 
-    // Size: five values of 16 KiB exceed 64 KiB in total.
+    // Size: nine values of 16 KiB exceed 128 KiB in total.
     let big = "v".repeat(16 * 1024);
     let book = store
         .collections(alice.id, CollectionKind::Addressbook)
         .await
         .unwrap()[0]
         .id;
-    let changes: Vec<_> = names[..5].iter().map(|n| set("urn:big", n, &big)).collect();
-    patch(&store, book, &changes[..3]).await.unwrap();
+    let changes: Vec<_> = names[..9].iter().map(|n| set("urn:big", n, &big)).collect();
+    patch(&store, book, &changes[..7]).await.unwrap();
     let err = patch(&store, book, &changes).await.unwrap_err();
     assert!(matches!(err, StoreError::Limit(_)), "{err}");
-    assert_eq!(store.dead_properties(book).await.unwrap().len(), 3);
+    assert_eq!(store.dead_properties(book).await.unwrap().len(), 7);
     assert_eq!(store.dead_properties(cal.id).await.unwrap().len(), 63);
 
     // MKCALENDAR with too many properties creates nothing.
@@ -232,6 +232,79 @@ async fn trash_keeps_properties() {
         .try_get("n")
         .unwrap();
     assert_eq!(left, 0);
+}
+
+#[tokio::test]
+async fn properties_count_towards_the_quota() {
+    let store = Store::in_memory().await.unwrap();
+    let alice = user(&store, "alice").await;
+    let cal = calendar(&store, &alice).await;
+    let book = store
+        .collections(alice.id, CollectionKind::Addressbook)
+        .await
+        .unwrap()[0]
+        .id;
+    store.set_limits_for_testing(10_000, crate::MAX_TRASH_ROWS_PER_USER);
+    let value = "v".repeat(6_000);
+    patch(&store, cal.id, &[set("urn:x", "a", &value)])
+        .await
+        .unwrap();
+    // A second collection does not get its own quota.
+    let err = patch(&store, book, &[set("urn:x", "a", &value)])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, StoreError::Limit("storage quota exceeded")),
+        "{err}"
+    );
+    // Objects see the properties' bytes as used.
+    let content = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:u\r\nSUMMARY:{}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        "s".repeat(4_500)
+    );
+    let item = crate::NewItem {
+        uid: "u",
+        component: "VEVENT",
+        range_start: None,
+        range_end: None,
+        recurring: false,
+        index_version: 0,
+        etag: "\"e\"",
+        content: content.as_bytes(),
+    };
+    let err = store
+        .put_item(cal.id, "u.ics", &item, &crate::Precondition::None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StoreError::Limit(_)), "{err}");
+
+    // In the trash they still count, and the entry's size includes them.
+    store
+        .delete_collection_to_trash(cal.id, 1_800_000_000)
+        .await
+        .unwrap();
+    let page = store.trash_entries(alice.id, 10, 0).await.unwrap();
+    assert_eq!(page.entries[0].size, 6_000 + 5 + 1);
+    assert_eq!(page.bytes, 6_000 + 5 + 1);
+    let err = patch(&store, book, &[set("urn:x", "a", &value)])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, StoreError::Limit("storage quota exceeded")),
+        "{err}"
+    );
+
+    // Above the quota, growing fails but removing still works.
+    store.set_limits_for_testing(100, crate::MAX_TRASH_ROWS_PER_USER);
+    patch(&store, book, &[set("urn:x", "small", "1")])
+        .await
+        .unwrap_err();
+    store.set_limits_for_testing(10_000, crate::MAX_TRASH_ROWS_PER_USER);
+    patch(&store, book, &[set("urn:x", "b", "1")])
+        .await
+        .unwrap();
+    store.set_limits_for_testing(100, crate::MAX_TRASH_ROWS_PER_USER);
+    patch(&store, book, &[remove("urn:x", "b")]).await.unwrap();
 }
 
 /// A fresh directory; removed on drop.
