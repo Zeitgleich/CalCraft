@@ -200,8 +200,9 @@ pub async fn login(
 }
 
 /// Creates a session for an authenticated user and returns the
-/// `Set-Cookie` value. Shared by password and SSO login.
-pub(super) async fn start_session(state: &AppState, user: &User) -> Result<String, ApiError> {
+/// `Set-Cookie` value (password login; SSO uses
+/// `Store::create_oidc_session`, which checks the binding).
+async fn start_session(state: &AppState, user: &User) -> Result<String, ApiError> {
     let token = random_token::<32>();
     let created = now();
     state

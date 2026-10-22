@@ -1,5 +1,87 @@
 use super::*;
 
+/// An unlink that commits between the SSO callback's checks and its
+/// binding step must neither re-bind the identity nor leave a session.
+#[tokio::test]
+async fn unlink_during_sso_login_does_not_rebind() {
+    let store = Store::in_memory().await.unwrap();
+    let alice = store
+        .create_user(&"alice".parse().unwrap(), "h", None)
+        .await
+        .unwrap();
+    let iss = "https://idp.example";
+    store
+        .bind_oidc_identity(alice.id, iss, "s1", 1)
+        .await
+        .unwrap();
+    let old = "old-session-hash";
+    store.create_session(alice.id, old, 1, 1000).await.unwrap();
+
+    // The callback's pre-checks see a linked account …
+    assert_eq!(
+        store.user_id_by_oidc_identity(iss, "s1").await.unwrap(),
+        Some(alice.id)
+    );
+    assert!(store.has_oidc_identity(alice.id, iss).await.unwrap());
+    // … then an admin unlinks it (bindings and sessions in one go) …
+    assert_eq!(store.unbind_oidc_identities(alice.id).await.unwrap(), 1);
+    assert_eq!(store.session(old, 2).await.unwrap(), None);
+    // … and the callback continues: no binding, no session.
+    assert!(
+        !store
+            .touch_oidc_identity(alice.id, iss, "s1", 2)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .create_oidc_session(alice.id, iss, "s1", "new-session-hash", 2, 1000)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        store.user_id_by_oidc_identity(iss, "s1").await.unwrap(),
+        None
+    );
+    assert!(!store.has_oidc_identity(alice.id, iss).await.unwrap());
+    assert_eq!(store.session("new-session-hash", 2).await.unwrap(), None);
+
+    // Unlink after the session was created removes it too.
+    store
+        .approve_oidc_link(alice.id, iss, "s1", 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .bind_approved_oidc_identity(alice.id, iss, "s1", 3)
+            .await
+            .unwrap(),
+        ApprovedBinding::Bound
+    );
+    assert!(
+        store
+            .touch_oidc_identity(alice.id, iss, "s1", 4)
+            .await
+            .unwrap()
+    );
+    // Wrong subject or another user: never a session.
+    assert!(
+        !store
+            .create_oidc_session(alice.id, iss, "s2", "x-hash", 4, 1000)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .create_oidc_session(alice.id, iss, "s1", "sso-hash", 4, 1000)
+            .await
+            .unwrap()
+    );
+    assert!(store.session("sso-hash", 5).await.unwrap().is_some());
+    store.unbind_oidc_identities(alice.id).await.unwrap();
+    assert_eq!(store.session("sso-hash", 5).await.unwrap(), None);
+}
+
 #[tokio::test]
 async fn identity_info_and_linked_users() {
     let store = Store::in_memory().await.unwrap();

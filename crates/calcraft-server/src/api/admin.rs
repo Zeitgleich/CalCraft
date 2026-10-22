@@ -131,8 +131,8 @@ pub async fn unlink_sso(
             "you cannot unlink your own single sign-on",
         ));
     }
+    // Also ends the user's sessions, in the same transaction.
     let removed = state.store.unbind_oidc_identities(target.id).await?;
-    state.store.delete_sessions_of(target.id).await?;
     // Never log the subject.
     tracing::info!(admin = %admin.username, user = %username, removed, "admin removed SSO link");
     Ok(StatusCode::NO_CONTENT)

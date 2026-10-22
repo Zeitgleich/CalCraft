@@ -151,8 +151,8 @@ pub async fn run(store: &Store, config: &Config, command: UserCommand) -> anyhow
             let Some(record) = store.user_credentials(&username).await? else {
                 bail!("user {username} does not exist");
             };
+            // Also ends the user's sessions, in the same transaction.
             let removed = store.unbind_oidc_identities(record.user.id).await?;
-            store.delete_sessions_of(record.user.id).await?;
             println!("removed {removed} SSO identities of {username}");
         }
         UserCommand::AllowSsoLink {

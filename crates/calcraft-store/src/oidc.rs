@@ -220,14 +220,82 @@ impl Store {
         Ok(ApprovedBinding::Bound)
     }
 
+    /// Records an SSO login of an identity that is already bound. Never
+    /// creates a binding: returns `false` if exactly this user + issuer +
+    /// subject is not (or no longer) bound, e.g. because it was unlinked
+    /// after the login checked it. New bindings only come from
+    /// [`Self::bind_approved_oidc_identity`] or, for accounts just created
+    /// by SSO, [`Self::bind_oidc_identity`].
+    pub async fn touch_oidc_identity(
+        &self,
+        user_id: i64,
+        issuer: &str,
+        subject: &str,
+        now: i64,
+    ) -> Result<bool> {
+        let updated = sqlx::query(
+            "UPDATE oidc_identities SET last_login_at = ? \
+             WHERE user_id = ? AND issuer = ? AND subject = ?",
+        )
+        .bind(now)
+        .bind(user_id)
+        .bind(issuer)
+        .bind(subject)
+        .execute(&self.writer)
+        .await?
+        .rows_affected();
+        Ok(updated == 1)
+    }
+
+    /// Creates a web session for an SSO login, but only if the identity is
+    /// still bound to the user. The check is part of the same statement, so
+    /// a concurrent [`Self::unbind_oidc_identities`] either comes first (no
+    /// session) or removes the new session as well. Returns `false` if the
+    /// identity is not bound.
+    pub async fn create_oidc_session(
+        &self,
+        user_id: i64,
+        issuer: &str,
+        subject: &str,
+        token_hash: &str,
+        now: i64,
+        expires_at: i64,
+    ) -> Result<bool> {
+        let inserted = sqlx::query(
+            "INSERT INTO sessions (user_id, token_hash, created_at, expires_at) \
+             SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM oidc_identities \
+             WHERE user_id = ? AND issuer = ? AND subject = ?)",
+        )
+        .bind(user_id)
+        .bind(token_hash)
+        .bind(now)
+        .bind(expires_at)
+        .bind(user_id)
+        .bind(issuer)
+        .bind(subject)
+        .execute(&self.writer)
+        .await?
+        .rows_affected();
+        Ok(inserted == 1)
+    }
+
     /// Removes all SSO bindings of a user (e.g. after the IdP account was
-    /// recreated). The next SSO login binds again. Returns the number removed.
+    /// recreated) and ends the user's web sessions, in one transaction.
+    /// Linking the account again needs an operator approval. Returns the
+    /// number of bindings removed.
     pub async fn unbind_oidc_identities(&self, user_id: i64) -> Result<u64> {
-        let result = sqlx::query("DELETE FROM oidc_identities WHERE user_id = ?")
+        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+        let removed = sqlx::query("DELETE FROM oidc_identities WHERE user_id = ?")
             .bind(user_id)
-            .execute(&self.writer)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+            .bind(user_id)
+            .execute(&mut *tx)
             .await?;
-        Ok(result.rows_affected())
+        tx.commit().await?;
+        Ok(removed)
     }
 }
 
