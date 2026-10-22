@@ -169,29 +169,31 @@ fn UserRow(user: AdminUser, on_change: Callback<()>) -> impl IntoView {
             </td>
             <td>{user.display_name.clone().unwrap_or_default()}</td>
             <td>{status.join(" · ")}</td>
-            <td class="actions">
-                {(!is_self)
-                    .then(|| {
-                        view! {
-                            <button
-                                type="button"
-                                class="secondary"
-                                disabled=move || busy.get()
-                                on:click=toggle_disabled
-                            >
-                                {if user.disabled { t::ENABLE } else { t::DISABLE }}
-                            </button>
-                            <button
-                                type="button"
-                                class="secondary"
-                                disabled=move || busy.get()
-                                on:click=toggle_admin
-                            >
-                                {if user.is_admin { t::REVOKE_ADMIN } else { t::GRANT_ADMIN }}
-                            </button>
-                        }
-                    })}
-                <ErrorText error />
+            <td>
+                <div class="actions">
+                    {(!is_self)
+                        .then(|| {
+                            view! {
+                                <button
+                                    type="button"
+                                    class="secondary"
+                                    disabled=move || busy.get()
+                                    on:click=toggle_disabled
+                                >
+                                    {if user.disabled { t::ENABLE } else { t::DISABLE }}
+                                </button>
+                                <button
+                                    type="button"
+                                    class="secondary"
+                                    disabled=move || busy.get()
+                                    on:click=toggle_admin
+                                >
+                                    {if user.is_admin { t::REVOKE_ADMIN } else { t::GRANT_ADMIN }}
+                                </button>
+                            }
+                        })}
+                    <ErrorText error />
+                </div>
             </td>
         </tr>
     }
