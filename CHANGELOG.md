@@ -7,6 +7,15 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 
 ## [Unreleased]
 
+## [0.1.0-alpha.1] – 2026-10-22
+
+First pre-release, for testing only – not for production use (open points:
+[docs/produktionsreife.md](docs/produktionsreife.md)). It contains CalDAV,
+CardDAV, the REST API, the web UI, OIDC, import/export and backup/restore as
+described in the README; the entries below list what changed since this
+changelog was started. A new installation applies all database migrations up
+to `0007_recurrence`.
+
 ### Added
 
 - Trash: DAV and web UI deletions of calendar objects, contacts and whole
