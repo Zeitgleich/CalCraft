@@ -17,7 +17,7 @@ use axum::{
     extract::{Request, State},
     http::{
         HeaderValue, Method, StatusCode,
-        header::{ALLOW, AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE},
+        header::{ALLOW, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER, WWW_AUTHENTICATE},
     },
     response::{IntoResponse, Response},
 };
@@ -146,8 +146,13 @@ fn store_error(err: StoreError) -> Response {
             StatusCode::INSUFFICIENT_STORAGE.into_response()
         }
         StoreError::CollectionExists => method_not_allowed(),
+        // Transient: clients retry (RFC 9110 §15.6.4, §10.2.3).
+        StoreError::Busy => {
+            tracing::error!("storage busy: database stayed locked");
+            (StatusCode::SERVICE_UNAVAILABLE, [(RETRY_AFTER, "1")]).into_response()
+        }
         err => {
-            tracing::error!(%err, "storage error");
+            tracing::error!(%err, sqlite_code = err.sqlite_code(), "storage error");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }

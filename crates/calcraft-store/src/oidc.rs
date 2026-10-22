@@ -65,7 +65,7 @@ impl Store {
         .bind(subject)
         .bind(now)
         .bind(now)
-        .execute(&self.pool)
+        .execute(&self.writer)
         .await?
         .rows_affected()
             == 1;
@@ -80,7 +80,7 @@ impl Store {
         .bind(user_id)
         .bind(issuer)
         .bind(subject)
-        .execute(&self.pool)
+        .execute(&self.writer)
         .await?
         .rows_affected()
             == 1;
@@ -119,7 +119,7 @@ impl Store {
         .bind(issuer)
         .bind(subject)
         .bind(expires_at)
-        .execute(&self.pool)
+        .execute(&self.writer)
         .await?;
         Ok(())
     }
@@ -138,7 +138,7 @@ impl Store {
         // Write transactions start IMMEDIATE (see `put_item`): a deferred one that
         // reads first fails with SQLITE_BUSY instead of waiting when another
         // writer commits in between.
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
         let consumed = sqlx::query(
             "DELETE FROM oidc_link_approvals \
              WHERE user_id = ? AND issuer = ? AND subject = ? AND expires_at > ?",
@@ -180,7 +180,7 @@ impl Store {
     pub async fn unbind_oidc_identities(&self, user_id: i64) -> Result<u64> {
         let result = sqlx::query("DELETE FROM oidc_identities WHERE user_id = ?")
             .bind(user_id)
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok(result.rows_affected())
     }

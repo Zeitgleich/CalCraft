@@ -330,8 +330,17 @@ impl Store {
                 for file in database_files(path) {
                     restrict_permissions(&file)?;
                 }
+                let writer = match connect_pool(path, 1, &simulation).await {
+                    Ok(writer) => writer,
+                    Err(err) => {
+                        pool.close().await;
+                        lock.release()?;
+                        return Err(err);
+                    }
+                };
                 return Ok(Self {
                     pool,
+                    writer,
                     lock: Some(lock),
                     path: Some(Arc::new(path.to_path_buf())),
                     simulation,
@@ -349,6 +358,7 @@ impl Store {
             }
             let pool = connect_pool(path, 1, &simulation).await?;
             let store = Self {
+                writer: pool.clone(),
                 pool,
                 lock: None,
                 path: Some(Arc::new(path.to_path_buf())),
@@ -419,6 +429,7 @@ impl Store {
     /// Closes all connections and releases the process lock (once all
     /// clones are dropped).
     pub async fn close(self) {
+        self.writer.close().await;
         self.pool.close().await;
     }
 

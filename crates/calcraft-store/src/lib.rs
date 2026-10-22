@@ -41,6 +41,11 @@ pub enum StoreError {
     /// failed transaction was rolled back; DAV answers 507.
     #[error("database or disk is full")]
     Full,
+    /// The database stayed locked (`SQLITE_BUSY`/`SQLITE_LOCKED` after the
+    /// busy timeout, or no connection within the pool timeout). Transient;
+    /// DAV answers 503 with `Retry-After`.
+    #[error("database is busy")]
+    Busy,
     #[error("database migration failed: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
     #[error("user {0} already exists")]
@@ -84,19 +89,37 @@ pub enum StoreError {
     PreMigrationBackup(String),
 }
 
+/// The SQLite result code (extended) of a database error.
+fn sqlite_code(err: &sqlx::Error) -> Option<i64> {
+    match err {
+        sqlx::Error::Database(db) => db.code().and_then(|code| code.parse().ok()),
+        _ => None,
+    }
+}
+
+impl StoreError {
+    /// The SQLite result code (extended) behind this error, for logs.
+    pub fn sqlite_code(&self) -> Option<i64> {
+        match self {
+            Self::Database(err) => sqlite_code(err),
+            _ => None,
+        }
+    }
+}
+
 impl From<sqlx::Error> for StoreError {
     fn from(err: sqlx::Error) -> Self {
-        /// Primary result code `SQLITE_FULL`; extended codes keep it in the low byte.
+        // Primary result codes; extended codes keep them in the low byte.
+        const SQLITE_BUSY: i64 = 5;
+        const SQLITE_LOCKED: i64 = 6;
         const SQLITE_FULL: i64 = 13;
-        let full = match &err {
-            sqlx::Error::Database(db) => db
-                .code()
-                .and_then(|code| code.parse::<i64>().ok())
-                .is_some_and(|code| code & 0xff == SQLITE_FULL),
-            _ => false,
-        };
-        if full {
+        let primary = sqlite_code(&err).map(|code| code & 0xff);
+        if primary == Some(SQLITE_FULL) {
             Self::Full
+        } else if matches!(primary, Some(SQLITE_BUSY | SQLITE_LOCKED))
+            || matches!(err, sqlx::Error::PoolTimedOut)
+        {
+            Self::Busy
         } else {
             Self::Database(err)
         }
@@ -157,6 +180,13 @@ pub struct Collection {
 #[derive(Debug, Clone)]
 pub struct Store {
     pub(crate) pool: SqlitePool,
+    /// The single connection all writes use. SQLite allows one writer at a
+    /// time anyway; queueing writers here (sqlx hands out connections in
+    /// FIFO order) instead of in SQLite's busy handler, which polls and
+    /// lets a waiter lose again and again until `busy_timeout` expires,
+    /// keeps a busy server from failing writes with `SQLITE_BUSY`. Other
+    /// processes (CLI backup, import) still meet the busy timeout.
+    pub(crate) writer: SqlitePool,
     /// Shared process lock on `<database>.lock`; `None` in memory.
     #[allow(dead_code)]
     lock: Option<Arc<backup::DbLock>>,
@@ -185,6 +215,7 @@ impl Store {
             .await?;
         MIGRATOR.run(&pool).await?;
         Ok(Self {
+            writer: pool.clone(),
             pool,
             lock: None,
             path: None,
@@ -229,7 +260,7 @@ impl Store {
         // Write transactions start IMMEDIATE (see `put_item`): a deferred one that
         // reads first fails with SQLITE_BUSY instead of waiting when another
         // writer commits in between.
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
         let result = sqlx::query(
             "INSERT INTO users (username, password_hash, display_name, is_admin) VALUES (?, ?, ?, ?) RETURNING id",
         )
@@ -305,7 +336,7 @@ impl Store {
         let result = sqlx::query("UPDATE users SET password_hash = ? WHERE username = ?")
             .bind(password_hash)
             .bind(username.as_str())
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok(result.rows_affected() == 1)
     }
@@ -315,7 +346,7 @@ impl Store {
         let result = sqlx::query("UPDATE users SET disabled = ? WHERE username = ?")
             .bind(disabled)
             .bind(username.as_str())
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok(result.rows_affected() == 1)
     }

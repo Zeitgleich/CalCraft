@@ -167,6 +167,8 @@ pub enum ApiError {
     TooLarge,
     /// An uploaded file that cannot be used, with the reason.
     InvalidData(String),
+    /// Temporarily unavailable (database busy); retry later.
+    Unavailable,
     Internal,
 }
 
@@ -216,6 +218,11 @@ impl IntoResponse for ApiError {
                 "request body too large".to_owned(),
             ),
             Self::InvalidData(message) => (StatusCode::BAD_REQUEST, "invalid_data", message),
+            Self::Unavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                "temporarily unavailable, try again".to_owned(),
+            ),
             Self::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal",
@@ -240,8 +247,12 @@ impl From<StoreError> for ApiError {
             }
             StoreError::CollectionExists => Self::Conflict("collection already exists"),
             StoreError::UserExists(_) => Self::Conflict("user already exists"),
+            StoreError::Busy => {
+                tracing::error!("storage busy: database stayed locked");
+                Self::Unavailable
+            }
             err => {
-                tracing::error!(%err, "storage error");
+                tracing::error!(%err, sqlite_code = err.sqlite_code(), "storage error");
                 Self::Internal
             }
         }
