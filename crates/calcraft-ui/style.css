@@ -1,37 +1,112 @@
 /* CalCraft web UI. Served as a separate file: the Content Security Policy
-   forbids inline styles. No external fonts or frameworks. */
+   forbids inline styles. No external fonts or frameworks.
+
+   Design tokens: brand blue (#2563eb family, see docs/brand.md), slate
+   neutrals, one spacing scale, three radii (controls < cards < login
+   card) and subtle shadows. Dark mode follows the system setting. */
 
 :root {
-    --bg: #f6f7f9;
-    --surface: #ffffff;
-    --text: #1d2330;
-    --muted: #5d6676;
-    --border: #d8dce3;
-    --accent: #2f6fd0;
-    --accent-text: #ffffff;
-    --danger: #b3261e;
-    --success: #1e7a3c;
-    --warning-bg: #fff6dc;
-    --warning-border: #e0b84a;
-    --code-bg: #eef0f4;
-    --radius: 6px;
     color-scheme: light dark;
+
+    /* Brand */
+    --brand: #2563eb;
+    --brand-deep: #1d4ed8;
+    --brand-ink: #0f172a;
+
+    /* Surfaces and text */
+    --bg: #f8fafc;
+    --surface: #ffffff;
+    --surface-2: #f1f5f9;
+    --text: #0f172a;
+    --text-2: #334155;
+    --muted: #5b6b80;
+    --border: #e2e8f0;
+    --border-strong: #cbd5e1;
+
+    /* Interactive */
+    --accent: #2563eb;
+    --accent-hover: #1d4ed8;
+    --accent-active: #1e40af;
+    --accent-text: #ffffff;
+    --accent-soft: #eff6ff;
+    --accent-soft-text: #1d4ed8;
+    --link: #1d4ed8;
+    --focus: rgb(37 99 235 / 0.4);
+
+    /* Status */
+    --danger: #b91c1c;
+    --danger-soft: #fef2f2;
+    --success: #15803d;
+    --success-soft: #f0fdf4;
+    --warning-bg: #fffbeb;
+    --warning-border: #f2c94c;
+    --warning-accent: #d97706;
+
+    /* Logo parts */
+    --logo-page: var(--brand);
+    --logo-band: var(--brand-deep);
+    --logo-ring: var(--brand-ink);
+    --logo-gap: var(--surface);
+
+    /* Login background (calendar grid) */
+    --grid-line: rgb(37 99 235 / 0.07);
+    --glow: rgb(37 99 235 / 0.1);
+
+    /* Scale */
+    --space-1: 0.25rem;
+    --space-2: 0.5rem;
+    --space-3: 0.75rem;
+    --space-4: 1rem;
+    --space-5: 1.5rem;
+    --space-6: 2rem;
+    --space-7: 3rem;
+    --radius-sm: 6px;
+    --radius: 10px;
+    --radius-lg: 16px;
+    --shadow-sm: 0 1px 2px rgb(15 23 42 / 0.05);
+    --shadow: 0 1px 2px rgb(15 23 42 / 0.05), 0 4px 16px rgb(15 23 42 / 0.06);
+    --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    --content-width: 960px;
+    --gutter: 1.25rem;
+    --ease: 120ms ease-out;
 }
 
 @media (prefers-color-scheme: dark) {
     :root {
-        --bg: #14171c;
-        --surface: #1d2128;
-        --text: #e4e7ec;
-        --muted: #9aa3b2;
-        --border: #343a45;
-        --accent: #5b93e6;
-        --accent-text: #0d1117;
-        --danger: #f08a80;
-        --success: #6fcf8d;
-        --warning-bg: #3a3220;
-        --warning-border: #8a7230;
-        --code-bg: #262b34;
+        --bg: #0f172a;
+        --surface: #1e293b;
+        --surface-2: #273449;
+        --text: #e2e8f0;
+        --text-2: #cbd5e1;
+        --muted: #9aa8bc;
+        --border: #334155;
+        --border-strong: #475569;
+
+        --accent: #2563eb;
+        --accent-hover: #3b74f0;
+        --accent-active: #1d4ed8;
+        --accent-text: #ffffff;
+        --accent-soft: rgb(59 130 246 / 0.18);
+        --accent-soft-text: #bfdbfe;
+        --link: #93c5fd;
+        --focus: rgb(96 165 250 / 0.55);
+
+        --danger: #fca5a5;
+        --danger-soft: rgb(248 113 113 / 0.12);
+        --success: #86efac;
+        --success-soft: rgb(74 222 128 / 0.1);
+        --warning-bg: #33290f;
+        --warning-border: #8a6a1c;
+        --warning-accent: #f59e0b;
+
+        --logo-ring: #e2e8f0;
+
+        --grid-line: rgb(148 163 184 / 0.07);
+        --glow: rgb(37 99 235 / 0.2);
+
+        --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.3);
+        --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 8px 24px rgb(0 0 0 / 0.25);
     }
 }
 
@@ -44,12 +119,16 @@ body {
     margin: 0;
     background: var(--bg);
     color: var(--text);
-    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-family: var(--font);
     font-size: 16px;
-    line-height: 1.5;
+    line-height: 1.55;
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
 }
 
 .layout {
+    position: relative;
+    isolation: isolate;
     display: flex;
     flex-direction: column;
     min-height: 100vh;
@@ -58,40 +137,63 @@ body {
 main {
     flex: 1;
     width: 100%;
-    max-width: 960px;
+    max-width: var(--content-width);
     margin: 0 auto;
-    padding: 1rem 1.25rem 2rem;
+    padding: var(--space-5) var(--gutter) var(--space-7);
 }
 
 main.narrow {
     max-width: 420px;
-    padding-top: 3rem;
+    padding-top: var(--space-7);
+}
+
+h1,
+h2,
+h3 {
+    color: var(--text);
+    line-height: 1.25;
+    letter-spacing: -0.011em;
 }
 
 h1 {
-    font-size: 1.6rem;
-    margin: 0.5rem 0 1rem;
+    font-size: 1.75rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin: var(--space-2) 0 var(--space-3);
 }
 
 h2 {
-    font-size: 1.2rem;
-    margin: 1.75rem 0 0.75rem;
+    font-size: 1.125rem;
+    font-weight: 650;
+    margin: var(--space-6) 0 var(--space-3);
 }
 
 h3 {
-    font-size: 1.05rem;
-    margin: 0 0 0.5rem;
+    font-size: 1rem;
+    font-weight: 650;
+    margin: 0 0 var(--space-2);
+}
+
+p {
+    margin: 0 0 var(--space-3);
 }
 
 a {
-    color: var(--accent);
+    color: var(--link);
+    text-underline-offset: 0.15em;
+    text-decoration-thickness: from-font;
+}
+
+a:hover {
+    text-decoration-thickness: 2px;
 }
 
 code {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 0.9em;
-    background: var(--code-bg);
-    padding: 0.1em 0.35em;
+    font-family: var(--font-mono);
+    font-size: 0.875em;
+    background: var(--surface-2);
+    color: var(--text-2);
+    padding: 0.12em 0.4em;
     border-radius: 4px;
 }
 
@@ -101,60 +203,184 @@ code.wrap,
 }
 
 code.secret {
-    font-size: 1.05em;
+    font-size: 1em;
+    color: var(--text);
     user-select: all;
 }
 
-/* Header and navigation */
+strong {
+    font-weight: 650;
+}
+
+/* Logo (inline SVG, colors from the tokens above) */
+
+.logo {
+    display: block;
+    flex: none;
+    width: 1.75rem;
+    height: 1.75rem;
+}
+
+.logo-page {
+    fill: var(--logo-page);
+}
+
+.logo-band {
+    fill: var(--logo-band);
+}
+
+.logo-gap {
+    fill: var(--logo-gap);
+}
+
+.logo-ring {
+    fill: var(--logo-ring);
+}
+
+.logo-spark {
+    fill: #ffffff;
+}
+
+/* Header and navigation. The side padding lines the header content up
+   with the centered main column. */
 
 .topbar {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 0.5rem 1.25rem;
-    padding: 0.6rem 1.25rem;
+    gap: var(--space-2) var(--space-5);
+    padding: 0.7rem max(var(--gutter), calc((100% - var(--content-width)) / 2 + var(--gutter)));
     background: var(--surface);
     border-bottom: 1px solid var(--border);
+    box-shadow: var(--shadow-sm);
 }
 
 .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
     font-weight: 700;
-    font-size: 1.1rem;
+    font-size: 1.125rem;
+    letter-spacing: -0.015em;
+    color: var(--text);
 }
 
 .topbar nav {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.25rem;
+    gap: var(--space-1);
     flex: 1;
 }
 
 .topbar nav a {
-    padding: 0.3rem 0.7rem;
-    border-radius: var(--radius);
-    color: var(--text);
+    padding: 0.35rem 0.75rem;
+    border-radius: var(--radius-sm);
+    color: var(--text-2);
+    font-weight: 500;
     text-decoration: none;
+    transition: background-color var(--ease), color var(--ease);
 }
 
 .topbar nav a:hover {
-    background: var(--code-bg);
+    background: var(--surface-2);
+    color: var(--text);
 }
 
 .topbar nav a.active {
-    background: var(--accent);
-    color: var(--accent-text);
+    background: var(--accent-soft);
+    color: var(--accent-soft-text);
+    font-weight: 600;
 }
 
 .user {
     color: var(--muted);
+    font-size: 0.9375rem;
 }
 
 footer {
-    padding: 1rem 1.25rem;
+    padding: var(--space-4) var(--gutter);
     text-align: center;
     color: var(--muted);
-    font-size: 0.875rem;
+    font-size: 0.8125rem;
     border-top: 1px solid var(--border);
+}
+
+footer a {
+    color: var(--muted);
+}
+
+footer a:hover {
+    color: var(--text);
+}
+
+/* Login: logo centered above the form, a faint calendar grid behind it. */
+
+.layout:has(> main.login)::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background-image:
+        radial-gradient(ellipse 60% 45% at 50% 0%, var(--glow), transparent 70%),
+        linear-gradient(var(--grid-line) 1px, transparent 1px),
+        linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+    background-size: 100% 100%, 56px 56px, 56px 56px;
+    background-position: center top, center -1px, calc(50% - 28px) 0;
+    mask-image: linear-gradient(to bottom, #000 35%, transparent 90%);
+    pointer-events: none;
+}
+
+main.login {
+    max-width: 400px;
+    padding-top: clamp(var(--space-6), 10vh, 6rem);
+}
+
+.login-brand {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-3);
+    margin-bottom: var(--space-5);
+}
+
+.login-brand .logo {
+    width: 4.5rem;
+    height: 4.5rem;
+    filter: drop-shadow(0 6px 14px rgb(37 99 235 / 0.25));
+}
+
+.login-brand .logo-gap {
+    fill: var(--bg);
+}
+
+.login-name {
+    font-size: 1.625rem;
+    font-weight: 700;
+    letter-spacing: -0.025em;
+}
+
+main.login h1 {
+    text-align: center;
+    font-size: 1.125rem;
+    font-weight: 600;
+    color: var(--text-2);
+    letter-spacing: 0;
+    margin: 0 0 var(--space-4);
+}
+
+main.login > p {
+    text-align: center;
+}
+
+main.login .card {
+    padding: var(--space-5);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow);
+}
+
+main.login form button[type="submit"] {
+    align-self: stretch;
+    padding-block: 0.6rem;
 }
 
 /* Forms */
@@ -163,27 +389,34 @@ form,
 .card {
     display: flex;
     flex-direction: column;
-    gap: 0.85rem;
+    gap: var(--space-4);
 }
 
 .card {
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 1rem 1.25rem;
+    padding: var(--space-5);
+    box-shadow: var(--shadow-sm);
+}
+
+.card > h3 {
+    margin: 0;
 }
 
 label {
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
-    font-weight: 500;
+    gap: 0.3rem;
+    font-weight: 550;
+    font-size: 0.9375rem;
+    color: var(--text);
 }
 
 label.inline {
     flex-direction: row;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--space-2);
     font-weight: 400;
 }
 
@@ -192,61 +425,118 @@ input[type="password"],
 select,
 textarea {
     font: inherit;
-    color: inherit;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 0.45rem 0.6rem;
+    font-size: 1rem;
     font-weight: 400;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 0.55rem 0.7rem;
+    min-height: 2.5rem;
+    transition: border-color var(--ease), box-shadow var(--ease);
 }
 
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible,
+textarea {
+    resize: vertical;
+}
+
+input[type="text"]:hover,
+input[type="password"]:hover,
+select:hover,
+textarea:hover {
+    border-color: var(--muted);
+}
+
+input[type="text"]:focus,
+input[type="password"]:focus,
+select:focus,
+textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--focus);
+}
+
+input[type="checkbox"] {
+    accent-color: var(--accent);
+    width: 1rem;
+    height: 1rem;
+    margin: 0;
+}
+
+a:focus-visible,
 button:focus-visible,
-a:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 1px;
+input[type="checkbox"]:focus-visible,
+input[type="color"]:focus-visible {
+    outline: 2px solid transparent;
+    box-shadow: 0 0 0 3px var(--focus);
+    border-radius: var(--radius-sm);
 }
 
 input[type="color"] {
     width: 3rem;
-    height: 2rem;
-    padding: 0;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: none;
+    height: 2.25rem;
+    padding: 2px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    cursor: pointer;
 }
 
 input[type="color"]:disabled {
     opacity: 0.35;
+    cursor: not-allowed;
 }
 
 fieldset {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 0.75rem;
+    gap: var(--space-3);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border-radius: var(--radius-sm);
     margin: 0;
-    padding: 0.4rem 0.75rem 0.6rem;
+    padding: var(--space-2) var(--space-3) var(--space-3);
 }
 
 legend {
-    font-weight: 500;
-    padding: 0 0.25rem;
+    font-weight: 550;
+    font-size: 0.9375rem;
+    padding: 0 var(--space-1);
+}
+
+/* Buttons: primary by default, .secondary and .danger variants. */
+
+button,
+a.button {
+    font: inherit;
+    font-size: 0.9375rem;
+    font-weight: 550;
+    line-height: 1.4;
+    cursor: pointer;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-sm);
+    background: var(--accent);
+    color: var(--accent-text);
+    padding: 0.45rem 0.95rem;
+    box-shadow: var(--shadow-sm);
+    transition: background-color var(--ease), border-color var(--ease), box-shadow var(--ease),
+        color var(--ease);
 }
 
 button {
-    font: inherit;
-    cursor: pointer;
     align-self: flex-start;
-    border: 1px solid var(--accent);
-    border-radius: var(--radius);
-    background: var(--accent);
-    color: var(--accent-text);
-    padding: 0.4rem 0.9rem;
+}
+
+button:hover,
+a.button:hover {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+}
+
+button:active,
+a.button:active {
+    background: var(--accent-active);
+    border-color: var(--accent-active);
 }
 
 /* A link that starts a top-level navigation (SSO login), styled as a button. */
@@ -254,36 +544,48 @@ a.button {
     display: block;
     text-align: center;
     text-decoration: none;
-    border: 1px solid var(--accent);
-    border-radius: var(--radius);
-    background: var(--accent);
-    color: var(--accent-text);
-    padding: 0.5rem 0.9rem;
-    font-weight: 500;
-}
-
-a.button:hover {
-    filter: brightness(1.08);
+    padding: 0.6rem 0.95rem;
 }
 
 .separator {
     text-align: center;
     margin: 0;
+    font-size: 0.875rem;
 }
 
 button.secondary {
-    background: transparent;
+    background: var(--surface);
     color: var(--text);
-    border-color: var(--border);
+    border-color: var(--border-strong);
+}
+
+button.secondary:hover {
+    background: var(--surface-2);
+    border-color: var(--border-strong);
+}
+
+button.secondary:active {
+    background: var(--border);
 }
 
 button.danger {
-    background: transparent;
+    background: var(--surface);
     color: var(--danger);
+    border-color: var(--border-strong);
+}
+
+button.danger:hover {
+    background: var(--danger-soft);
     border-color: var(--danger);
 }
 
-button:disabled {
+button.danger:active {
+    background: var(--danger-soft);
+    border-color: var(--danger);
+}
+
+button:disabled,
+button:disabled:hover {
     cursor: progress;
     opacity: 0.6;
 }
@@ -296,6 +598,11 @@ button:disabled {
 
 .hint {
     font-size: 0.875rem;
+    line-height: 1.5;
+}
+
+label .hint {
+    font-size: 0.8125rem;
 }
 
 .small {
@@ -305,23 +612,44 @@ button:disabled {
 .error {
     color: var(--danger);
     margin: 0;
+    font-weight: 500;
 }
 
 .success {
     color: var(--success);
+    font-weight: 500;
 }
 
+main.login > .success,
+main.login > .error {
+    background: var(--success-soft);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-3);
+    margin-bottom: var(--space-4);
+}
+
+main.login > .error {
+    background: var(--danger-soft);
+}
+
+/* Notices (recovery codes, one-time passwords, update available). */
 .warning {
     background: var(--warning-bg);
     border: 1px solid var(--warning-border);
-    border-radius: var(--radius);
-    padding: 0.5rem 0.75rem;
+    border-left: 4px solid var(--warning-accent);
+    border-radius: var(--radius-sm);
+    padding: var(--space-3) var(--space-4);
     margin: 0;
+    color: var(--text);
+}
+
+main > .warning {
+    margin-bottom: var(--space-4);
 }
 
 .secret-box {
     border-color: var(--warning-border);
-    margin-bottom: 1rem;
+    margin-bottom: var(--space-4);
 }
 
 /* Lists and tables */
@@ -332,24 +660,28 @@ button:disabled {
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: var(--space-3);
 }
 
+/* Collection card: the collection color runs along the left edge. */
 .item {
+    position: relative;
+    overflow: hidden;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 0.75rem 1rem;
+    padding: var(--space-4) var(--space-5) var(--space-4) calc(var(--space-5) + 2px);
+    box-shadow: var(--shadow-sm);
 }
 
 .item p {
-    margin: 0.35rem 0 0;
+    margin: var(--space-2) 0 0;
 }
 
 .item-head {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
+    gap: var(--space-3);
 }
 
 .item-title {
@@ -359,32 +691,46 @@ button:disabled {
     min-width: 0;
 }
 
+.item-title strong {
+    font-size: 1.0625rem;
+    overflow-wrap: anywhere;
+}
+
+.item-title .muted {
+    font-size: 0.875rem;
+}
+
+.dav-url {
+    font-size: 0.875rem;
+}
+
 .actions {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.4rem;
+    gap: var(--space-2);
 }
 
 .swatch {
-    width: 1.25rem;
-    height: 1.25rem;
-    flex: none;
-    border-radius: 4px;
-    border: 1px solid var(--border);
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 5px;
+    height: 100%;
 }
 
 .swatch.none {
-    border-style: dashed;
+    background: var(--border-strong);
 }
 
 .description {
     white-space: pre-wrap;
+    color: var(--text-2);
 }
 
 .edit,
 .confirm {
-    margin-top: 0.75rem;
-    padding-top: 0.75rem;
+    margin-top: var(--space-4);
+    padding-top: var(--space-4);
     border-top: 1px solid var(--border);
 }
 
@@ -392,12 +738,13 @@ button:disabled {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--space-2);
 }
 
 .confirm p {
     flex-basis: 100%;
     margin: 0;
+    font-weight: 500;
 }
 
 .confirm-inline {
@@ -407,34 +754,54 @@ button:disabled {
     gap: 0.4rem;
 }
 
+/* Empty lists: an outlined placeholder instead of a lone line of text. */
+.empty {
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius);
+    padding: var(--space-5) var(--space-4);
+    text-align: center;
+    margin: 0;
+}
+
 table {
     width: 100%;
-    border-collapse: collapse;
+    border-collapse: separate;
+    border-spacing: 0;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius);
+    box-shadow: var(--shadow-sm);
+    overflow: hidden;
 }
 
 th,
 td {
     text-align: left;
-    padding: 0.5rem 0.75rem;
+    padding: 0.65rem var(--space-4);
     border-bottom: 1px solid var(--border);
     vertical-align: middle;
 }
 
+tbody tr:last-child td {
+    border-bottom: 0;
+}
+
 th {
     vertical-align: bottom;
+    background: var(--surface-2);
+    font-size: 0.8125rem;
+    color: var(--muted);
+    font-weight: 600;
 }
 
 td .actions {
     align-items: center;
+    justify-content: flex-end;
 }
 
-th {
+td button {
     font-size: 0.875rem;
-    color: var(--muted);
-    font-weight: 600;
+    padding: 0.3rem 0.7rem;
 }
 
 tr.disabled td {
@@ -444,7 +811,7 @@ tr.disabled td {
 .facts {
     display: grid;
     grid-template-columns: max-content 1fr;
-    gap: 0.35rem 1rem;
+    gap: var(--space-2) var(--space-4);
     margin: 0;
 }
 
@@ -463,7 +830,7 @@ tr.disabled td {
     margin: 0;
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
-    gap: 0.35rem;
+    gap: var(--space-2);
 }
 
 .visually-hidden {
@@ -475,12 +842,33 @@ tr.disabled td {
     white-space: nowrap;
 }
 
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        transition: none !important;
+    }
+}
+
 @media (max-width: 600px) {
+    :root {
+        --gutter: 0.75rem;
+    }
+
     /* Compact header: brand, user and logout on one row, the navigation
        as a horizontally scrollable row below. */
     .topbar {
         padding: 0.5rem 0.75rem 0.4rem;
         gap: 0.4rem 0.75rem;
+    }
+
+    .brand {
+        font-size: 1rem;
+    }
+
+    .brand .logo {
+        width: 1.5rem;
+        height: 1.5rem;
     }
 
     .user {
@@ -511,15 +899,41 @@ tr.disabled td {
     }
 
     main {
-        padding: 0.75rem;
+        padding: var(--space-3) var(--gutter) var(--space-6);
+    }
+
+    main.narrow {
+        padding-top: var(--space-6);
+    }
+
+    h1 {
+        font-size: 1.5rem;
+    }
+
+    .card {
+        padding: var(--space-4);
+    }
+
+    .item {
+        padding: var(--space-3) var(--space-4) var(--space-3) calc(var(--space-4) + 2px);
     }
 
     .item-head {
         flex-wrap: wrap;
     }
 
+    /* Wide tables scroll inside their frame instead of widening the page. */
+    table {
+        display: block;
+        overflow-x: auto;
+    }
+
     th,
     td {
-        padding: 0.4rem;
+        padding: 0.45rem 0.5rem;
+    }
+
+    td button {
+        white-space: nowrap;
     }
 }

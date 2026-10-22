@@ -197,7 +197,10 @@ fn Shell() -> impl IntoView {
 
     view! {
         <header class="topbar">
-            <span class="brand">{calcraft_core::NAME}</span>
+            <span class="brand">
+                <Logo />
+                {calcraft_core::NAME}
+            </span>
             <nav aria-label=t::NAV_LABEL>
                 {move || {
                     Page::ALL
@@ -234,6 +237,27 @@ fn Shell() -> impl IntoView {
                 }
             }}
         </main>
+    }
+}
+
+/// The CalCraft mark: a calendar page with binder rings and a spark
+/// (assets/brand/logo.svg). Inline, so that its colors follow the theme
+/// through CSS classes; decorative, the name is always next to it.
+#[component]
+pub fn Logo() -> impl IntoView {
+    view! {
+        <svg class="logo" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
+            <rect class="logo-page" x="6" y="10" width="52" height="48" rx="12" />
+            <path class="logo-band" d="M6 25V22A12 12 0 0 1 18 10H46A12 12 0 0 1 58 22V25Z" />
+            <rect class="logo-gap" x="16" y="3" width="10" height="16" rx="5" />
+            <rect class="logo-gap" x="38" y="3" width="10" height="16" rx="5" />
+            <rect class="logo-ring" x="18" y="5" width="6" height="12" rx="3" />
+            <rect class="logo-ring" x="40" y="5" width="6" height="12" rx="3" />
+            <path
+                class="logo-spark"
+                d="M32 28.5Q33.9 38.9 44.5 41Q33.9 43.1 32 53.5Q30.1 43.1 19.5 41Q30.1 38.9 32 28.5Z"
+            />
+        </svg>
     }
 }
 

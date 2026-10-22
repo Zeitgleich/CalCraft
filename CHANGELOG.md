@@ -19,6 +19,17 @@ follow [Semantic Versioning](https://semver.org/). Release process:
   macOS and Windows, `SHA256SUMS`, build provenance attestations and a
   signed multi-arch Docker image on `ghcr.io/zeitgleich/calcraft`; see
   [docs/release-verification.md](docs/release-verification.md).
+- Logo ("Blatt und Funke") with wordmark, favicon, Apple touch icon and web
+  app manifest; sources and PNG exports in `assets/brand/`, see
+  [docs/brand.md](docs/brand.md). The Content Security Policy gains
+  `manifest-src 'self'` for the manifest.
+
+### Changed
+
+- Web UI: refreshed design with the logo in the header and on the login page,
+  a token-based colour system (light and dark), clearer buttons, focus rings
+  and form fields, collection cards with their colour along the left edge,
+  outlined empty states, and tables that scroll inside their frame on phones.
 
 ### Fixed
 
