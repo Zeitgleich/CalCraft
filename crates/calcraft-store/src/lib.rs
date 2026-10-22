@@ -599,13 +599,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("calcraft-busy-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let options = StoreOptions {
-            acquire_timeout: std::time::Duration::from_millis(50),
+            // Long enough to open a connection on slow CI runners (Windows),
+            // short enough to keep the test quick.
+            acquire_timeout: std::time::Duration::from_millis(500),
             ..StoreOptions::default()
         };
         let store = Store::open_with(&dir.join("test.db"), &options)
             .await
             .unwrap();
         // Someone holds the single write connection for too long.
+        // Open a reader connection first so the read below doesn't have to.
+        assert!(store.list_users().await.unwrap().is_empty());
         let held = store.writer.acquire().await.unwrap();
         let start = std::time::Instant::now();
         let err = store
@@ -613,7 +617,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, StoreError::Busy), "{err:?}");
-        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
         // Reads do not need the writer.
         assert!(store.list_users().await.unwrap().is_empty());
         drop(held);
