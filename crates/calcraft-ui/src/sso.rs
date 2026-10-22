@@ -50,9 +50,15 @@ pub fn take_error(search: &str) -> (Option<String>, String) {
 
 /// Text of the SSO button: the configured label, or a generic one.
 pub fn button_label(label: &str) -> String {
+    /// Keeps a misconfigured label from breaking the login layout.
+    const MAX_CHARS: usize = 60;
     let label = label.trim();
     if label.is_empty() {
         text::SSO_LOGIN_GENERIC.to_owned()
+    } else if label.chars().count() > MAX_CHARS {
+        let mut short: String = label.chars().take(MAX_CHARS - 1).collect();
+        short.push('…');
+        short
     } else {
         label.to_owned()
     }
@@ -139,6 +145,9 @@ mod tests {
             "Sign in with Keycloak"
         );
         assert_eq!(button_label("  "), text::SSO_LOGIN_GENERIC);
+        let long = button_label(&"x".repeat(500));
+        assert_eq!(long.chars().count(), 60);
+        assert!(long.ends_with('…'));
     }
 
     #[test]
