@@ -8,8 +8,15 @@
 //!
 //! Trade-off: anyone who knows a username can lock that account for the
 //! lockout window by sending wrong passwords. This is accepted in favour of
-//! stopping online guessing; per-source limits follow together with the
-//! trusted-proxy configuration.
+//! stopping online guessing.
+//!
+//! In addition, failed logins are counted per client address
+//! (`server.max_login_failures_per_client` within the lockout window, for
+//! known and unknown usernames alike). A blocked client gets the same
+//! answer as for wrong credentials, without spending a password hash: the
+//! block concerns the client, not an account, so it reveals nothing about
+//! accounts. Successful logins do not reset this counter, so one valid
+//! account cannot be used to keep guessing others.
 
 use std::{
     collections::HashMap,
@@ -28,7 +35,11 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use calcraft_core::Username;
 use calcraft_store::{Store, User};
 
-use crate::secrets::{hash_secret, hashes_equal};
+use crate::{
+    limits::FailureTable,
+    net::ClientKey,
+    secrets::{hash_secret, hashes_equal},
+};
 use tokio::sync::{Notify, Semaphore};
 
 /// Prefix of app passwords: `ccap_<id>_<secret>`.
@@ -52,10 +63,12 @@ const MAX_FAILURES: u32 = 5;
 const LOCKOUT_WINDOW: Duration = Duration::from_secs(15 * 60);
 const MAX_TRACKED: usize = 10_000;
 const MAX_CONCURRENT_HASHES: usize = 4;
-/// Requests of one account that may wait for an attempt slot at once.
+/// Requests of one account name that may wait for an attempt slot at once.
 const MAX_WAITERS: u32 = 8;
 /// How long a request waits for an attempt slot at most.
 const MAX_WAIT: Duration = Duration::from_secs(5);
+/// Default of `server.max_login_failures_per_client`.
+const MAX_CLIENT_FAILURES: u32 = 20;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PasswordError {
@@ -193,6 +206,8 @@ pub struct Authenticator {
     hashing: Arc<Semaphore>,
     cache: Mutex<HashMap<Username, CacheEntry>>,
     failures: Mutex<HashMap<Username, Failures>>,
+    /// Failed logins per client address.
+    client_failures: Mutex<FailureTable>,
     /// Account passwords accepted (`security.password_login`).
     password_login: AtomicBool,
 }
@@ -206,6 +221,15 @@ impl Authenticator {
 
     pub fn password_login(&self) -> bool {
         self.password_login.load(Ordering::Relaxed)
+    }
+
+    /// Sets the failed logins allowed per client within the lockout window
+    /// and the most clients tracked (`server.max_login_failures_per_client`,
+    /// `server.max_tracked_clients`).
+    pub fn set_client_failure_limit(&self, max_failures: u32, max_clients: usize) {
+        if let Ok(mut table) = self.client_failures.lock() {
+            table.configure(max_clients, max_failures);
+        }
     }
 
     pub fn new(store: Store) -> anyhow::Result<Arc<Self>> {
@@ -225,19 +249,34 @@ impl Authenticator {
             hashing: Arc::new(Semaphore::new(MAX_CONCURRENT_HASHES)),
             cache: Mutex::new(HashMap::new()),
             failures: Mutex::new(HashMap::new()),
+            client_failures: Mutex::new(FailureTable::new(
+                MAX_TRACKED,
+                MAX_CLIENT_FAILURES,
+                LOCKOUT_WINDOW,
+            )),
             password_login: AtomicBool::new(true),
         }))
     }
 
-    /// Authenticates the `Authorization` header of a DAV request.
+    /// Authenticates the `Authorization` header of a DAV request from
+    /// `client` (`None` if unknown: no per-client counting).
     ///
     /// DAV clients may use the account password only while two-factor
     /// authentication is off; with 2FA they must use an app password.
-    pub async fn authenticate(&self, header: Option<&[u8]>) -> AuthOutcome {
+    pub async fn authenticate(
+        &self,
+        header: Option<&[u8]>,
+        client: Option<ClientKey>,
+    ) -> AuthOutcome {
         let Some(credentials) = header.and_then(parse_basic) else {
             return AuthOutcome::Denied;
         };
         let username = &credentials.username;
+        // A blocked client is refused before anything else: no attempt
+        // slot, no waiting, no Argon2 (see `reserve`).
+        if self.client_blocked(client) {
+            return self.refused(Refusal::Client).await;
+        }
         // Valid credentials that need no Argon2 run (an app password, or an
         // account password verified recently) take no attempt slot, so the
         // parallel requests of a busy client never queue or get denied.
@@ -248,8 +287,9 @@ impl Authenticator {
             self.clear_failures(username);
             return AuthOutcome::Authenticated(user);
         }
-        let Some(attempt) = self.reserve(username).await else {
-            return self.locked_out().await;
+        let attempt = match self.reserve(username, client).await {
+            Ok(attempt) => attempt,
+            Err(refusal) => return self.refused(refusal).await,
         };
         if let Some((id, secret)) = parse_app_password(&credentials.password) {
             return self.check_app_password(&attempt, id, secret).await;
@@ -270,36 +310,46 @@ impl Authenticator {
         }
     }
 
-    /// Reserves a login attempt for `username`. Attempts in progress count
-    /// towards the limit together with recorded failures, so concurrent
-    /// requests cannot bypass the lockout. Returns `None` when locked; the
-    /// caller then answers like a wrong password ([`Self::locked_out`]).
+    /// Reserves a login attempt for `username` from `client`. Attempts in
+    /// progress count towards the account limit together with recorded
+    /// failures, so concurrent requests cannot bypass the lockout. Fails
+    /// when the client or the account is blocked; a blocked client is
+    /// refused at once, without taking a slot or waiting.
     ///
-    /// When only attempts in progress fill the limit, this waits until one
-    /// of them ends instead of failing: a client sending more than
+    /// When only attempts in progress fill the account limit, this waits
+    /// until one of them ends instead of failing: a client sending more than
     /// `MAX_FAILURES` requests at once with correct credentials (sync
     /// clients do) must not get 401 for its own parallel requests. Waiting
     /// is bounded: at most `MAX_WAITERS` requests per account name (known
-    /// or not) wait, each for at most `MAX_WAIT`; beyond that it is `None`.
-    pub async fn reserve(&self, username: &Username) -> Option<Attempt<'_>> {
+    /// or not) wait, each for at most `MAX_WAIT`; beyond that the account
+    /// refusal applies. The client block is checked again after waiting.
+    pub async fn reserve(
+        &self,
+        username: &Username,
+        client: Option<ClientKey>,
+    ) -> Result<Attempt<'_>, Refusal> {
         let deadline = tokio::time::Instant::now() + MAX_WAIT;
         let mut waiter: Option<Waiter<'_>> = None;
         loop {
+            if self.client_blocked(client) {
+                return Err(Refusal::Client);
+            }
             let released = {
                 let Ok(mut failures) = self.failures.lock() else {
-                    return None;
+                    return Err(Refusal::Account);
                 };
                 match try_reserve(&mut failures, username, waiter.is_some()) {
                     Reservation::Reserved => {
                         drop(failures);
                         // Leave the queue only after the slot is taken.
                         drop(waiter);
-                        return Some(Attempt {
+                        return Ok(Attempt {
                             auth: self,
                             username: username.clone(),
+                            client,
                         });
                     }
-                    Reservation::Locked => return None,
+                    Reservation::Locked => return Err(Refusal::Account),
                     Reservation::Busy(released) => released,
                 }
             };
@@ -315,7 +365,18 @@ impl Authenticator {
                 .await
                 .is_err()
             {
-                return None;
+                return Err(Refusal::Account);
+            }
+        }
+    }
+
+    /// Response for a refused attempt; looks like wrong credentials.
+    pub async fn refused(&self, refusal: Refusal) -> AuthOutcome {
+        match refusal {
+            Refusal::Account => self.locked_out().await,
+            Refusal::Client => {
+                tracing::debug!("login attempt from a client with too many failed logins");
+                AuthOutcome::LockedOut
             }
         }
     }
@@ -420,6 +481,7 @@ impl Authenticator {
                 AuthOutcome::Authenticated(user)
             }
             Ok(None) => {
+                self.record_client_failure(attempt.client);
                 // Count only for existing accounts (see `check_first_factor_reserved`).
                 if matches!(self.store.user_credentials(username).await, Ok(Some(_))) {
                     self.record_failure(username.clone());
@@ -498,10 +560,14 @@ impl Authenticator {
             // unknown names disappear when their attempt ends, so made-up
             // names cannot fill the table.
             Some(_) => {
+                self.record_client_failure(attempt.client);
                 self.record_failure(username);
                 AuthOutcome::Denied
             }
-            None => AuthOutcome::Denied,
+            None => {
+                self.record_client_failure(attempt.client);
+                AuthOutcome::Denied
+            }
         }
     }
 
@@ -552,6 +618,27 @@ impl Authenticator {
         }
     }
 
+    /// Whether `client` has used up its failed logins (`false` if unknown).
+    pub fn client_blocked(&self, client: Option<ClientKey>) -> bool {
+        client.is_some_and(|client| {
+            self.client_failures
+                .lock()
+                .map_or(true, |table| table.is_blocked(client, Instant::now()))
+        })
+    }
+
+    /// Records a failed attempt of `client` (known or unknown username).
+    pub fn record_client_failure(&self, client: Option<ClientKey>) {
+        let Some(client) = client else {
+            return;
+        };
+        if let Ok(mut table) = self.client_failures.lock()
+            && table.record(client, Instant::now())
+        {
+            tracing::warn!(%client, "client blocked after repeated failed logins");
+        }
+    }
+
     /// Resets the failure count after a fully successful login.
     pub fn clear_failures(&self, username: &Username) {
         if let Ok(mut failures) = self.failures.lock()
@@ -579,27 +666,6 @@ impl Authenticator {
     }
 }
 
-#[cfg(test)]
-impl Authenticator {
-    /// Takes a slot without waiting, for tests.
-    fn try_reserve_now(&self, username: &Username) -> Attempt<'_> {
-        let mut failures = self.failures.lock().unwrap();
-        assert!(matches!(
-            try_reserve(&mut failures, username, false),
-            Reservation::Reserved
-        ));
-        Attempt {
-            auth: self,
-            username: username.clone(),
-        }
-    }
-
-    fn waiting(&self, username: &Username) -> u32 {
-        let failures = self.failures.lock().unwrap();
-        failures.get(username).map_or(0, |entry| entry.waiting)
-    }
-}
-
 /// Result of [`try_reserve`].
 enum Reservation {
     Reserved,
@@ -609,8 +675,8 @@ enum Reservation {
     Busy(Arc<Notify>),
 }
 
-/// Takes an attempt slot if possible. `queued`: the caller already counts
-/// as a waiter of this account name.
+/// Takes an attempt slot of an account name if possible. `queued`: the
+/// caller already counts as a waiter of this name.
 fn try_reserve(
     failures: &mut HashMap<Username, Failures>,
     username: &Username,
@@ -667,15 +733,29 @@ impl Drop for Waiter<'_> {
     }
 }
 
+/// Why [`Authenticator::reserve`] refused an attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// Too many failures for the account (or the tracking table is full).
+    Account,
+    /// Too many failures from the client address.
+    Client,
+}
+
 /// A reserved login attempt; released when dropped.
 pub struct Attempt<'a> {
     auth: &'a Authenticator,
     username: Username,
+    client: Option<ClientKey>,
 }
 
 impl Attempt<'_> {
     pub fn username(&self) -> &Username {
         &self.username
+    }
+
+    pub fn client(&self) -> Option<ClientKey> {
+        self.client
     }
 }
 
@@ -702,267 +782,4 @@ fn parse_app_password(password: &str) -> Option<(i64, &str)> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn basic(user: &str, password: &str) -> String {
-        format!("Basic {}", STANDARD.encode(format!("{user}:{password}")))
-    }
-
-    async fn setup() -> Arc<Authenticator> {
-        let store = Store::in_memory().await.unwrap();
-        let hash = hash_password("correct horse battery").unwrap();
-        store
-            .create_user(&"alice".parse().unwrap(), &hash, None)
-            .await
-            .unwrap();
-        Authenticator::new(store).unwrap()
-    }
-
-    #[test]
-    fn password_policy() {
-        assert!(matches!(
-            hash_password("short"),
-            Err(PasswordError::TooShort)
-        ));
-        assert!(matches!(
-            hash_password(&"x".repeat(MAX_PASSWORD_LEN + 1)),
-            Err(PasswordError::TooLong)
-        ));
-        let hash = hash_password("a long enough password").unwrap();
-        assert!(hash.starts_with("$argon2id$"));
-        assert!(verify_password("a long enough password", &hash));
-        assert!(!verify_password("a long enough passwore", &hash));
-        assert!(!verify_password("x", "not a hash"));
-    }
-
-    #[test]
-    fn parses_basic_header() {
-        let creds = parse_basic(basic("Alice", "pw:with:colons").as_bytes()).unwrap();
-        assert_eq!(creds.username.as_str(), "alice");
-        assert_eq!(creds.password, "pw:with:colons");
-        assert!(parse_basic(b"Bearer abc").is_none());
-        assert!(parse_basic(b"Basic !!!").is_none());
-        assert!(parse_basic(basic("../etc", "x").as_bytes()).is_none());
-        assert!(parse_basic(basic("alice", "").as_bytes()).is_none());
-        assert!(parse_basic(b"Basic").is_none());
-    }
-
-    #[tokio::test]
-    async fn authenticates_valid_credentials() {
-        let auth = setup().await;
-        let header = basic("alice", "correct horse battery");
-        for _ in 0..2 {
-            // Second round hits the cache.
-            assert!(matches!(
-                auth.authenticate(Some(header.as_bytes())).await,
-                AuthOutcome::Authenticated(user) if user.username.as_str() == "alice"
-            ));
-        }
-    }
-
-    /// Runs `n` authentications of `header` at once.
-    async fn parallel(auth: &Arc<Authenticator>, header: &str, n: u32) -> Vec<AuthOutcome> {
-        let handles: Vec<_> = (0..n)
-            .map(|_| {
-                let (auth, header) = (auth.clone(), header.to_owned());
-                tokio::spawn(async move { auth.authenticate(Some(header.as_bytes())).await })
-            })
-            .collect();
-        let mut outcomes = Vec::new();
-        for handle in handles {
-            outcomes.push(handle.await.unwrap());
-        }
-        outcomes
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn many_parallel_requests_with_valid_credentials_are_not_locked_out() {
-        let auth = setup().await;
-        let header = basic("alice", "correct horse battery");
-        // Not yet cached: more than the attempt limit, some of them wait.
-        for outcome in parallel(&auth, &header, MAX_FAILURES + 2).await {
-            assert!(
-                matches!(outcome, AuthOutcome::Authenticated(_)),
-                "{outcome:?}"
-            );
-        }
-        // Cached: verified without taking an attempt slot.
-        for outcome in parallel(&auth, &header, 8 * MAX_FAILURES).await {
-            assert!(
-                matches!(outcome, AuthOutcome::Authenticated(_)),
-                "{outcome:?}"
-            );
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn waiting_for_an_attempt_slot_is_capped_and_bounded() {
-        let auth = setup().await;
-        // Known and unknown names are limited alike.
-        for name in ["alice", "nobody"] {
-            let username: Username = name.parse().unwrap();
-            let held: Vec<_> = (0..MAX_FAILURES)
-                .map(|_| auth.try_reserve_now(&username))
-                .collect();
-            let waiters: Vec<_> = (0..MAX_WAITERS)
-                .map(|_| {
-                    let (auth, username) = (auth.clone(), username.clone());
-                    tokio::spawn(async move { auth.reserve(&username).await.is_some() })
-                })
-                .collect();
-            while auth.waiting(&username) < MAX_WAITERS {
-                tokio::task::yield_now().await;
-            }
-            // Queue full: denied at once.
-            let start = Instant::now();
-            assert!(auth.reserve(&username).await.is_none());
-            assert!(start.elapsed() < Duration::from_secs(1));
-            if name == "alice" {
-                // One slot freed: the waiters get it one after another.
-                drop(held);
-                for waiter in waiters {
-                    assert!(waiter.await.unwrap());
-                }
-            } else {
-                // No slot freed: every waiter gives up after MAX_WAIT.
-                for waiter in waiters {
-                    assert!(!waiter.await.unwrap());
-                }
-                assert!(start.elapsed() >= MAX_WAIT - Duration::from_millis(100));
-                drop(held);
-            }
-            assert!(auth.reserve(&username).await.is_some());
-            assert_eq!(auth.waiting(&username), 0);
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn cancelled_requests_keep_their_hash_permit_until_hashing_ends() {
-        let auth = setup().await;
-        let tasks: Vec<_> = (0..MAX_CONCURRENT_HASHES)
-            .map(|i| {
-                let auth = auth.clone();
-                let header = basic(&format!("ghost{i}"), "some wrong password");
-                tokio::spawn(async move { auth.authenticate(Some(header.as_bytes())).await })
-            })
-            .collect();
-        while auth.hashing.available_permits() > 0 {
-            tokio::task::yield_now().await;
-        }
-        // Client disconnects or timeouts drop the request futures ...
-        for task in &tasks {
-            task.abort();
-        }
-        for task in tasks {
-            assert!(task.await.unwrap_err().is_cancelled());
-        }
-        // ... but the Argon2 runs go on and keep the bound.
-        assert_eq!(auth.hashing.available_permits(), 0);
-        while auth.hashing.available_permits() < MAX_CONCURRENT_HASHES {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn rejects_wrong_or_missing_credentials() {
-        let auth = setup().await;
-        assert!(matches!(auth.authenticate(None).await, AuthOutcome::Denied));
-        let wrong = basic("alice", "wrong password!!");
-        assert!(matches!(
-            auth.authenticate(Some(wrong.as_bytes())).await,
-            AuthOutcome::Denied
-        ));
-        let unknown = basic("mallory", "correct horse battery");
-        assert!(matches!(
-            auth.authenticate(Some(unknown.as_bytes())).await,
-            AuthOutcome::Denied
-        ));
-    }
-
-    #[tokio::test]
-    async fn cached_login_does_not_accept_other_passwords() {
-        let auth = setup().await;
-        let good = basic("alice", "correct horse battery");
-        let bad = basic("alice", "correct horse batterx");
-        assert!(matches!(
-            auth.authenticate(Some(good.as_bytes())).await,
-            AuthOutcome::Authenticated(_)
-        ));
-        assert!(matches!(
-            auth.authenticate(Some(bad.as_bytes())).await,
-            AuthOutcome::Denied
-        ));
-    }
-
-    #[tokio::test]
-    async fn locks_out_after_repeated_failures() {
-        let auth = setup().await;
-        let wrong = basic("alice", "wrong password!!");
-        for _ in 0..MAX_FAILURES {
-            auth.authenticate(Some(wrong.as_bytes())).await;
-        }
-        let good = basic("alice", "correct horse battery");
-        assert!(matches!(
-            auth.authenticate(Some(good.as_bytes())).await,
-            AuthOutcome::LockedOut
-        ));
-    }
-
-    #[tokio::test]
-    async fn password_change_invalidates_cache() {
-        let auth = setup().await;
-        let old = basic("alice", "correct horse battery");
-        assert!(matches!(
-            auth.authenticate(Some(old.as_bytes())).await,
-            AuthOutcome::Authenticated(_)
-        ));
-        let hash = hash_password("a brand new password").unwrap();
-        auth.store
-            .set_password_hash(&"alice".parse().unwrap(), &hash)
-            .await
-            .unwrap();
-        assert!(matches!(
-            auth.authenticate(Some(old.as_bytes())).await,
-            AuthOutcome::Denied
-        ));
-    }
-
-    #[tokio::test]
-    async fn unknown_usernames_cannot_disable_the_lockout() {
-        let auth = setup().await;
-        // Flooding with made-up names must not stop counting for real accounts.
-        for i in 0..50 {
-            let fake = basic(&format!("ghost{i}"), "whatever password");
-            auth.authenticate(Some(fake.as_bytes())).await;
-        }
-        assert!(auth.failures.lock().unwrap().is_empty());
-        let wrong = basic("alice", "wrong password!!");
-        for _ in 0..MAX_FAILURES {
-            auth.authenticate(Some(wrong.as_bytes())).await;
-        }
-        let good = basic("alice", "correct horse battery");
-        assert!(matches!(
-            auth.authenticate(Some(good.as_bytes())).await,
-            AuthOutcome::LockedOut
-        ));
-    }
-
-    #[tokio::test]
-    async fn disabled_users_are_denied() {
-        let auth = setup().await;
-        let good = basic("alice", "correct horse battery");
-        assert!(matches!(
-            auth.authenticate(Some(good.as_bytes())).await,
-            AuthOutcome::Authenticated(_)
-        ));
-        auth.store
-            .set_disabled(&"alice".parse().unwrap(), true)
-            .await
-            .unwrap();
-        assert!(matches!(
-            auth.authenticate(Some(good.as_bytes())).await,
-            AuthOutcome::Denied
-        ));
-    }
-}
+mod tests;

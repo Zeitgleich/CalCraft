@@ -17,6 +17,8 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::net::Cidr;
+
 /// Environment variable prefix for configuration overrides.
 pub const ENV_PREFIX: &str = "CALCRAFT_";
 
@@ -43,7 +45,35 @@ pub struct ServerConfig {
     pub max_body_bytes: usize,
     /// Maximum time to handle a single request, in seconds.
     pub request_timeout_secs: u64,
+    /// Requests handled at the same time; further requests get `503`
+    /// immediately (`/healthz` and `/readyz` are exempt).
+    pub max_concurrent_requests: usize,
+    /// Requests of one client handled at the same time; further requests
+    /// get `429`.
+    pub max_concurrent_requests_per_client: u32,
+    /// Requests one client may send in a burst (token bucket size).
+    pub client_rate_burst: u32,
+    /// Sustained requests per second and client (token bucket refill).
+    pub client_rate_per_second: u32,
+    /// Failed logins per client within 15 minutes; afterwards every login
+    /// attempt of that client fails like a wrong password until the window
+    /// ends. Applies in addition to the per-account lockout.
+    pub max_login_failures_per_client: u32,
+    /// IPv6 clients are grouped by network of this prefix length, because
+    /// one host usually controls a whole /64.
+    pub client_ipv6_prefix: u8,
+    /// Most clients tracked at once for the per-client limits; idle and
+    /// then least recently seen entries are evicted beyond that.
+    pub max_tracked_clients: usize,
+    /// Reverse proxies (CIDR ranges) whose `X-Forwarded-For` header is used
+    /// to determine the client address. Default: loopback, for a reverse
+    /// proxy on the same host (only local processes can connect from
+    /// there). Empty: the header is never used.
+    pub trusted_proxies: Vec<Cidr>,
 }
+
+/// Bounds of `server.client_ipv6_prefix`.
+pub const CLIENT_IPV6_PREFIX: std::ops::RangeInclusive<u8> = 32..=128;
 
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -51,6 +81,14 @@ impl Default for ServerConfig {
             bind: SocketAddr::from(([127, 0, 0, 1], 5232)),
             max_body_bytes: 10 * 1024 * 1024,
             request_timeout_secs: 30,
+            max_concurrent_requests: 256,
+            max_concurrent_requests_per_client: 32,
+            client_rate_burst: 120,
+            client_rate_per_second: 20,
+            max_login_failures_per_client: 20,
+            client_ipv6_prefix: 64,
+            max_tracked_clients: 10_000,
+            trusted_proxies: Cidr::loopback(),
         }
     }
 }
@@ -506,6 +544,37 @@ impl Config {
                 "server.request_timeout_secs must be greater than 0",
             ));
         }
+        let server = &self.server;
+        if server.max_concurrent_requests == 0
+            || server.max_concurrent_requests_per_client == 0
+            || server.client_rate_burst == 0
+            || server.client_rate_per_second == 0
+            || server.max_login_failures_per_client == 0
+            || server.max_tracked_clients == 0
+        {
+            return Err(ConfigError::Invalid(
+                "server: request and login limits must be greater than 0",
+            ));
+        }
+        // Bounded by the semaphore and by the eviction scan over a full client
+        // table, which runs under its lock for every new client.
+        if server.max_concurrent_requests > 1_000_000 || server.max_tracked_clients > 100_000 {
+            return Err(ConfigError::Invalid(
+                "server: max_concurrent_requests (1 000 000) or max_tracked_clients (100 000) too large",
+            ));
+        }
+        // Health checks bypass the global limit but still occupy client entries,
+        // so leave room for them beyond the in-flight requests.
+        if server.max_tracked_clients < server.max_concurrent_requests.saturating_mul(2) {
+            return Err(ConfigError::Invalid(
+                "server.max_tracked_clients must be at least twice server.max_concurrent_requests",
+            ));
+        }
+        if !CLIENT_IPV6_PREFIX.contains(&server.client_ipv6_prefix) {
+            return Err(ConfigError::Invalid(
+                "server.client_ipv6_prefix must be between 32 and 128",
+            ));
+        }
         if !self.security.password_login && !self.oidc.enabled {
             return Err(ConfigError::Invalid(
                 "security.password_login = false requires [oidc] enabled = true",
@@ -562,6 +631,53 @@ mod tests {
         assert!(from_toml("[server]\nmax_body_bytes = 0\n").is_err());
         assert!(from_toml("[server]\nrequest_timeout_secs = 0\n").is_err());
         assert!(from_toml("[storage]\npre_migration_backups_keep = 0\n").is_err());
+    }
+
+    #[test]
+    fn request_limits_are_on_by_default_and_validated() {
+        let server = Config::default().server;
+        assert_eq!(server.max_concurrent_requests, 256);
+        assert_eq!(server.max_concurrent_requests_per_client, 32);
+        assert_eq!(server.client_rate_burst, 120);
+        assert_eq!(server.client_rate_per_second, 20);
+        assert_eq!(server.max_login_failures_per_client, 20);
+        assert_eq!(server.client_ipv6_prefix, 64);
+        // A reverse proxy on the same host is trusted by default.
+        assert_eq!(server.trusted_proxies, Cidr::loopback());
+        // Trusting nobody has to be configured explicitly.
+        let config = from_toml("[server]\ntrusted_proxies = []\n").unwrap();
+        assert!(config.server.trusted_proxies.is_empty());
+
+        let config =
+            from_toml("[server]\ntrusted_proxies = [\"127.0.0.1/32\", \"::1\", \"10.0.0.0/8\"]\n")
+                .unwrap();
+        let proxies: Vec<String> = config
+            .server
+            .trusted_proxies
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(proxies, ["127.0.0.1/32", "::1/128", "10.0.0.0/8"]);
+
+        for bad in [
+            "max_concurrent_requests = 0",
+            "max_concurrent_requests_per_client = 0",
+            "client_rate_burst = 0",
+            "client_rate_per_second = 0",
+            "max_login_failures_per_client = 0",
+            "max_tracked_clients = 0",
+            "max_concurrent_requests = 2000000",
+            "max_tracked_clients = 255",
+            "max_tracked_clients = 511",
+            "max_tracked_clients = 100001",
+            "client_ipv6_prefix = 31",
+            "client_ipv6_prefix = 129",
+            "trusted_proxies = [\"10.0.0.1/8\"]",
+            "trusted_proxies = [\"proxy.example\"]",
+            "trusted_proxies = \"127.0.0.1\"",
+        ] {
+            assert!(from_toml(&format!("[server]\n{bad}\n")).is_err(), "{bad}");
+        }
     }
 
     #[test]

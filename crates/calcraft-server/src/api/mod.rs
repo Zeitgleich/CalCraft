@@ -25,7 +25,7 @@ use calcraft_core::api::{AuthMethods, CSRF_HEADER, ErrorBody, VersionInfo};
 use calcraft_store::{StoreError, User};
 use serde::de::DeserializeOwned;
 
-use crate::{app::AppState, auth::now, secrets::hash_secret};
+use crate::{app::AppState, auth::now, net::ClientKey, secrets::hash_secret};
 
 pub const SESSION_COOKIE: &str = "calcraft_session";
 /// Lifetime of a web session.
@@ -312,6 +312,18 @@ impl FromRequestParts<AppState> for SessionUser {
             user: session.user,
             token_hash,
         })
+    }
+}
+
+/// The client of the request for per-client login limits (`None` only if
+/// the limits middleware did not run).
+pub struct Client(pub Option<ClientKey>);
+
+impl<S: Send + Sync> FromRequestParts<S> for Client {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(parts.extensions.get::<ClientKey>().copied()))
     }
 }
 

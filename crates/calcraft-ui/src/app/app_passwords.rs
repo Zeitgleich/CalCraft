@@ -121,28 +121,30 @@ fn AppPasswordRow(info: AppPasswordInfo, on_change: Callback<()>) -> impl IntoVi
             <td>{info.name}</td>
             <td>{format_timestamp(info.created_at)}</td>
             <td>{info.last_used_at.map_or_else(|| t::NEVER.to_owned(), format_timestamp)}</td>
-            <td class="actions">
-                <Show
-                    when=move || confirming.get()
-                    fallback=move || {
-                        view! {
-                            <button type="button" class="danger" on:click=move |_| confirming.set(true)>
-                                {t::REVOKE}
-                            </button>
+            <td>
+                <div class="actions">
+                    <Show
+                        when=move || confirming.get()
+                        fallback=move || {
+                            view! {
+                                <button type="button" class="danger" on:click=move |_| confirming.set(true)>
+                                    {t::REVOKE}
+                                </button>
+                            }
                         }
-                    }
-                >
-                    <span class="confirm-inline">
-                        <span>{confirm_text.clone()}</span>
-                        <button type="button" class="danger" on:click=revoke.clone() disabled=move || busy.get()>
-                            {t::REVOKE_CONFIRM}
-                        </button>
-                        <button type="button" class="secondary" on:click=move |_| confirming.set(false)>
-                            {t::CANCEL}
-                        </button>
-                    </span>
-                </Show>
-                <ErrorText error />
+                    >
+                        <span class="confirm-inline">
+                            <span>{confirm_text.clone()}</span>
+                            <button type="button" class="danger" on:click=revoke.clone() disabled=move || busy.get()>
+                                {t::REVOKE_CONFIRM}
+                            </button>
+                            <button type="button" class="secondary" on:click=move |_| confirming.set(false)>
+                                {t::CANCEL}
+                            </button>
+                        </span>
+                    </Show>
+                    <ErrorText error />
+                </div>
             </td>
         </tr>
     }

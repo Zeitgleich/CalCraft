@@ -9,6 +9,12 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 
 ### Added
 
+- Request limits: at most `server.max_concurrent_requests` (256) requests at
+  once (`503`), per client 32 concurrent requests and 120 burst / 20 per
+  second (`429`), 20 failed logins per client in 15 minutes; IPv6 per /64,
+  bounded client tables. Client addresses from `X-Forwarded-For` only for
+  `server.trusted_proxies` (default: loopback, for a reverse proxy on the
+  same host; others such as a Docker bridge must be listed).
 - Release pipeline (`.github/workflows/release.yml`): binaries for Linux,
   macOS and Windows, `SHA256SUMS`, build provenance attestations and a
   signed multi-arch Docker image on `ghcr.io/zeitgleich/calcraft`; see
@@ -16,9 +22,15 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 
 ### Fixed
 
+- Web UI: the action column of the user and app-password tables now lines up
+  with the other cells; on phone widths the header is compact (user and
+  logout next to the name, navigation as a scrollable row below).
 - More than five parallel DAV requests of one account with correct
-  credentials (app password or cached password) no longer get 401: they wait
-  for running login attempts instead of counting as a lockout.
+  credentials no longer get 401: app passwords and cached passwords need no
+  login attempt slot, and other requests wait (at most 8 per account name,
+  5 s) for running attempts instead of counting as a lockout.
+- Cancelled requests keep their Argon2 permit until hashing ends, so no
+  more than four password hashes run at once.
 - Creating or renaming collections, creating users and OIDC link approvals
   no longer fail with 500 (`SQLITE_BUSY`) under concurrent writes: all write
   transactions start with `BEGIN IMMEDIATE`.

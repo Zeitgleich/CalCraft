@@ -249,6 +249,28 @@ button {
     padding: 0.4rem 0.9rem;
 }
 
+/* A link that starts a top-level navigation (SSO login), styled as a button. */
+a.button {
+    display: block;
+    text-align: center;
+    text-decoration: none;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius);
+    background: var(--accent);
+    color: var(--accent-text);
+    padding: 0.5rem 0.9rem;
+    font-weight: 500;
+}
+
+a.button:hover {
+    filter: brightness(1.08);
+}
+
+.separator {
+    text-align: center;
+    margin: 0;
+}
+
 button.secondary {
     background: transparent;
     color: var(--text);
@@ -398,7 +420,15 @@ td {
     text-align: left;
     padding: 0.5rem 0.75rem;
     border-bottom: 1px solid var(--border);
-    vertical-align: top;
+    vertical-align: middle;
+}
+
+th {
+    vertical-align: bottom;
+}
+
+td .actions {
+    align-items: center;
 }
 
 th {
@@ -446,8 +476,38 @@ tr.disabled td {
 }
 
 @media (max-width: 600px) {
+    /* Compact header: brand, user and logout on one row, the navigation
+       as a horizontally scrollable row below. */
     .topbar {
-        padding: 0.5rem 0.75rem;
+        padding: 0.5rem 0.75rem 0.4rem;
+        gap: 0.4rem 0.75rem;
+    }
+
+    .user {
+        margin-left: auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .topbar > button {
+        align-self: center;
+        padding: 0.25rem 0.7rem;
+    }
+
+    .topbar nav {
+        order: 1;
+        flex: 1 0 100%;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        margin: 0 -0.75rem;
+        padding: 0 0.75rem;
+    }
+
+    .topbar nav a {
+        flex: none;
+        white-space: nowrap;
     }
 
     main {

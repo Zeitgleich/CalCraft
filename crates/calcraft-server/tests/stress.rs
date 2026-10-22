@@ -55,7 +55,13 @@ async fn app(dir: &TempDir) -> Router {
         .create_user(&ALICE.0.parse().unwrap(), &hash, None)
         .await
         .unwrap();
-    router(&Config::default(), AppState::new(store).unwrap())
+    // All simulated clients share one address here; the per-client request
+    // limits (tested in tests/limits.rs) would otherwise throttle them.
+    let mut config = Config::default();
+    config.server.max_concurrent_requests_per_client = 1024;
+    config.server.client_rate_burst = 1_000_000;
+    config.server.client_rate_per_second = 1_000_000;
+    router(&config, AppState::new(store).unwrap())
 }
 
 struct Reply {

@@ -17,7 +17,7 @@ use tower_http::{
 
 use calcraft_store::Store;
 
-use crate::{auth::Authenticator, config::Config, dav, security};
+use crate::{auth::Authenticator, config::Config, dav, limits, net::ClientIp, security};
 
 /// Root path of the DAV tree. `.well-known` discovery points here.
 pub const DAV_ROOT: &str = "/dav/";
@@ -73,6 +73,10 @@ pub fn router(config: &Config, state: AppState) -> Router {
     } else {
         app
     };
+    state.auth.set_client_failure_limit(
+        config.server.max_login_failures_per_client,
+        config.server.max_tracked_clients,
+    );
     let app = app.with_state(state);
 
     #[cfg(feature = "web-ui")]
@@ -83,7 +87,11 @@ pub fn router(config: &Config, state: AppState) -> Router {
     };
 
     // Layers added later wrap the earlier ones, so the security headers are
-    // outermost and also apply to timeouts, rejected bodies and panics.
+    // outermost and also apply to timeouts, rejected bodies, panics and
+    // rejections by the request limits. The client address is resolved
+    // before the trace span is created, the limits are enforced right
+    // inside it.
+    let limiter = limits::Limiter::new(&config.server);
     app.fallback(not_found)
         .layer(DefaultBodyLimit::disable())
         .layer(RequestBodyLimitLayer::new(config.server.max_body_bytes))
@@ -92,12 +100,30 @@ pub fn router(config: &Config, state: AppState) -> Router {
             config.server.request_timeout(),
         ))
         .layer(CatchPanicLayer::new())
+        .layer(middleware::from_fn_with_state(
+            limiter.clone(),
+            limits::enforce,
+        ))
         // Spans record the path only: query strings can carry secrets
         // (OIDC code and state).
         .layer(TraceLayer::new_for_http().make_span_with(
             |request: &axum::http::Request<axum::body::Body>| {
-                tracing::debug_span!("request", method = %request.method(), path = %request.uri().path())
+                // Set by `limits::resolve_client`, which runs first.
+                let client = request
+                    .extensions()
+                    .get::<ClientIp>()
+                    .map(|client| client.ip);
+                tracing::debug_span!(
+                    "request",
+                    method = %request.method(),
+                    path = %request.uri().path(),
+                    client = client.map(tracing::field::display),
+                )
             },
+        ))
+        .layer(middleware::from_fn_with_state(
+            limiter,
+            limits::resolve_client,
         ))
         .layer(middleware::from_fn_with_state(
             config.security.hsts,
