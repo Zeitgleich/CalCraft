@@ -7,7 +7,7 @@
 use calcraft_core::{CollectionKind, Slug};
 use sqlx::{Row, sqlite::SqliteRow};
 
-use crate::{Collection, Result, Store, StoreError, collection_from_row};
+use crate::{Collection, PropertyChange, Result, Store, StoreError, collection_from_row};
 
 /// Maximum number of calendars plus address books per user.
 pub const MAX_COLLECTIONS_PER_USER: i64 = 100;
@@ -174,6 +174,33 @@ impl Store {
         color: Option<&str>,
         components: &str,
     ) -> Result<Collection> {
+        self.create_collection_with_properties(
+            owner_id,
+            kind,
+            slug,
+            display_name,
+            description,
+            color,
+            components,
+            &[],
+        )
+        .await
+    }
+
+    /// [`Store::create_collection`] that also sets dead properties, in the
+    /// same transaction (see [`Store::update_collection_with_properties`]).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_collection_with_properties(
+        &self,
+        owner_id: i64,
+        kind: CollectionKind,
+        slug: &Slug,
+        display_name: Option<&str>,
+        description: Option<&str>,
+        color: Option<&str>,
+        components: &str,
+        properties: &[PropertyChange<'_>],
+    ) -> Result<Collection> {
         self.observe(
             async {
                 // Write transactions start IMMEDIATE (see `put_item`): a deferred one that
@@ -210,6 +237,13 @@ impl Store {
                     Err(err) => return Err(err.into()),
                 };
                 let collection = collection_from_row(&row)?;
+                crate::properties::apply(
+                    &mut tx,
+                    collection.id,
+                    properties,
+                    self.settings.quota_bytes(),
+                )
+                .await?;
                 tx.commit().await?;
                 Ok(collection)
             }
@@ -240,6 +274,28 @@ impl Store {
         description: Option<Option<&str>>,
         color: Option<Option<&str>>,
     ) -> Result<()> {
+        self.update_collection_with_properties(collection_id, display_name, description, color, &[])
+            .await
+    }
+
+    /// [`Store::update_collection`] that also sets or removes dead
+    /// properties, all in one transaction. Fails with [`StoreError::Limit`]
+    /// (and changes nothing) if the collection would end up with more than
+    /// [`MAX_DEAD_PROPERTIES`](crate::MAX_DEAD_PROPERTIES) or
+    /// [`MAX_DEAD_PROPERTY_BYTES`](crate::MAX_DEAD_PROPERTY_BYTES), or the
+    /// owner over the storage quota.
+    ///
+    /// Like the other properties they bump the collection's revision
+    /// (`getctag`), which tells clients to read the properties again; no
+    /// object changes are recorded, so a sync report stays empty.
+    pub async fn update_collection_with_properties(
+        &self,
+        collection_id: i64,
+        display_name: Option<Option<&str>>,
+        description: Option<Option<&str>>,
+        color: Option<Option<&str>>,
+        properties: &[PropertyChange<'_>],
+    ) -> Result<()> {
         self.observe(
             async {
                 // Write transactions start IMMEDIATE (see `put_item`): a deferred one that
@@ -264,6 +320,13 @@ impl Store {
                         .execute(&mut *tx)
                         .await?;
                 }
+                crate::properties::apply(
+                    &mut tx,
+                    collection_id,
+                    properties,
+                    self.settings.quota_bytes(),
+                )
+                .await?;
                 sqlx::query(
                     "UPDATE collections SET sync_revision = sync_revision + 1 WHERE id = ?",
                 )
@@ -506,7 +569,8 @@ impl Store {
                 let owner_id: i64 = row.try_get("owner_id")?;
                 let used = row
                     .try_get::<i64, _>("used")?
-                    .saturating_add(crate::trash::trash_bytes(&mut *tx, owner_id).await?);
+                    .saturating_add(crate::trash::trash_bytes(&mut *tx, owner_id).await?)
+                    .saturating_add(crate::properties::owner_bytes(&mut *tx, owner_id).await?);
                 let size = i64::try_from(item.content.len()).unwrap_or(i64::MAX);
                 if used.saturating_add(size) > self.settings.quota_bytes() {
                     return Err(StoreError::Limit("storage quota exceeded"));
@@ -761,7 +825,9 @@ impl Store {
                     .await?
                     .try_get("used")?;
                     // The trash counts towards the quota, as for PUT.
-                    let used = used.saturating_add(crate::trash::trash_bytes(&mut *tx, owner_id).await?);
+                    let used = used
+                        .saturating_add(crate::trash::trash_bytes(&mut *tx, owner_id).await?)
+                        .saturating_add(crate::properties::owner_bytes(&mut *tx, owner_id).await?);
                     let size = i64::try_from(content.len()).unwrap_or(i64::MAX);
                     if used.saturating_add(size) > self.settings.quota_bytes() {
                         return Err(StoreError::Limit("storage quota exceeded"));

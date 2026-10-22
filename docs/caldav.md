@@ -93,6 +93,63 @@ ETags nor sync tokens. If it is interrupted, it continues at the next start;
 an object that cannot be indexed is marked to match every time range, so it
 never blocks the run.
 
+## Collection properties
+
+PROPPATCH (and MKCALENDAR / extended MKCOL when creating) handles the
+properties of calendars and address books like this:
+
+| Property | Behaviour |
+|---|---|
+| `DAV:displayname`, `CALDAV:calendar-description`, `CARDDAV:addressbook-description`, `{http://apple.com/ns/ical/}calendar-color` | Live: validated (no control or bidi characters; colours `#RRGGBB` / `#RRGGBBAA`), 409 otherwise. Descriptions and the colour only on the matching kind (403). |
+| `{http://apple.com/ns/ical/}calendar-order` | Calendars only; must be an integer (409 otherwise), stored and returned exactly as sent. The web UI lists calendars by it, then by name. |
+| `CALDAV:calendar-timezone`, `CALDAV:schedule-calendar-transp`, `CALDAV:default-alarm-vevent-date`, `CALDAV:default-alarm-vevent-datetime` | Dead: stored and returned, not interpreted. |
+| Any other property in the `DAV:`, CalDAV or CardDAV namespace, and `{http://calendarserver.org/ns/}getctag` | Protected: 403 with `DAV:cannot-modify-protected-property` (e.g. `resourcetype`, `getetag`, `sync-token`, `owner`, `principal-URL`, `current-user-privilege-set`, `supported-calendar-component-set`, `quota-used-bytes`). |
+| Everything else | Dead property (RFC 4918 §4). |
+
+A PROPPATCH is atomic: if one property fails, nothing changes and the others
+are answered with 424 Failed Dependency. Removing a property that is not set
+succeeds. MKCALENDAR and MKCOL ignore protected properties and fail with 403
+(invalid value) or 507 (too large) as a whole.
+
+Dead properties:
+
+- **Names**: the namespace must be an absolute URI (`scheme:…`) or empty
+  (`xmlns=""`, allowed but discouraged); at most 256 bytes for the namespace
+  and 128 for the local name. Otherwise 403.
+- **Values** may be text or XML fragments. They are not stored as sent: the
+  request body is parsed by the hardened XML parser (no DTDs, depth and
+  size limits) and the property content is serialised again, with every
+  element declaring its own namespace and all text and attribute values
+  escaped. Values read back are parsed and serialised the same way again
+  before they are sent. Not kept: comments, processing instructions,
+  prefixed attributes (including `xml:lang`), attributes of the property
+  element itself, whitespace between child elements and the position of
+  text between child elements (it is kept in front of them). Characters
+  XML 1.0 does not allow (e.g. `&#1;`) are rejected with 409.
+- **Limits**: 16 KiB per serialised value (64 KiB for
+  `CALDAV:calendar-timezone`, as a VTIMEZONE with its full history can be
+  large), 64 properties and 128 KiB (namespaces, names and values) per
+  collection. Their bytes count towards the owner's storage quota, also
+  while their collection is in the trash (its entry size includes them).
+  Limits and quota are checked in the same transaction as the change, before
+  anything is written; beyond them the properties being set get 507
+  Insufficient Storage. Removing or shrinking properties always works, also
+  above the quota.
+- **Names** of elements and attributes inside values (and of the
+  properties) must be XML 1.0 names; anything else is rejected by the parser
+  with 400. A stored property whose name or value does not pass these checks
+  again (e.g. a damaged database) is left out of PROPFIND responses and
+  logged with its collection id, instead of breaking the response.
+- **Scope**: only collections. PROPPATCH on calendar objects and contacts is
+  not supported (405); their content is replaced on every PUT anyway.
+- They are part of backups (the whole database is copied) and go into the
+  trash and back with their collection.
+
+Changing a property – live or dead – bumps the collection's `getctag` and
+`sync-token`, so clients such as Apple Calendar read the properties again; no
+object changes are recorded, so a `sync-collection` report from the previous
+token is empty.
+
 ## Not yet supported
 
 - `CALDAV:expand` and `CALDAV:limit-recurrence-set` in `calendar-data`:

@@ -7,7 +7,8 @@ use crate::{
     xml::{NS_CALDAV, NS_DAV},
 };
 
-pub const MAX_PROPPATCH_BODY: usize = 64 * 1024;
+/// Room for one `calendar-timezone` of up to 64 KiB plus markup.
+pub const MAX_PROPPATCH_BODY: usize = 128 * 1024;
 const MAX_OPERATIONS: usize = 64;
 
 /// Property changes in document order. `None` removes the property.

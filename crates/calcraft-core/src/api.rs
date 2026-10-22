@@ -84,6 +84,10 @@ pub struct CollectionInfo {
     pub components: Vec<String>,
     /// DAV URL of the collection, for client setup.
     pub href: String,
+    /// Position set by clients (Apple's `calendar-order`); calendars are
+    /// listed by it, then by name.
+    #[serde(default)]
+    pub order: Option<i64>,
     /// A calendar subscription: its objects come from a feed and cannot be
     /// changed (see `/api/v1/subscriptions`).
     #[serde(default)]

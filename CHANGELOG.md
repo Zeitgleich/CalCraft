@@ -9,6 +9,23 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 
 ### Added
 
+- Dead properties (RFC 4918 §4) on calendars and address books: PROPPATCH,
+  MKCALENDAR and extended MKCOL store client-defined properties, PROPFIND
+  returns them (explicitly, with `allprop` and `propname`), PROPPATCH
+  `remove` deletes them. Apple Calendar keeps its calendar order
+  (`{http://apple.com/ns/ical/}calendar-order`, an integer) and settings such
+  as `CALDAV:calendar-timezone` and `CALDAV:schedule-calendar-transp`.
+  Values are stored as canonical XML re-serialised from the parsed request,
+  never as the bytes sent. Limits: 64 properties per collection, namespace
+  256 / local name 128 bytes, 16 KiB per value (64 KiB for
+  `calendar-timezone`) and 128 KiB per collection (507 Insufficient
+  Storage); their bytes count towards the storage quota, including the trash.
+  Namespaces must be absolute URIs or empty (403). They survive restarts,
+  are part of backups and are restored with a collection from the trash.
+  Migration `0010_dead_properties`.
+- The web UI and `GET /api/v1/collections` list calendars by
+  `calendar-order`, then by name; `CollectionInfo` has a new field `order`.
+  Reordering in the web UI itself is not available yet.
 - Calendar subscriptions (webcal/ICS feeds), off by default
   (`[subscriptions] enabled`): the server fetches a feed and stores its events
   in a read-only calendar that every CalDAV client syncs like any other
@@ -72,6 +89,16 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 
 ### Changed
 
+- The XML parser accepts exactly the XML 1.0 name characters in element and
+  attribute names (before: Rust's alphanumeric characters, e.g. `a²`, which
+  could not be written back as XML). Such requests now fail with 400.
+- PROPPATCH, MKCALENDAR and MKCOL bodies may be up to 128 KiB (was 64 KiB).
+- PROPPATCH answers protected properties (everything else in the `DAV:`,
+  CalDAV and CardDAV namespaces, e.g. `resourcetype`, `getetag`,
+  `sync-token`, `owner`, `current-user-privilege-set`,
+  `supported-calendar-component-set`, quota properties, and
+  `getctag`) with 403 and `DAV:cannot-modify-protected-property`; the whole
+  request still fails atomically (424 for the other properties).
 - `docs/installation.md` sections 4a and 6 install the shipped systemd files
   instead of copy-pasted ones and explain readiness, the start limit and how
   to check the service after a reboot.

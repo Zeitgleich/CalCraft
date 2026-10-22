@@ -25,6 +25,7 @@ mod backup;
 mod health;
 mod items;
 mod oidc;
+mod properties;
 mod subscriptions;
 mod test_hooks;
 mod trash;
@@ -43,6 +44,7 @@ pub use items::{
 };
 pub use items::{MAX_BYTES_PER_USER, MAX_ITEMS_PER_COLLECTION};
 pub use oidc::{ApprovedBinding, OidcBinding, OidcIdentityInfo};
+pub use properties::{DeadProperty, MAX_DEAD_PROPERTIES, MAX_DEAD_PROPERTY_BYTES, PropertyChange};
 pub use subscriptions::{
     FeedItem, FeedState, NewSubscription, ReplaceOutcome, Subscription, SubscriptionFailure,
 };

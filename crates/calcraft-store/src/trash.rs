@@ -60,7 +60,7 @@ pub struct TrashEntry {
     /// SUMMARY of an event or task, FN of a vCard, display name of a
     /// collection: untrusted text, for display only.
     pub summary: Option<String>,
-    /// Bytes of content.
+    /// Bytes of content (collections: of their objects and dead properties).
     pub size: i64,
     /// Objects inside a collection entry (0 for objects).
     pub items: i64,
@@ -191,13 +191,17 @@ macro_rules! live_rows {
     };
 }
 
-/// Bytes of the owner's trash that count towards the quota.
+/// Bytes of the owner's trash that count towards the quota: objects and
+/// the dead properties of trashed collections.
 pub(crate) async fn trash_bytes(
     executor: impl sqlx::SqliteExecutor<'_>,
     owner_id: i64,
 ) -> Result<i64> {
     Ok(sqlx::query(concat!(
-        "SELECT COALESCE(SUM(c.size), 0) AS bytes ",
+        "SELECT COALESCE(SUM(c.size), 0) + (SELECT COALESCE(SUM(",
+        crate::properties::property_bytes!("d"),
+        "), 0) FROM trash_dead_properties d JOIN trash t ON t.id = d.trash_id \
+           WHERE t.owner_id = ?1 AND t.purge_pending = 0) AS bytes ",
         live_rows!(),
         " AND c.entry_kind = 'item'"
     ))
@@ -402,7 +406,9 @@ impl Store {
                 let Some(collection) = sqlx::query(
                     "SELECT owner_id, kind, slug, display_name, description, color, components, \
                             (SELECT COUNT(*) FROM items WHERE collection_id = c.id) AS items, \
-                            (SELECT COALESCE(SUM(length(content)), 0) FROM items WHERE collection_id = c.id) AS bytes \
+                            (SELECT COALESCE(SUM(length(content)), 0) FROM items WHERE collection_id = c.id) \
+                            + (SELECT COALESCE(SUM(length(CAST(p.namespace AS BLOB)) + length(CAST(p.name AS BLOB)) \
+                                 + length(CAST(p.value AS BLOB))), 0) FROM dead_properties p WHERE p.collection_id = c.id) AS bytes \
                      FROM collections c WHERE id = ?",
                 )
                 .bind(collection_id)
@@ -436,6 +442,7 @@ impl Store {
                     .fetch_one(&mut *tx)
                     .await?
                     .try_get("id")?;
+                    crate::properties::to_trash(&mut tx, collection_id, entry).await?;
                     sqlx::query(
                         "INSERT INTO trash (owner_id, entry_kind, parent_id, collection_kind, \
                            collection_slug, name, uid, etag, component, range_start, range_end, content, \
@@ -862,6 +869,7 @@ async fn restore_collection(
         }
         Err(err) => return Err(err.into()),
     };
+    crate::properties::from_trash(tx, entry_id, collection_id).await?;
     // Every object gets its own revision, in the order they were changed.
     let restored = sqlx::query(
         "INSERT INTO items (collection_id, name, uid, etag, component, range_start, range_end, content, revision, modified_at) \

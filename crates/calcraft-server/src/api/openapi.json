@@ -1865,6 +1865,13 @@
           "href": {
             "type": "string"
           },
+          "order": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Position set by clients (Apple's calendar-order); calendars are listed by it, then by name"
+          },
           "read_only": {
             "type": "boolean",
             "description": "A calendar subscription: its objects come from a feed and cannot be changed."

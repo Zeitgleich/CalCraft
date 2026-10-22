@@ -37,3 +37,41 @@ fn enforces_limits() {
     };
     assert_eq!(parse(b"<a/>", &tiny), Err(XmlError::TooLarge));
 }
+
+#[test]
+fn names_follow_xml_1_0() {
+    for good in [
+        "a",
+        "_x",
+        "calendar-order",
+        "a.b-c_1",
+        "Ärger",
+        "日本",
+        "a\u{B7}b",
+        "x\u{300}",
+    ] {
+        assert!(is_xml_name(good), "{good}");
+    }
+    // `²` (U+00B2) is alphanumeric for Rust, but not an XML name character.
+    for bad in [
+        "",
+        "1a",
+        "-a",
+        ".a",
+        "a²",
+        "a:b",
+        "a b",
+        "\u{B7}a",
+        "a\u{2028}",
+    ] {
+        assert!(!is_xml_name(bad), "{bad}");
+    }
+    assert_eq!(
+        parse("<a²/>".as_bytes(), &LIMITS),
+        Err(XmlError::Invalid("invalid XML name"))
+    );
+    assert_eq!(
+        parse("<a b²=\"1\"/>".as_bytes(), &LIMITS),
+        Err(XmlError::Invalid("invalid XML name"))
+    );
+}
