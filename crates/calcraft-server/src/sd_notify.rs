@@ -20,7 +20,15 @@ pub fn notify(state: &str) -> bool {
         match unix::send(&socket, state) {
             Ok(()) => true,
             Err(err) => {
-                tracing::debug!(%err, "systemd notification failed");
+                // A failing watchdog ping gets the service restarted, so the
+                // first failure is worth a warning; repeats stay at debug.
+                static WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    tracing::debug!(%err, "systemd notification failed");
+                } else {
+                    tracing::warn!(%err, "systemd notification failed");
+                }
                 false
             }
         }
@@ -86,6 +94,9 @@ mod unix {
     pub(super) fn send(socket: &OsStr, state: &str) -> io::Result<()> {
         let bytes = socket.as_bytes();
         let sender = UnixDatagram::unbound()?;
+        // Called from async tasks: never block a runtime worker for long if
+        // systemd's socket buffer is full.
+        sender.set_write_timeout(Some(std::time::Duration::from_millis(100)))?;
         let sent = match bytes.first() {
             Some(b'/') => sender.send_to(state.as_bytes(), socket)?,
             Some(b'@') => send_abstract(&sender, &bytes[1..], state)?,

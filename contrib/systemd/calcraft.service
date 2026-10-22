@@ -83,7 +83,9 @@ AmbientCapabilities=
 LimitNOFILE=8192
 MemoryHigh=768M
 MemoryMax=1G
-TasksMax=512
+# Tokio's blocking pool (password hashing, recurrence expansion) may use up
+# to 512 threads on top of the worker threads; leave room for them.
+TasksMax=1024
 
 [Install]
 WantedBy=multi-user.target
