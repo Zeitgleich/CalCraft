@@ -179,6 +179,10 @@ pub struct AdminUser {
     /// The account is bound to an SSO (OpenID Connect) identity.
     #[serde(default)]
     pub sso_linked: bool,
+    /// E-mail address used as calendar user address for scheduling; set
+    /// by administrators only.
+    #[serde(default)]
+    pub email: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,6 +194,9 @@ pub struct CreateUser {
     pub display_name: Option<String>,
     #[serde(default)]
     pub is_admin: bool,
+    /// E-mail address for scheduling (optional).
+    #[serde(default)]
+    pub email: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,6 +206,9 @@ pub struct UpdateUser {
     pub disabled: Option<bool>,
     #[serde(default)]
     pub is_admin: Option<bool>,
+    /// New e-mail address for scheduling; an empty string removes it.
+    #[serde(default)]
+    pub email: Option<String>,
 }
 
 /// Result of the optional update check (`GET /api/v1/admin/update`).

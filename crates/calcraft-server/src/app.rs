@@ -44,6 +44,9 @@ pub struct AppState {
     /// Calendar subscriptions, if enabled (`[subscriptions] enabled`).
     #[cfg(feature = "subscriptions")]
     pub subscriptions: Option<Arc<crate::subscriptions::Subscriptions>>,
+    /// Scheduling between users, if enabled (`[scheduling] enabled`);
+    /// [`router`] sets it from the configuration.
+    pub scheduling: Option<Arc<crate::scheduling::Scheduling>>,
     /// Largest accepted vCard; [`router`] sets it from `storage.max_vcard_bytes`.
     pub max_vcard_bytes: usize,
     /// Bounds concurrent recurrence checks of calendar-query (CPU work on
@@ -65,6 +68,7 @@ impl AppState {
             updates: None,
             #[cfg(feature = "subscriptions")]
             subscriptions: None,
+            scheduling: None,
             max_vcard_bytes: crate::config::DEFAULT_MAX_VCARD_BYTES,
             expansion: Arc::new(tokio::sync::Semaphore::new(expansion_permits())),
             readiness: Arc::new(ReadinessCache::new(READINESS_TTL)),
@@ -80,6 +84,11 @@ fn expansion_permits() -> usize {
 /// Builds the complete application router for the given configuration.
 pub fn router(config: &Config, mut state: AppState) -> Router {
     state.max_vcard_bytes = config.max_vcard_bytes();
+    if config.scheduling.enabled && state.scheduling.is_none() {
+        state.scheduling = Some(Arc::new(crate::scheduling::Scheduling::new(
+            &config.scheduling,
+        )));
+    }
     let web_ui = config.web_ui.enabled && cfg!(feature = "web-ui");
     let app = Router::new()
         // GET / shows the web UI; DAV clients configured with the bare

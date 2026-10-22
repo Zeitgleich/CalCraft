@@ -26,6 +26,7 @@ mod health;
 mod items;
 mod oidc;
 mod properties;
+mod scheduling;
 mod subscriptions;
 mod test_hooks;
 mod trash;
@@ -40,11 +41,14 @@ pub use backup::{
 pub use health::{PROBE_ACQUIRE_TIMEOUT, PROBE_BUSY_TIMEOUT, Readiness};
 pub use items::{
     Change, Item, ItemIndex, ItemMeta, NewItem, Precondition, PutOutcome, QueryCandidate,
-    StaleIndex, Transfer, TransferOutcome,
+    ScheduleTag, StaleIndex, Transfer, TransferOutcome,
 };
 pub use items::{MAX_BYTES_PER_USER, MAX_ITEMS_PER_COLLECTION};
 pub use oidc::{ApprovedBinding, OidcBinding, OidcIdentityInfo};
 pub use properties::{DeadProperty, MAX_DEAD_PROPERTIES, MAX_DEAD_PROPERTY_BYTES, PropertyChange};
+pub use scheduling::{
+    FreeBusyCandidate, InboxMessage, MAX_EMAIL_LEN, NewInboxMessage, SchedulingObject,
+};
 pub use subscriptions::{
     FeedItem, FeedState, NewSubscription, ReplaceOutcome, Subscription, SubscriptionFailure,
 };
@@ -77,6 +81,9 @@ pub enum StoreError {
     Migration(#[from] sqlx::migrate::MigrateError),
     #[error("user {0} already exists")]
     UserExists(Username),
+    /// The calendar user address is already used by another user.
+    #[error("address already in use")]
+    AddressTaken,
     #[error("corrupt data in database: {0}")]
     Corrupt(String),
     #[error("failed to set permissions on database file: {0}")]

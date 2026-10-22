@@ -34,6 +34,7 @@ pub struct Config {
     pub oidc: OidcConfig,
     pub updates: UpdatesConfig,
     pub subscriptions: SubscriptionsConfig,
+    pub scheduling: SchedulingConfig,
     pub logging: LoggingConfig,
 }
 
@@ -659,6 +660,91 @@ impl SubscriptionsConfig {
     }
 }
 
+/// Bounds of `scheduling.max_attendees`.
+pub const SCHEDULING_MAX_ATTENDEES: std::ops::RangeInclusive<u32> = 1..=1000;
+/// Bounds of `scheduling.max_recipients_per_hour`.
+pub const SCHEDULING_RECIPIENTS_PER_HOUR: std::ops::RangeInclusive<u32> = 1..=100_000;
+/// Bounds of `scheduling.inbox_max_messages`.
+pub const SCHEDULING_INBOX_MESSAGES: std::ops::RangeInclusive<u32> = 10..=100_000;
+/// Bounds of `scheduling.max_freebusy_days`.
+pub const SCHEDULING_FREEBUSY_DAYS: std::ops::RangeInclusive<u32> = 1..=1830;
+
+/// CalDAV scheduling (RFC 6638) between users of this server: invitations,
+/// replies and free/busy lookups. Off by default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SchedulingConfig {
+    /// Process ORGANIZER/ATTENDEE changes of calendar objects and offer
+    /// scheduling inboxes and outboxes.
+    pub enabled: bool,
+    /// Gives every user the calendar user address
+    /// `mailto:<username>@<domain>` in addition to an e-mail address set by
+    /// an administrator. Lower-case host name, e.g. `example.org`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    /// Let users look up the busy times of other users of this server
+    /// (only busy periods are revealed, never event details).
+    pub free_busy: bool,
+    /// Most distinct attendees of one scheduled object (1 to 1000).
+    pub max_attendees: u32,
+    /// Recipients one user may send invitations, cancellations, replies or
+    /// free/busy lookups to per hour (1 to 100 000); beyond that messages
+    /// are not delivered (`SCHEDULE-STATUS` 5.1).
+    pub max_recipients_per_hour: u32,
+    /// Messages kept in each user's scheduling inbox (10 to 100 000); the
+    /// oldest are dropped beyond that.
+    pub inbox_max_messages: u32,
+    /// Longest time range of a free/busy lookup in days (1 to 1830).
+    pub max_freebusy_days: u32,
+}
+
+impl Default for SchedulingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            domain: None,
+            free_busy: true,
+            max_attendees: 100,
+            max_recipients_per_hour: 1000,
+            inbox_max_messages: 1000,
+            max_freebusy_days: 366,
+        }
+    }
+}
+
+impl SchedulingConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if let Some(domain) = &self.domain
+            && (domain.starts_with("*.") || domain.starts_with('.') || !valid_host_pattern(domain))
+        {
+            return Err(ConfigError::Invalid(
+                "scheduling.domain: use a lower-case host name like example.org",
+            ));
+        }
+        if !SCHEDULING_MAX_ATTENDEES.contains(&self.max_attendees) {
+            return Err(ConfigError::Invalid(
+                "scheduling.max_attendees must be between 1 and 1000",
+            ));
+        }
+        if !SCHEDULING_RECIPIENTS_PER_HOUR.contains(&self.max_recipients_per_hour) {
+            return Err(ConfigError::Invalid(
+                "scheduling.max_recipients_per_hour must be between 1 and 100000",
+            ));
+        }
+        if !SCHEDULING_INBOX_MESSAGES.contains(&self.inbox_max_messages) {
+            return Err(ConfigError::Invalid(
+                "scheduling.inbox_max_messages must be between 10 and 100000",
+            ));
+        }
+        if !SCHEDULING_FREEBUSY_DAYS.contains(&self.max_freebusy_days) {
+            return Err(ConfigError::Invalid(
+                "scheduling.max_freebusy_days must be between 1 and 1830",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
@@ -806,6 +892,7 @@ impl Config {
             ));
         }
         self.subscriptions.validate()?;
+        self.scheduling.validate()?;
         self.oidc.validate()
     }
 }

@@ -43,3 +43,10 @@ path = "fuzz_targets/recurrence.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "itip"
+path = "fuzz_targets/itip.rs"
+test = false
+doc = false
+bench = false

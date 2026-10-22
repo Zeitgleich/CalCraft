@@ -17,7 +17,12 @@
 //! * that no response contains any of the marker strings planted in bob's
 //!   data, unless the request itself contained it (echoed hrefs),
 //! * that bob's data (collections, ctags, objects, etags, app passwords,
-//!   session) is unchanged after every state-changing request.
+//!   session, scheduling inbox) is unchanged after every state-changing
+//!   request.
+//!
+//! Scheduling (RFC 6638) is enabled, so the scheduling inbox and outbox of
+//! every user are targets too, and POST (free/busy requests to the outbox)
+//! is part of the matrix.
 //!
 //! The REST API part does the same for every route in
 //! [`calcraft_server::api::ROUTES`]. Both parts check themselves: a DAV
@@ -63,6 +68,8 @@ struct Names {
     event: &'static str,
     event2: &'static str,
     card: &'static str,
+    /// A message in the scheduling inbox.
+    message: &'static str,
 }
 
 const ALICE: Names = Names {
@@ -72,6 +79,7 @@ const ALICE: Names = Names {
     event: "alice-ev1.ics",
     event2: "alice-ev2.ics",
     card: "alice-card.vcf",
+    message: "alice-msg.ics",
 };
 
 const BOB: Names = Names {
@@ -81,6 +89,7 @@ const BOB: Names = Names {
     event: "zqbobmark-ev1.ics",
     event2: "zqbobmark-ev2.ics",
     card: "zqbobmark-card.vcf",
+    message: "zqbobmark-msg.ics",
 };
 
 /// Issuer of bob's SSO identity (SSO itself is not configured).
@@ -201,6 +210,27 @@ async fn seed(store: &Store, user: &User, n: &Names) {
     )
     .await;
     put_seed(store, &ab, p, n.card, &vcard("@UID@", &format!("{p}-fn"))).await;
+    // A message in the scheduling inbox (replaced on every seed).
+    let message = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:{p}-uid-msg\r\nSUMMARY:{p}-inbox-secret\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    );
+    let uid = format!("{p}-uid-msg");
+    let etag = format!("\"{p}-etag-msg\"");
+    store
+        .deliver_inbox_message(
+            user.id,
+            &calcraft_store::NewInboxMessage {
+                name: n.message,
+                uid: &uid,
+                sender: "mailto:organizer@example.org",
+                etag: &etag,
+                content: message.as_bytes(),
+                now: now(),
+            },
+            100,
+        )
+        .await
+        .unwrap();
     // A calendar subscription (read-only calendar fed by the server).
     let slug: calcraft_core::Slug = format!("{p}-sub").parse().unwrap();
     let url = format!("https://{p}-feed.example/cal.ics?token={p}-feedtoken");
@@ -277,6 +307,14 @@ async fn snapshot(store: &Store, user: &User, session: &str) -> String {
         }
     }
     out += &format!("{:?}\n", store.subscriptions(user.id).await.unwrap());
+    out += &format!("inbox {}\n", store.inbox_revision(user.id).await.unwrap());
+    for meta in store.inbox_messages(user.id, 1000).await.unwrap() {
+        out += &format!(
+            "{:?}\n",
+            store.inbox_message(user.id, &meta.name).await.unwrap()
+        );
+    }
+    out += &format!("{:?}\n", store.user_email(user.id).await.unwrap());
     out += &format!("{:?}\n", store.app_passwords(user.id).await.unwrap());
     out += &format!(
         "{:?}\n",
@@ -388,6 +426,12 @@ async fn fixture() -> Fixture {
         "/principals/bob",
         "/calendars/bob",
         "/addressbooks/bob",
+        "/scheduling/bob",
+        "zqbobmark-msg.ics",
+        "zqbobmark-inbox-secret",
+        "zqbobmark-etag-msg",
+        "zqbobmark-uid-msg",
+        "zqbobmark-mail.example",
     ]
     .iter()
     .map(|m| (*m).to_owned())
@@ -413,6 +457,10 @@ async fn fixture() -> Fixture {
     }
     assert!(!bob_sync_token.is_empty());
 
+    store
+        .set_user_email(bob.id, Some("bob@zqbobmark-mail.example"))
+        .await
+        .unwrap();
     let bob_snapshot = snapshot(&store, &bob, &bob_session).await;
     // The matrix sends thousands of requests, many with wrong passwords,
     // from one client: lift the per-client limits explicitly, so that only
@@ -426,6 +474,9 @@ async fn fixture() -> Fixture {
     // Many Argon2 runs queue behind a few hash permits; on a slow runner
     // (Windows, debug build) the default 30 s turned the last ones into 408.
     config.server.request_timeout_secs = 300;
+    // Scheduling on: inboxes, outboxes and POST are part of the matrix.
+    config.scheduling.enabled = true;
+    config.scheduling.domain = Some("example.org".to_owned());
     #[allow(unused_mut)]
     let mut state = AppState::new(store.clone()).unwrap();
     // Subscriptions enabled with the production rules: alice's attempt to
@@ -554,6 +605,11 @@ enum Res {
     UnmappedAb,
     MissingCalObject,
     MissingCardObject,
+    /// The scheduling inbox, a message in it, a missing message, the outbox.
+    Inbox,
+    InboxMessage,
+    MissingInboxMessage,
+    Outbox,
     /// Does not resolve for alice: malformed, traversal, or below a
     /// collection that does not exist.
     Invalid,
@@ -648,6 +704,39 @@ fn user_targets(user: &str, n: &Names, owner: Owner) -> Vec<Target> {
             Res::Invalid,
             owner,
         ),
+        Target::new(format!("/dav/scheduling/{user}/inbox/"), Res::Inbox, owner),
+        Target::new(format!("/dav/scheduling/{user}/inbox"), Res::Inbox, owner),
+        Target::new(
+            format!("/dav/scheduling/{user}/inbox/{}", n.message),
+            Res::InboxMessage,
+            owner,
+        ),
+        Target::new(
+            format!("/dav/scheduling/{user}/inbox/{}", encoded(n.message)),
+            Res::InboxMessage,
+            owner,
+        ),
+        Target::new(
+            format!("/dav/scheduling/{user}/inbox/missing.ics"),
+            Res::MissingInboxMessage,
+            owner,
+        ),
+        Target::new(
+            format!("/dav/scheduling/{user}/outbox/"),
+            Res::Outbox,
+            owner,
+        ),
+        Target::new(format!("/dav/scheduling/{user}/"), Res::Invalid, owner),
+        Target::new(
+            format!("/dav/scheduling/{user}/outbox/{}", n.message),
+            Res::Invalid,
+            owner,
+        ),
+        Target::new(
+            format!("/dav/scheduling/{user}/zz-other/"),
+            Res::Invalid,
+            owner,
+        ),
     ]
 }
 
@@ -686,6 +775,13 @@ fn all_targets() -> Vec<Target> {
         "/dav/other/bob/default/",
         "/dav/calendars/bob%2fdefault/",
         "/dav/calendars/alice/zqbobmark-cal2/zqbobmark-ev2.ics",
+        "/dav/scheduling/",
+        "/dav/scheduling/alice/inbox/../../bob/inbox/",
+        "/dav/scheduling/alice/inbox/..%2f..%2fbob%2finbox%2fzqbobmark-msg.ics",
+        "/dav/scheduling/%62ob/inbox/zqbobmark-msg.ics",
+        "/dav/scheduling/BOB/inbox/",
+        "/dav/scheduling/bob/inbox/zqbobmark-msg.ics/extra",
+        "/dav/principals/alice/inbox/",
     ] {
         let res = Res::Invalid;
         targets.push(Target::new(path, res, Owner::Tricky));
@@ -720,6 +816,8 @@ enum Case {
     MkcolPlain,
     Copy(Dest),
     Move(Dest),
+    /// A free/busy request (outbox POST) for bob and for nobody.
+    Post,
     /// A method the server does not implement.
     Unknown(&'static str),
 }
@@ -888,11 +986,12 @@ const COPY_MOVE_CASES: [Case; 26] = {
     }
     cases
 };
+/// Scheduling: free/busy requests to the outbox.
+const SCHEDULING_CASES: &[Case] = &[Case::Post];
 /// Unimplemented methods, sent to every target.
 const UNKNOWN_CASES: &[Case] = &[
     Case::Unknown("LOCK"),
     Case::Unknown("UNLOCK"),
-    Case::Unknown("POST"),
     Case::Unknown("PATCH"),
     Case::Unknown("ACL"),
     Case::Unknown("SEARCH"),
@@ -952,6 +1051,7 @@ impl Case {
             Self::MkcolExtended | Self::MkcolPlain => "MKCOL",
             Self::Copy(_) => "COPY",
             Self::Move(_) => "MOVE",
+            Self::Post => "POST",
             Self::Unknown(method) => method,
         }
     }
@@ -1007,6 +1107,10 @@ impl Case {
                 String::new(),
             ),
             Self::Copy(dest) | Self::Move(dest) => (dest.headers(target), String::new()),
+            Self::Post => (
+                h(&[("content-type", "text/calendar")]),
+                "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\nMETHOD:REQUEST\r\nBEGIN:VFREEBUSY\r\nUID:zzattack-fb\r\nDTSTAMP:20261001T000000Z\r\nDTSTART:20261020T000000Z\r\nDTEND:20261023T000000Z\r\nORGANIZER:mailto:alice@example.org\r\nATTENDEE:mailto:bob@example.org\r\nATTENDEE:mailto:carol@example.org\r\nEND:VFREEBUSY\r\nEND:VCALENDAR\r\n".to_owned(),
+            ),
             Self::DeleteIfMatch => (h(&[("if-match", "*")]), String::new()),
             Self::Put | Self::PutIfNoneMatch => {
                 let (content_type, body) = if card {
@@ -1101,6 +1205,9 @@ impl Case {
         if res == Invalid {
             return if self == Self::Options { 200 } else { 404 };
         }
+        if matches!(res, Inbox | InboxMessage | MissingInboxMessage | Outbox) {
+            return self.scheduling_status(res);
+        }
         match self {
             Self::Options => 200,
             Self::Get | Self::Head => match () {
@@ -1177,7 +1284,33 @@ impl Case {
                 () if missing || unmapped => 404,
                 () => 405,
             },
-            Self::Unknown(_) => 405,
+            // Only the outbox takes POST.
+            Self::Post | Self::Unknown(_) => 405,
+        }
+    }
+
+    /// Expected status for alice's own inbox, its messages and her outbox.
+    fn scheduling_status(self, res: Res) -> u16 {
+        use Res::*;
+        let message = res == InboxMessage;
+        let missing = res == MissingInboxMessage;
+        match self {
+            Self::Options => 200,
+            Self::Get | Self::Head if message => 200,
+            Self::Get | Self::Head if missing => 404,
+            Self::Delete | Self::DeleteIfMatch if message => 204,
+            Self::Delete | Self::DeleteIfMatch if missing => 404,
+            Self::PropfindD0 | Self::PropfindD1 | Self::PropfindAllpropD1 if missing => 404,
+            Self::PropfindD0 | Self::PropfindD1 | Self::PropfindAllpropD1 => 207,
+            Self::CalMultiget | Self::CalQuery if res == Inbox => 207,
+            Self::CalMultiget
+            | Self::CalQuery
+            | Self::AbMultiget
+            | Self::AbQuery
+            | Self::SyncInitial
+            | Self::SyncForeignToken => 403,
+            Self::Post if res == Outbox => 200,
+            _ => 405,
         }
     }
 }
@@ -1451,6 +1584,11 @@ async fn dav_copy_move_foreign_destination_is_indistinguishable() {
 }
 
 #[tokio::test]
+async fn dav_matrix_scheduling() {
+    report("scheduling", &run_dav_matrix(SCHEDULING_CASES).await);
+}
+
+#[tokio::test]
 async fn dav_matrix_unknown_methods() {
     report("unknown", &run_dav_matrix(UNKNOWN_CASES).await);
 }
@@ -1496,11 +1634,17 @@ async fn dav_other_registered_methods_are_refused() {
 /// the "unknown" methods must really be unknown.
 #[test]
 fn dav_matrix_covers_every_allowed_method() {
-    let covered: BTreeSet<&str> = [READ_CASES, WRITE_CASES, REPORT_CASES, &COPY_MOVE_CASES]
-        .concat()
-        .iter()
-        .map(|case| case.method())
-        .collect();
+    let covered: BTreeSet<&str> = [
+        READ_CASES,
+        WRITE_CASES,
+        REPORT_CASES,
+        &COPY_MOVE_CASES,
+        SCHEDULING_CASES,
+    ]
+    .concat()
+    .iter()
+    .map(|case| case.method())
+    .collect();
     let allowed: BTreeSet<&str> = ALLOWED_METHODS.split(", ").collect();
     let missing: Vec<_> = allowed.difference(&covered).collect();
     assert!(
@@ -1539,6 +1683,7 @@ async fn dav_wrong_passwords_are_rejected_everywhere() {
         WRITE_CASES,
         REPORT_CASES,
         &COPY_MOVE_CASES,
+        SCHEDULING_CASES,
         UNKNOWN_CASES,
     ]
     .concat();

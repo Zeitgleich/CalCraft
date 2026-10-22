@@ -41,7 +41,8 @@ REST/OpenAPI, breite Format-Unterstützung und konsequenten Security-Fokus.
 | 6352 / 6350 / 2426 | CardDAV, vCard 4.0 / 3.0 | M3 |
 | 3744 (Teilmenge) | ACL / Freigaben | M5 |
 | 7265 / 6321 / 7095 | jCal, xCal, jCard | M6 |
-| 6638 | Scheduling (iTIP/iMIP) | nach v1 |
+| 6638 / 5546 | Scheduling (iTIP) zwischen Benutzern eines Servers | ✅ Stufe A (`docs/scheduling.md`) |
+| 6047 | iMIP (Einladungen per E-Mail) | Stufe B, offen |
 
 ## 3. Architektur
 
@@ -264,6 +265,7 @@ Der Client-Track startet nach M4 (wenn Web-UI-Komponenten existieren).
 | **M4** | **M4a** ✅ REST-API + OpenAPI, Sessions, 2FA (TOTP + Wiederherstellungscodes), App-Passwörter, Admin · **M4b** ✅ Web-UI Stufe 1 · **M4c** 🟡 SSO-Login in der Web-UI ✅, Logo/Favicon/Design-System ✅, Termin- und Kontaktansichten offen |
 | **M5** | **M5a** ✅ OIDC/SSO (Keycloak & Co.) · Freigaben, Gruppen, Erinnerungen (SMTP), Web-UI Stufe 3–4 |
 | **M6** | **M6a** ✅ Import/Export aller Formate (REST + CLI) · Backup/Restore + Pre-Migration-Backups ✅ · **M6b** ✅ Webcal-Abos (eingehend) mit SSRF-Schutz · Migration aus Radicale/Baïkal/Synology/Nextcloud ✅ (`calcraft migrate`: Discovery, Multiget mit GET-Fallback, Validierung wie Import, `--dry-run`, idempotent; getestet gegen einen Fake-Server, noch nicht gegen echte Instanzen) |
+| **S** | **Scheduling (RFC 6638):** **Stufe A** ✅ zwischen Benutzern desselben Servers (`[scheduling]`, standardmäßig aus): implizites Scheduling bei PUT/DELETE (REQUEST, CANCEL, REPLY inkl. Serien, Overrides, EXDATE), Inbox/Outbox, Schedule-Tag/`If-Schedule-Tag-Match`, Free/Busy über die Outbox, Adressen nur vom Admin (`calcraft user set-email`, REST, Web-UI) oder `<user>@<domain>`, nie aus OIDC; Limits (Teilnehmer, Empfänger pro Stunde, Inbox-Größe, Quota), Tests `tests/scheduling.rs`, Matrix, Fuzz-Ziel `itip`, python-caldav in der CI · **Stufe B** offen: iMIP (SMTP ausgehend, eingehende Antworten mit DMARC-Prüfung) |
 | **M7** | Release-Pipeline 🟡 (Sigstore-Attestierung, Provenance, GHCR; Probelauf grün, echter Tag-Lauf offen), Update-Hinweis ✅ · externes Security-Review, Release v1.0 |
 
 ## 10. Weitere Anforderungen
@@ -271,7 +273,7 @@ Der Client-Track startet nach M4 (wenn Web-UI-Komponenten existieren).
 - Erinnerungen (VALARM per E-Mail), optional Webhooks/ntfy.
 - Backup/Restore per CLI, Datenexport und Kontolöschung (DSGVO).
 - ✅ Papierkorb (Soft-Delete) mit Wiederherstellung (`storage.trash_retention_days`, `/api/v1/trash`, Web-UI-Seite *Trash*).
-- Gruppen-, Team- und Ressourcenkalender; Free/Busy; Quotas.
+- Gruppen-, Team- und Ressourcenkalender; Quotas. Free/Busy zwischen Benutzern ✅ (Scheduling Stufe A).
 - Observability: `/healthz`, `/readyz`, Prometheus `/metrics`, JSON-Logs.
 - Paketierung: Docker, Helm, `.deb`/`.rpm`, Homebrew, NixOS-Modul.
 

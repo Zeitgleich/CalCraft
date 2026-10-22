@@ -4,7 +4,11 @@ use std::io::BufRead;
 
 use anyhow::{Context, bail};
 use calcraft_core::Username;
-use calcraft_server::{Config, auth::hash_password};
+use calcraft_server::{
+    Config,
+    auth::hash_password,
+    scheduling::{derived_address_taken, normalize_email, set_email},
+};
 use calcraft_store::Store;
 use clap::{Args, Subcommand};
 
@@ -19,8 +23,22 @@ pub enum UserCommand {
         /// Grant administrator rights (user management in the web UI).
         #[arg(long)]
         admin: bool,
+        /// E-mail address used as calendar user address for scheduling.
+        #[arg(long)]
+        email: Option<String>,
         #[command(flatten)]
         password: PasswordInput,
+    },
+    /// Set or remove the e-mail address used for scheduling (calendar user
+    /// address). Addresses are unique; SSO never sets them.
+    SetEmail {
+        username: String,
+        /// The address, e.g. alice@example.org.
+        #[arg(required_unless_present = "clear")]
+        email: Option<String>,
+        /// Remove the address instead.
+        #[arg(long, conflicts_with = "email")]
+        clear: bool,
     },
     /// Set a new password.
     Passwd {
@@ -98,17 +116,52 @@ pub async fn run(store: &Store, config: &Config, command: UserCommand) -> anyhow
             username,
             display_name,
             admin,
+            email,
             password,
         } => {
             let username = parse_username(&username)?;
+            let domain = config.scheduling.domain.as_deref();
+            if let Some(email) = &email
+                && normalize_email(email).is_none()
+            {
+                bail!("invalid e-mail address (ASCII only, local@domain)");
+            }
+            if derived_address_taken(store, domain, &username).await? {
+                bail!("the scheduling address of {username} is another user's e-mail address");
+            }
             let hash = hash_password(&password.read()?)?;
-            store
+            let user = store
                 .create_user_with_role(&username, &hash, display_name.as_deref(), admin)
                 .await?;
+            if email.is_some() {
+                set_email(store, domain, &user, email.as_deref()).await?;
+            }
             println!(
                 "created user {username}{}",
                 if admin { " (admin)" } else { "" }
             );
+        }
+        UserCommand::SetEmail {
+            username,
+            email,
+            clear,
+        } => {
+            let username = parse_username(&username)?;
+            let Some(user) = store.user_by_name(&username).await? else {
+                bail!("user {username} does not exist");
+            };
+            let email = if clear { None } else { email };
+            match set_email(
+                store,
+                config.scheduling.domain.as_deref(),
+                &user,
+                email.as_deref(),
+            )
+            .await?
+            {
+                Some(email) => println!("e-mail address of {username} set to {email}"),
+                None => println!("e-mail address of {username} removed"),
+            }
         }
         UserCommand::Passwd { username, password } => {
             let username = parse_username(&username)?;
@@ -122,8 +175,13 @@ pub async fn run(store: &Store, config: &Config, command: UserCommand) -> anyhow
             println!("password of {username} changed");
         }
         UserCommand::List => {
+            let emails: std::collections::HashMap<i64, String> =
+                store.user_emails().await?.into_iter().collect();
             for user in store.list_users().await? {
                 let mut state = String::new();
+                if let Some(email) = emails.get(&user.id) {
+                    state.push_str(&format!(" <{email}>"));
+                }
                 if user.is_admin {
                     state.push_str(" (admin)");
                 }

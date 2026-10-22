@@ -158,6 +158,28 @@ timeout_secs = 30
 # Redirects followed per fetch (0-5); every hop is checked again.
 max_redirects = 3
 
+[scheduling]
+# CalDAV scheduling (RFC 6638) between users of this server: invitations,
+# replies and cancellations are delivered by the server, and users can look up
+# each other's busy times. Off by default. Invitations to addresses outside this
+# server are not sent (no e-mail yet). See docs/scheduling.md.
+enabled = false
+# Give every user the address mailto:<username>@<domain> (in addition to an
+# e-mail address set by an administrator: calcraft user set-email). Lower-case
+# host name; unset: only e-mail addresses and principal URLs.
+# domain = "example.org"
+# Let users look up other users' free/busy time (busy periods only).
+free_busy = true
+# Distinct attendees of one scheduled event (1-1000).
+max_attendees = 100
+# Recipients one user may reach per hour: invitations, cancellations, replies
+# and free/busy lookups (1-100000). Beyond that nothing is delivered (5.1).
+max_recipients_per_hour = 1000
+# Messages kept in each scheduling inbox (10-100000); the oldest are dropped.
+inbox_max_messages = 1000
+# Longest free/busy lookup in days (1-1830).
+max_freebusy_days = 366
+
 [logging]
 # Filter syntax of tracing-subscriber; RUST_LOG takes precedence.
 level = "info"

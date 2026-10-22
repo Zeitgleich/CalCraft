@@ -355,8 +355,10 @@ fn row_limit(max: usize) -> u32 {
 }
 
 pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request) -> Response {
-    let Resource::Collection(collection) = resource else {
-        return ReportError::Unsupported.into_response();
+    let collection = match resource {
+        Resource::Collection(collection) => collection,
+        Resource::Inbox => return super::scheduling::report(ctx, request).await,
+        _ => return ReportError::Unsupported.into_response(),
     };
     let body = match read_body(request, MAX_REPORT_BODY).await {
         Ok(body) => body,

@@ -13,6 +13,7 @@
 
 pub mod csv;
 mod datetime;
+pub mod itip;
 mod jcal;
 mod object;
 mod parser;
@@ -26,7 +27,9 @@ pub mod write;
 mod xcal;
 pub mod xml;
 
-pub use datetime::{DateTime, parse_date_or_datetime, parse_duration, parse_utc_datetime};
+pub use datetime::{
+    DateTime, format_date_or_datetime, parse_date_or_datetime, parse_duration, parse_utc_datetime,
+};
 pub use object::{CalendarObject, ComponentKind, INDEX_VERSION, TimeRange};
 pub use parser::{Component, Parameter, Property, parse};
 pub use recurrence::{

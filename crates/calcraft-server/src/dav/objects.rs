@@ -86,23 +86,42 @@ pub(super) fn precondition(headers: &HeaderMap) -> Result<Precondition, Unsuppor
 }
 
 pub async fn get(ctx: Ctx<'_>, resource: Resource, with_body: bool) -> Response {
-    let Resource::Item(collection, name) = resource else {
-        return method_not_allowed();
+    let (collection, name) = match resource {
+        Resource::Item(collection, name) => (collection, name),
+        Resource::InboxItem(name) => {
+            return super::scheduling::get_message(ctx, &name, with_body).await;
+        }
+        _ => return method_not_allowed(),
     };
-    match ctx.state.store.item(collection.id, &name).await {
-        Ok(Some(item)) => {
+    match ctx
+        .state
+        .store
+        .item_with_schedule_tag(collection.id, &name)
+        .await
+    {
+        Ok(Some((item, schedule_tag))) => {
             let content_type = content_type(collection.kind);
             let body = if with_body {
                 Body::from(item.content)
             } else {
                 Body::empty()
             };
-            (
+            let mut response = (
                 StatusCode::OK,
                 [(CONTENT_TYPE, content_type), (ETAG, item.etag.as_str())],
                 body,
             )
-                .into_response()
+                .into_response();
+            // Only shown while scheduling is on (RFC 6638 §8.2).
+            if ctx.state.scheduling.is_some()
+                && let Some(tag) = schedule_tag
+                && let Ok(value) = axum::http::HeaderValue::from_str(&tag)
+            {
+                response
+                    .headers_mut()
+                    .insert(super::scheduling::SCHEDULE_TAG, value);
+            }
+            response
         }
         Ok(None) => not_found(),
         Err(err) => store_error(err),
@@ -264,6 +283,26 @@ pub async fn put(ctx: Ctx<'_>, resource: Resource, request: Request) -> Response
         etag: &etag,
         content: &body,
     };
+    if kind == CollectionKind::Calendar
+        && let Some(scheduling) = &ctx.state.scheduling
+    {
+        let if_tag = match super::scheduling::if_schedule_tag(&headers) {
+            Ok(tag) => tag,
+            Err(response) => return response,
+        };
+        let body = body.clone();
+        return super::scheduling::put(
+            ctx,
+            scheduling,
+            &collection,
+            &name,
+            body,
+            item,
+            precondition,
+            if_tag,
+        )
+        .await;
+    }
     match ctx
         .state
         .store
@@ -297,27 +336,27 @@ pub async fn delete(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
         Err(err) => return err.into_response(),
     };
     match resource {
+        Resource::InboxItem(name) => {
+            super::scheduling::delete_message(ctx, &name, &precondition).await
+        }
+        Resource::Item(collection, name)
+            if !collection.read_only && collection.kind == CollectionKind::Calendar =>
+        {
+            let Some(scheduling) = &ctx.state.scheduling else {
+                return delete_item(ctx, collection, name, precondition).await;
+            };
+            let if_tag = match super::scheduling::if_schedule_tag(request.headers()) {
+                Ok(tag) => tag,
+                Err(response) => return response,
+            };
+            super::scheduling::delete(ctx, scheduling, &collection, &name, precondition, if_tag)
+                .await
+        }
         Resource::Item(collection, _) if collection.read_only => {
             let href = super::paths::collection_href(&collection, &ctx.user.username);
             need_privileges(Some(&href), "unbind")
         }
-        Resource::Item(collection, name) => {
-            // Into the trash (unless disabled); for sync clients it is
-            // deleted either way.
-            let kind = collection.kind;
-            match ctx
-                .state
-                .store
-                .delete_item_to_trash(collection.id, &name, &precondition, now(), |content| {
-                    crate::trash::summary(kind, content)
-                })
-                .await
-            {
-                Ok(true) => StatusCode::NO_CONTENT.into_response(),
-                Ok(false) => not_found(),
-                Err(err) => store_error(err),
-            }
-        }
+        Resource::Item(collection, name) => delete_item(ctx, collection, name, precondition).await,
         Resource::Collection(collection) => {
             // Collections have no entity tag: only `If-Match: *` can hold.
             if !matches!(precondition, Precondition::None | Precondition::MustExist) {
@@ -335,5 +374,28 @@ pub async fn delete(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
         }
         Resource::Unmapped(..) => not_found(),
         _ => method_not_allowed(),
+    }
+}
+
+/// DELETE of an object: into the trash (unless disabled); for sync clients
+/// it is deleted either way.
+async fn delete_item(
+    ctx: Ctx<'_>,
+    collection: Collection,
+    name: String,
+    precondition: Precondition,
+) -> Response {
+    let kind = collection.kind;
+    match ctx
+        .state
+        .store
+        .delete_item_to_trash(collection.id, &name, &precondition, now(), |content| {
+            crate::trash::summary(kind, content)
+        })
+        .await
+    {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => not_found(),
+        Err(err) => store_error(err),
     }
 }

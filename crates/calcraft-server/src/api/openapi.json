@@ -1972,6 +1972,13 @@
           "sso_linked": {
             "type": "boolean",
             "description": "The account is bound to an SSO (OpenID Connect) identity of any issuer."
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "E-mail address used as calendar user address for scheduling (lower case). Set by administrators only, never taken from an identity provider."
           }
         },
         "required": [
@@ -1999,6 +2006,14 @@
           },
           "is_admin": {
             "type": "boolean"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 254,
+            "description": "Optional e-mail address for scheduling (ASCII, local@domain; unique). 400 if invalid, 409 if another user has it or it is in the scheduling domain but not the user's own derived address."
           }
         },
         "required": [
@@ -2021,6 +2036,14 @@
               "boolean",
               "null"
             ]
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 254,
+            "description": "New e-mail address for scheduling; an empty string removes it. 400 if invalid, 409 if already in use."
           }
         },
         "additionalProperties": false

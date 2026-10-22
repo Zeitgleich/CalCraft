@@ -137,15 +137,33 @@ fn UserRow(user: AdminUser, on_change: Callback<()>) -> impl IntoView {
             apply(UpdateUser {
                 disabled: Some(!disabled),
                 is_admin: None,
+                email: None,
             })
         }
     };
     let is_admin = user.is_admin;
-    let toggle_admin = move |_| {
+    let toggle_admin = {
+        let apply = apply.clone();
+        move |_| {
+            apply(UpdateUser {
+                disabled: None,
+                is_admin: Some(!is_admin),
+                email: None,
+            })
+        }
+    };
+    // The e-mail address (calendar user address), edited inline; an empty
+    // value removes it.
+    let email = RwSignal::new(user.email.clone().unwrap_or_default());
+    let editing_email = RwSignal::new(false);
+    let save_email = move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
+        editing_email.set(false);
         apply(UpdateUser {
             disabled: None,
-            is_admin: Some(!is_admin),
-        })
+            is_admin: None,
+            email: Some(email.get_untracked().trim().to_owned()),
+        });
     };
 
     // Removing the SSO link, after a confirmation.
@@ -191,7 +209,46 @@ fn UserRow(user: AdminUser, on_change: Callback<()>) -> impl IntoView {
                 <code>{user.username.clone()}</code>
                 {is_self.then(|| view! { " " <span class="muted">{t::YOU}</span> })}
             </td>
-            <td>{user.display_name.clone().unwrap_or_default()}</td>
+            <td>
+                {user.display_name.clone().unwrap_or_default()}
+                {user.email.clone().map(|address| view! { <br /><span class="muted">{address}</span> })}
+                <Show
+                    when=move || editing_email.get()
+                    fallback=move || {
+                        view! {
+                            <br />
+                            <button
+                                type="button"
+                                class="secondary"
+                                disabled=move || busy.get()
+                                on:click=move |_| editing_email.set(true)
+                            >
+                                {t::SET_EMAIL}
+                            </button>
+                        }
+                    }
+                >
+                    <form class="confirm-inline" on:submit=save_email.clone()>
+                        <input
+                            type="email"
+                            autocomplete="off"
+                            maxlength="254"
+                            aria-label=t::EMAIL
+                            bind:value=email
+                        />
+                        <button type="submit" disabled=move || busy.get()>
+                            {t::SAVE}
+                        </button>
+                        <button
+                            type="button"
+                            class="secondary"
+                            on:click=move |_| editing_email.set(false)
+                        >
+                            {t::CANCEL}
+                        </button>
+                    </form>
+                </Show>
+            </td>
             <td>
                 {status.join(" · ")}
                 {user
@@ -275,6 +332,7 @@ fn CreateUserForm(on_created: Callback<()>) -> impl IntoView {
     let password = RwSignal::new(String::new());
     let confirmation = RwSignal::new(String::new());
     let is_admin = RwSignal::new(false);
+    let email = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let success = RwSignal::new(None::<String>);
@@ -292,11 +350,13 @@ fn CreateUserForm(on_created: Callback<()>) -> impl IntoView {
             },
             move || async move {
                 let display = display_name.get_untracked().trim().to_owned();
+                let address = email.get_untracked().trim().to_owned();
                 let request = CreateUser {
                     username: username.get_untracked().trim().to_owned(),
                     password: password.get_untracked(),
                     display_name: (!display.is_empty()).then_some(display),
                     is_admin: is_admin.get_untracked(),
+                    email: (!address.is_empty()).then_some(address),
                 };
                 let user = api::send::<_, AdminUser>("POST", "/v1/admin/users", &request)
                     .await
@@ -306,6 +366,7 @@ fn CreateUserForm(on_created: Callback<()>) -> impl IntoView {
                 password.set(String::new());
                 confirmation.set(String::new());
                 is_admin.set(false);
+                email.set(String::new());
                 success.set(Some(t::user_created(&user.username)));
                 on_created.run(());
                 Ok(())
@@ -334,6 +395,11 @@ fn CreateUserForm(on_created: Callback<()>) -> impl IntoView {
                 <label>
                     {t::DISPLAY_NAME}
                     <input type="text" autocomplete="off" maxlength=MAX_DISPLAY_NAME bind:value=display_name />
+                </label>
+                <label>
+                    {t::EMAIL}
+                    <input type="email" autocomplete="off" maxlength="254" bind:value=email />
+                    <span class="hint">{t::EMAIL_HINT}</span>
                 </label>
                 <label>
                     {t::PASSWORD}

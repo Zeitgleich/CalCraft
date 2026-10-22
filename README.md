@@ -396,6 +396,32 @@ System DNS lookups run at most four at a time, so stuck lookups cannot exhaust
 the threads shared with imports.
 Subscriptions with their own credentials (HTTP Basic) are not supported.
 
+### Scheduling (invitations between users)
+
+CalDAV scheduling (RFC 6638) between users of the same server, **off by
+default**: an organizer saves an event with attendees, the server puts the
+invitation into each attendee's calendar and inbox, their answers
+(`PARTSTAT`) come back into the organizer's event, and changes and
+cancellations follow. Users can also look up each other's busy times.
+Invitations to addresses outside this server are not sent yet (no e-mail;
+`SCHEDULE-STATUS` 5.3).
+
+```toml
+[scheduling]
+enabled = true
+# Optional: every user gets mailto:<username>@example.org.
+domain = "example.org"
+```
+
+Further addresses are e-mail addresses set by an administrator
+(`calcraft user set-email alice alice@example.com`, the web UI or
+`PATCH /api/v1/admin/users/{username}`), never taken from SSO. Only a user's
+own address can be ORGANIZER of what they schedule; attendees can change only
+their own participation status in the organizer's event. Limits: attendees
+per event, recipients per user and hour, inbox size; deliveries count towards
+the recipient's quota. Details, status codes and deviations from the RFC:
+[docs/scheduling.md](docs/scheduling.md).
+
 ### Import and export
 
 Calendars can be exported and imported as iCalendar (`ics`), jCal (`jcal`), xCal
@@ -542,8 +568,12 @@ Integration suites of `calcraft-server` (`crates/calcraft-server/tests/`):
   runs nightly on Linux),
   `failures.rs` (read-only database, full disk, aborted uploads).
 - **Logs:** `log_secrets.rs` checks that passwords, tokens, TOTP and
-  recovery codes, cookies and calendar/contact contents never reach the
-  logs.
+  recovery codes, cookies, calendar/contact contents and scheduling
+  messages and addresses never reach the logs.
+- **Scheduling:** `scheduling.rs` (invitations, replies, cancellations,
+  recurrence, Schedule-Tag, free/busy, limits, quota, disabled users,
+  organizer spoofing, attendee tampering, UID hijacking, concurrent
+  replies); the authorization matrix covers inboxes, outboxes and POST.
 - **Subscriptions:** `subscriptions.rs` (subscription calendars are
   read-only for every DAV client), `subscription_logs.rs` (feed URLs never
   reach the logs); the SSRF rules and fetches against a local server are
@@ -554,8 +584,8 @@ Integration suites of `calcraft-server` (`crates/calcraft-server/tests/`):
 
 Further checks:
 
-- **Fuzzing** (`fuzz/`, cargo-fuzz): 4 targets (`ical_object`, `dav_xml`,
-  `recurrence`, `import`). CI runs each of them for 60 s on every change
+- **Fuzzing** (`fuzz/`, cargo-fuzz): 5 targets (`ical_object`, `dav_xml`,
+  `recurrence`, `import`, `itip`). CI runs each of them for 60 s on every change
   and for 20 min nightly.
 - **CI** on Linux, macOS and Windows: `cargo fmt`, Clippy, all tests with
   all features and DAV-only, wasm build of the web UI, a client
