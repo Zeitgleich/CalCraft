@@ -133,6 +133,12 @@ pub const NEW_PASSWORD: &str = "New password";
 pub const CONFIRM_PASSWORD: &str = "Repeat new password";
 pub const PASSWORD_RULES: &str = "At least 12 characters.";
 pub const PASSWORD_CHANGE_LOGOUT: &str = "All sessions end after a password change; you will have to log in again. App passwords stay valid.";
+pub const SSO: &str = "Single sign-on";
+pub const SSO_LINKED: &str = "Linked to single sign-on";
+pub const SSO_NOT_LINKED: &str = "Not linked to single sign-on";
+pub const SINCE: &str = "since";
+pub const SSO_LAST_LOGIN: &str = "Last single sign-on login:";
+pub const SSO_NOT_LINKED_HINT: &str = "An administrator can approve linking this account to your single sign-on account; it is then linked on your next single sign-on login.";
 pub const PASSWORD_CHANGED: &str = "Your password has been changed. Please log in again.";
 
 // Two-factor authentication
@@ -183,6 +189,16 @@ pub const USERS: &str = "Users";
 pub const ACTIVE: &str = "active";
 pub const DISABLED: &str = "disabled";
 pub const YOU: &str = "(you)";
+pub const SSO_BADGE: &str = "SSO";
+pub const SSO_BADGE_TITLE: &str = "Linked to single sign-on";
+pub const UNLINK_SSO: &str = "Unlink SSO";
+pub const UNLINK_SSO_CONFIRM: &str = "Unlink now";
+
+pub fn confirm_unlink_sso(username: &str) -> String {
+    format!(
+        "Remove the single sign-on link of “{username}”? Their sessions end. Linking again needs an operator approval (calcraft user allow-sso-link)."
+    )
+}
 pub const ENABLE: &str = "Enable";
 pub const DISABLE: &str = "Disable";
 pub const GRANT_ADMIN: &str = "Make administrator";

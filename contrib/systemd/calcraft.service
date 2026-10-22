@@ -1,0 +1,91 @@
+# CalCraft CalDAV/CardDAV server as a hardened systemd service.
+#
+# Install (see docs/installation.md, section 6):
+#   install -Dm644 calcraft.service  /etc/systemd/system/calcraft.service
+#   install -Dm644 calcraft.sysusers /etc/sysusers.d/calcraft.conf
+#   install -Dm644 calcraft.tmpfiles /etc/tmpfiles.d/calcraft.conf
+#   systemd-sysusers && systemd-tmpfiles --create
+#   systemctl daemon-reload && systemctl enable --now calcraft
+#
+# Local changes belong in a drop-in (`systemctl edit calcraft`), not here.
+
+[Unit]
+Description=CalCraft CalDAV/CardDAV server
+Documentation=https://github.com/Zeitgleich/CalCraft/blob/main/docs/installation.md
+After=network-online.target
+Wants=network-online.target
+# A service that keeps failing (e.g. a broken configuration) gives up after
+# 5 starts within 5 minutes and stays "failed" instead of looping forever.
+# `systemctl reset-failed calcraft` clears the counter.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+# CalCraft reports READY=1 once the database is open (migrations applied)
+# and the listener is bound, so "active" means "accepting requests".
+Type=notify
+NotifyAccess=main
+User=calcraft
+Group=calcraft
+Environment=CALCRAFT_CONFIG=/etc/calcraft/calcraft.toml
+# Fail fast with a clear message in the journal on configuration errors.
+ExecStartPre=/usr/local/bin/calcraft check-config --quiet
+ExecStart=/usr/local/bin/calcraft serve
+Restart=on-failure
+RestartSec=5s
+# Migrations and the pre-migration backup run before READY=1; a large
+# database can take a while after an update.
+TimeoutStartSec=5min
+# SIGTERM starts a graceful shutdown (running requests finish).
+TimeoutStopSec=30
+# CalCraft sends WATCHDOG=1 every 15 s while its runtime is responsive;
+# systemd restarts a hung server.
+WatchdogSec=30s
+UMask=0077
+
+# Directories: /var/lib/calcraft (0700 calcraft:calcraft) and /etc/calcraft
+# (0750 root:calcraft) come from calcraft.tmpfiles, the user from
+# calcraft.sysusers.
+ReadWritePaths=/var/lib/calcraft
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+# AF_UNIX: systemd notification socket.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Resource limits (adjust to the host). CalCraft limits concurrent requests,
+# but not idle keep-alive connections: LimitNOFILE caps those. Worst-case
+# memory grows with server.max_concurrent_requests × request size; MemoryMax
+# makes the kernel stop CalCraft (and systemd restart it) instead of the
+# whole host running out of memory.
+LimitNOFILE=8192
+MemoryHigh=768M
+MemoryMax=1G
+# Tokio's blocking pool (password hashing, recurrence expansion) may use up
+# to 512 threads on top of the worker threads; leave room for them.
+TasksMax=1024
+
+[Install]
+WantedBy=multi-user.target

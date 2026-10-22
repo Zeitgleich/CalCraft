@@ -201,58 +201,68 @@ impl Store {
         components: &str,
         properties: &[PropertyChange<'_>],
     ) -> Result<Collection> {
-        // Write transactions start IMMEDIATE (see `put_item`): a deferred one that
-        // reads first fails with SQLITE_BUSY instead of waiting when another
-        // writer commits in between.
-        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-        let count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM collections WHERE owner_id = ?")
-            .bind(owner_id)
-            .fetch_one(&mut *tx)
-            .await?
-            .try_get("n")?;
-        if count >= MAX_COLLECTIONS_PER_USER {
-            return Err(StoreError::Limit("too many collections"));
-        }
-        let result = sqlx::query(
-            "INSERT INTO collections (owner_id, kind, slug, display_name, description, color, components, token_salt) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, abs(random())) \
-             RETURNING id, owner_id, kind, slug, display_name, description, color, sync_revision, components, sync_floor, token_salt",
-        )
-        .bind(owner_id)
-        .bind(kind.as_str())
-        .bind(slug.as_str())
-        .bind(display_name)
-        .bind(description)
-        .bind(color)
-        .bind(components)
-        .fetch_one(&mut *tx)
-        .await;
-        let row = match result {
-            Ok(row) => row,
-            Err(sqlx::Error::Database(err)) if err.is_unique_violation() => {
-                return Err(StoreError::CollectionExists);
+        self.observe(
+            async {
+                // Write transactions start IMMEDIATE (see `put_item`): a deferred one that
+                // reads first fails with SQLITE_BUSY instead of waiting when another
+                // writer commits in between.
+                let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                let count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM collections WHERE owner_id = ?")
+                    .bind(owner_id)
+                    .fetch_one(&mut *tx)
+                    .await?
+                    .try_get("n")?;
+                if count >= MAX_COLLECTIONS_PER_USER {
+                    return Err(StoreError::Limit("too many collections"));
+                }
+                let result = sqlx::query(
+                    "INSERT INTO collections (owner_id, kind, slug, display_name, description, color, components, token_salt) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, abs(random())) \
+                     RETURNING id, owner_id, kind, slug, display_name, description, color, sync_revision, components, sync_floor, token_salt",
+                )
+                .bind(owner_id)
+                .bind(kind.as_str())
+                .bind(slug.as_str())
+                .bind(display_name)
+                .bind(description)
+                .bind(color)
+                .bind(components)
+                .fetch_one(&mut *tx)
+                .await;
+                let row = match result {
+                    Ok(row) => row,
+                    Err(sqlx::Error::Database(err)) if err.is_unique_violation() => {
+                        return Err(StoreError::CollectionExists);
+                    }
+                    Err(err) => return Err(err.into()),
+                };
+                let collection = collection_from_row(&row)?;
+                crate::properties::apply(
+                    &mut tx,
+                    collection.id,
+                    properties,
+                    self.settings.quota_bytes(),
+                )
+                .await?;
+                tx.commit().await?;
+                Ok(collection)
             }
-            Err(err) => return Err(err.into()),
-        };
-        let collection = collection_from_row(&row)?;
-        crate::properties::apply(
-            &mut tx,
-            collection.id,
-            properties,
-            self.settings.quota_bytes(),
+            .await,
         )
-        .await?;
-        tx.commit().await?;
-        Ok(collection)
     }
 
     /// Deletes a collection and all its objects.
     pub async fn delete_collection(&self, collection_id: i64) -> Result<()> {
-        sqlx::query("DELETE FROM collections WHERE id = ?")
-            .bind(collection_id)
-            .execute(&self.writer)
-            .await?;
-        Ok(())
+        self.observe(
+            async {
+                sqlx::query("DELETE FROM collections WHERE id = ?")
+                    .bind(collection_id)
+                    .execute(&self.writer)
+                    .await?;
+                Ok(())
+            }
+            .await,
+        )
     }
 
     /// Updates the editable properties of a collection. `None` keeps a
@@ -272,7 +282,8 @@ impl Store {
     /// properties, all in one transaction. Fails with [`StoreError::Limit`]
     /// (and changes nothing) if the collection would end up with more than
     /// [`MAX_DEAD_PROPERTIES`](crate::MAX_DEAD_PROPERTIES) or
-    /// [`MAX_DEAD_PROPERTY_BYTES`](crate::MAX_DEAD_PROPERTY_BYTES).
+    /// [`MAX_DEAD_PROPERTY_BYTES`](crate::MAX_DEAD_PROPERTY_BYTES), or the
+    /// owner over the storage quota.
     ///
     /// Like the other properties they bump the collection's revision
     /// (`getctag`), which tells clients to read the properties again; no
@@ -285,41 +296,48 @@ impl Store {
         color: Option<Option<&str>>,
         properties: &[PropertyChange<'_>],
     ) -> Result<()> {
-        // Write transactions start IMMEDIATE (see `put_item`): a deferred one that
-        // reads first fails with SQLITE_BUSY instead of waiting when another
-        // writer commits in between.
-        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-        // Column names are fixed literals; values are always bound.
-        for (column, value) in [
-            ("display_name", display_name),
-            ("description", description),
-            ("color", color),
-        ] {
-            let Some(value) = value else { continue };
-            let sql = match column {
-                "display_name" => "UPDATE collections SET display_name = ? WHERE id = ?",
-                "description" => "UPDATE collections SET description = ? WHERE id = ?",
-                _ => "UPDATE collections SET color = ? WHERE id = ?",
-            };
-            sqlx::query(sql)
-                .bind(value)
+        self.observe(
+            async {
+                // Write transactions start IMMEDIATE (see `put_item`): a deferred one that
+                // reads first fails with SQLITE_BUSY instead of waiting when another
+                // writer commits in between.
+                let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                // Column names are fixed literals; values are always bound.
+                for (column, value) in [
+                    ("display_name", display_name),
+                    ("description", description),
+                    ("color", color),
+                ] {
+                    let Some(value) = value else { continue };
+                    let sql = match column {
+                        "display_name" => "UPDATE collections SET display_name = ? WHERE id = ?",
+                        "description" => "UPDATE collections SET description = ? WHERE id = ?",
+                        _ => "UPDATE collections SET color = ? WHERE id = ?",
+                    };
+                    sqlx::query(sql)
+                        .bind(value)
+                        .bind(collection_id)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                crate::properties::apply(
+                    &mut tx,
+                    collection_id,
+                    properties,
+                    self.settings.quota_bytes(),
+                )
+                .await?;
+                sqlx::query(
+                    "UPDATE collections SET sync_revision = sync_revision + 1 WHERE id = ?",
+                )
                 .bind(collection_id)
                 .execute(&mut *tx)
                 .await?;
-        }
-        crate::properties::apply(
-            &mut tx,
-            collection_id,
-            properties,
-            self.settings.quota_bytes(),
+                tx.commit().await?;
+                Ok(())
+            }
+            .await,
         )
-        .await?;
-        sqlx::query("UPDATE collections SET sync_revision = sync_revision + 1 WHERE id = ?")
-            .bind(collection_id)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        Ok(())
     }
 
     /// Lists the objects of a collection without their content.
@@ -441,20 +459,25 @@ impl Store {
     /// was read (`etag`) or is already indexed by this version. Neither the
     /// object nor any sync state changes. Returns whether the row changed.
     pub async fn set_item_index(&self, id: i64, etag: &str, index: &ItemIndex) -> Result<bool> {
-        let done = sqlx::query(
-            "UPDATE items SET range_start = ?, range_end = ?, recurring = ?, index_version = ? \
-             WHERE id = ? AND etag = ? AND index_version < ?",
+        self.observe(
+            async {
+                let done = sqlx::query(
+                    "UPDATE items SET range_start = ?, range_end = ?, recurring = ?, index_version = ? \
+                     WHERE id = ? AND etag = ? AND index_version < ?",
+                )
+                .bind(index.range_start)
+                .bind(index.range_end)
+                .bind(index.recurring)
+                .bind(index.version)
+                .bind(id)
+                .bind(etag)
+                .bind(index.version)
+                .execute(&self.writer)
+                .await?;
+                Ok(done.rows_affected() == 1)
+            }
+            .await,
         )
-        .bind(index.range_start)
-        .bind(index.range_end)
-        .bind(index.recurring)
-        .bind(index.version)
-        .bind(id)
-        .bind(etag)
-        .bind(index.version)
-        .execute(&self.writer)
-        .await?;
-        Ok(done.rows_affected() == 1)
     }
 
     /// Objects whose conservative time span overlaps `[start, end)`.
@@ -490,105 +513,110 @@ impl Store {
         item: &NewItem<'_>,
         precondition: &Precondition,
     ) -> Result<PutOutcome> {
-        // IMMEDIATE takes the write lock up front, so the checks below and
-        // the write are atomic and concurrent writers wait instead of failing.
-        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-        let existing: Option<String> =
-            sqlx::query("SELECT etag FROM items WHERE collection_id = ? AND name = ?")
+        self.observe(
+            async {
+                // IMMEDIATE takes the write lock up front, so the checks below and
+                // the write are atomic and concurrent writers wait instead of failing.
+                let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                let existing: Option<String> =
+                    sqlx::query("SELECT etag FROM items WHERE collection_id = ? AND name = ?")
+                        .bind(collection_id)
+                        .bind(name)
+                        .fetch_optional(&mut *tx)
+                        .await?
+                        .map(|row| row.try_get("etag"))
+                        .transpose()?;
+                check(precondition, existing.as_deref())?;
+
+                let conflict: Option<String> =
+                    sqlx::query("SELECT name FROM items WHERE collection_id = ? AND uid = ? AND name != ?")
+                        .bind(collection_id)
+                        .bind(item.uid)
+                        .bind(name)
+                        .fetch_optional(&mut *tx)
+                        .await?
+                        .map(|row| row.try_get("name"))
+                        .transpose()?;
+                if let Some(other) = conflict {
+                    return Err(StoreError::UidConflict(other));
+                }
+
+                if existing.is_none() {
+                    let count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM items WHERE collection_id = ?")
+                        .bind(collection_id)
+                        .fetch_one(&mut *tx)
+                        .await?
+                        .try_get("n")?;
+                    if count >= MAX_ITEMS_PER_COLLECTION {
+                        return Err(StoreError::Limit("too many objects in collection"));
+                    }
+                }
+
+                // The trash counts towards the quota: deleting does not free space
+                // until the trash is emptied or its entries expire.
+                let row = sqlx::query(
+                    "SELECT c.owner_id, (SELECT COALESCE(SUM(length(i.content)), 0) FROM items i \
+                       JOIN collections o ON o.id = i.collection_id \
+                       WHERE o.owner_id = c.owner_id \
+                         AND NOT (i.collection_id = ?1 AND i.name = ?2)) AS used \
+                     FROM collections c WHERE c.id = ?1",
+                )
                 .bind(collection_id)
                 .bind(name)
-                .fetch_optional(&mut *tx)
-                .await?
-                .map(|row| row.try_get("etag"))
-                .transpose()?;
-        check(precondition, existing.as_deref())?;
+                .fetch_one(&mut *tx)
+                .await?;
+                let owner_id: i64 = row.try_get("owner_id")?;
+                let used = row
+                    .try_get::<i64, _>("used")?
+                    .saturating_add(crate::trash::trash_bytes(&mut *tx, owner_id).await?)
+                    .saturating_add(crate::properties::owner_bytes(&mut *tx, owner_id).await?);
+                let size = i64::try_from(item.content.len()).unwrap_or(i64::MAX);
+                if used.saturating_add(size) > self.settings.quota_bytes() {
+                    return Err(StoreError::Limit("storage quota exceeded"));
+                }
 
-        let conflict: Option<String> =
-            sqlx::query("SELECT name FROM items WHERE collection_id = ? AND uid = ? AND name != ?")
-                .bind(collection_id)
-                .bind(item.uid)
-                .bind(name)
-                .fetch_optional(&mut *tx)
-                .await?
-                .map(|row| row.try_get("name"))
-                .transpose()?;
-        if let Some(other) = conflict {
-            return Err(StoreError::UidConflict(other));
-        }
-
-        if existing.is_none() {
-            let count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM items WHERE collection_id = ?")
+                let revision: i64 = sqlx::query(
+                    "UPDATE collections SET sync_revision = sync_revision + 1 WHERE id = ? RETURNING sync_revision",
+                )
                 .bind(collection_id)
                 .fetch_one(&mut *tx)
                 .await?
-                .try_get("n")?;
-            if count >= MAX_ITEMS_PER_COLLECTION {
-                return Err(StoreError::Limit("too many objects in collection"));
+                .try_get("sync_revision")?;
+
+                sqlx::query(
+                    "INSERT INTO items (collection_id, name, uid, etag, component, range_start, range_end, \
+                       recurring, index_version, content, revision) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                     ON CONFLICT (collection_id, name) DO UPDATE SET \
+                       uid = excluded.uid, etag = excluded.etag, component = excluded.component, \
+                       range_start = excluded.range_start, range_end = excluded.range_end, \
+                       recurring = excluded.recurring, index_version = excluded.index_version, \
+                       content = excluded.content, revision = excluded.revision, \
+                       modified_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+                )
+                .bind(collection_id)
+                .bind(name)
+                .bind(item.uid)
+                .bind(item.etag)
+                .bind(item.component)
+                .bind(item.range_start)
+                .bind(item.range_end)
+                .bind(item.recurring)
+                .bind(item.index_version)
+                .bind(item.content)
+                .bind(revision)
+                .execute(&mut *tx)
+                .await?;
+                record_change(&mut tx, collection_id, revision, name, false).await?;
+                tx.commit().await?;
+                Ok(if existing.is_some() {
+                    PutOutcome::Updated
+                } else {
+                    PutOutcome::Created
+                })
             }
-        }
-
-        // The trash counts towards the quota: deleting does not free space
-        // until the trash is emptied or its entries expire.
-        let row = sqlx::query(
-            "SELECT c.owner_id, (SELECT COALESCE(SUM(length(i.content)), 0) FROM items i \
-               JOIN collections o ON o.id = i.collection_id \
-               WHERE o.owner_id = c.owner_id \
-                 AND NOT (i.collection_id = ?1 AND i.name = ?2)) AS used \
-             FROM collections c WHERE c.id = ?1",
+            .await,
         )
-        .bind(collection_id)
-        .bind(name)
-        .fetch_one(&mut *tx)
-        .await?;
-        let owner_id: i64 = row.try_get("owner_id")?;
-        let used = row
-            .try_get::<i64, _>("used")?
-            .saturating_add(crate::trash::trash_bytes(&mut *tx, owner_id).await?)
-            .saturating_add(crate::properties::owner_bytes(&mut *tx, owner_id).await?);
-        let size = i64::try_from(item.content.len()).unwrap_or(i64::MAX);
-        if used.saturating_add(size) > self.settings.quota_bytes() {
-            return Err(StoreError::Limit("storage quota exceeded"));
-        }
-
-        let revision: i64 = sqlx::query(
-            "UPDATE collections SET sync_revision = sync_revision + 1 WHERE id = ? RETURNING sync_revision",
-        )
-        .bind(collection_id)
-        .fetch_one(&mut *tx)
-        .await?
-        .try_get("sync_revision")?;
-
-        sqlx::query(
-            "INSERT INTO items (collection_id, name, uid, etag, component, range_start, range_end, \
-               recurring, index_version, content, revision) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT (collection_id, name) DO UPDATE SET \
-               uid = excluded.uid, etag = excluded.etag, component = excluded.component, \
-               range_start = excluded.range_start, range_end = excluded.range_end, \
-               recurring = excluded.recurring, index_version = excluded.index_version, \
-               content = excluded.content, revision = excluded.revision, \
-               modified_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
-        )
-        .bind(collection_id)
-        .bind(name)
-        .bind(item.uid)
-        .bind(item.etag)
-        .bind(item.component)
-        .bind(item.range_start)
-        .bind(item.range_end)
-        .bind(item.recurring)
-        .bind(item.index_version)
-        .bind(item.content)
-        .bind(revision)
-        .execute(&mut *tx)
-        .await?;
-        record_change(&mut tx, collection_id, revision, name, false).await?;
-        tx.commit().await?;
-        Ok(if existing.is_some() {
-            PutOutcome::Updated
-        } else {
-            PutOutcome::Created
-        })
     }
 
     /// Deletes an object. Returns `false` if it does not exist.
@@ -598,34 +626,39 @@ impl Store {
         name: &str,
         precondition: &Precondition,
     ) -> Result<bool> {
-        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-        let existing: Option<String> =
-            sqlx::query("SELECT etag FROM items WHERE collection_id = ? AND name = ?")
+        self.observe(
+            async {
+                let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                let existing: Option<String> =
+                    sqlx::query("SELECT etag FROM items WHERE collection_id = ? AND name = ?")
+                        .bind(collection_id)
+                        .bind(name)
+                        .fetch_optional(&mut *tx)
+                        .await?
+                        .map(|row| row.try_get("etag"))
+                        .transpose()?;
+                if existing.is_none() {
+                    return Ok(false);
+                }
+                check(precondition, existing.as_deref())?;
+                sqlx::query("DELETE FROM items WHERE collection_id = ? AND name = ?")
+                    .bind(collection_id)
+                    .bind(name)
+                    .execute(&mut *tx)
+                    .await?;
+                let revision: i64 = sqlx::query(
+                    "UPDATE collections SET sync_revision = sync_revision + 1 WHERE id = ? RETURNING sync_revision",
+                )
                 .bind(collection_id)
-                .bind(name)
-                .fetch_optional(&mut *tx)
+                .fetch_one(&mut *tx)
                 .await?
-                .map(|row| row.try_get("etag"))
-                .transpose()?;
-        if existing.is_none() {
-            return Ok(false);
-        }
-        check(precondition, existing.as_deref())?;
-        sqlx::query("DELETE FROM items WHERE collection_id = ? AND name = ?")
-            .bind(collection_id)
-            .bind(name)
-            .execute(&mut *tx)
-            .await?;
-        let revision: i64 = sqlx::query(
-            "UPDATE collections SET sync_revision = sync_revision + 1 WHERE id = ? RETURNING sync_revision",
+                .try_get("sync_revision")?;
+                record_change(&mut tx, collection_id, revision, name, true).await?;
+                tx.commit().await?;
+                Ok(true)
+            }
+            .await,
         )
-        .bind(collection_id)
-        .fetch_one(&mut *tx)
-        .await?
-        .try_get("sync_revision")?;
-        record_change(&mut tx, collection_id, revision, name, true).await?;
-        tx.commit().await?;
-        Ok(true)
     }
 
     /// Copies an object to another (or the same) collection of the same
@@ -652,192 +685,197 @@ impl Store {
         request: &Transfer<'_>,
         remove_source: bool,
     ) -> Result<Option<TransferOutcome>> {
-        let Transfer {
-            owner_id,
-            source_collection,
-            source_name,
-            source_precondition,
-            destination_collection,
-            destination_name,
-            overwrite,
-        } = *request;
-        let same_collection = source_collection == destination_collection;
-        if same_collection && source_name == destination_name {
-            return Err(StoreError::SameResource);
-        }
-        // IMMEDIATE: all checks and both writes are one atomic step (see
-        // `put_item`). Parallel MOVEs of one object are serialised; all but
-        // the first find no source.
-        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+        self.observe(
+            async {
+                let Transfer {
+                    owner_id,
+                    source_collection,
+                    source_name,
+                    source_precondition,
+                    destination_collection,
+                    destination_name,
+                    overwrite,
+                } = *request;
+                let same_collection = source_collection == destination_collection;
+                if same_collection && source_name == destination_name {
+                    return Err(StoreError::SameResource);
+                }
+                // IMMEDIATE: all checks and both writes are one atomic step (see
+                // `put_item`). Parallel MOVEs of one object are serialised; all but
+                // the first find no source.
+                let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
 
-        // Both collections must belong to the owner and be of one kind. The
-        // caller resolved them for the owner already; this keeps the queries
-        // scoped and covers collections deleted in the meantime.
-        let collection = |id: i64| {
-            sqlx::query("SELECT kind, components FROM collections WHERE id = ? AND owner_id = ?")
-                .bind(id)
-                .bind(owner_id)
-        };
-        let Some(source) = collection(source_collection)
-            .fetch_optional(&mut *tx)
-            .await?
-        else {
-            return Ok(None);
-        };
-        let Some(destination) = collection(destination_collection)
-            .fetch_optional(&mut *tx)
-            .await?
-        else {
-            return Err(StoreError::MissingDestination);
-        };
-        let kind: String = destination.try_get("kind")?;
-        if source.try_get::<String, _>("kind")? != kind {
-            return Err(StoreError::MissingDestination);
-        }
+                // Both collections must belong to the owner and be of one kind. The
+                // caller resolved them for the owner already; this keeps the queries
+                // scoped and covers collections deleted in the meantime.
+                let collection = |id: i64| {
+                    sqlx::query("SELECT kind, components FROM collections WHERE id = ? AND owner_id = ?")
+                        .bind(id)
+                        .bind(owner_id)
+                };
+                let Some(source) = collection(source_collection)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                else {
+                    return Ok(None);
+                };
+                let Some(destination) = collection(destination_collection)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                else {
+                    return Err(StoreError::MissingDestination);
+                };
+                let kind: String = destination.try_get("kind")?;
+                if source.try_get::<String, _>("kind")? != kind {
+                    return Err(StoreError::MissingDestination);
+                }
 
-        let Some(item) = sqlx::query(
-            "SELECT uid, etag, component, range_start, range_end, recurring, index_version, \
-               content FROM items WHERE collection_id = ? AND name = ?",
-        )
-        .bind(source_collection)
-        .bind(source_name)
-        .fetch_optional(&mut *tx)
-        .await?
-        else {
-            return Ok(None);
-        };
-        let uid: String = item.try_get("uid")?;
-        let etag: String = item.try_get("etag")?;
-        let component: String = item.try_get("component")?;
-        let range_start: Option<i64> = item.try_get("range_start")?;
-        let range_end: Option<i64> = item.try_get("range_end")?;
-        let recurring: bool = item.try_get("recurring")?;
-        let index_version: i64 = item.try_get("index_version")?;
-        let content: Vec<u8> = item.try_get("content")?;
-        check(source_precondition, Some(&etag))?;
-
-        if kind == CollectionKind::Calendar.as_str() {
-            let components: String = destination.try_get("components")?;
-            if !components.split(',').any(|c| c == component) {
-                return Err(StoreError::UnsupportedComponent);
-            }
-        }
-
-        let existing = sqlx::query("SELECT 1 FROM items WHERE collection_id = ? AND name = ?")
-            .bind(destination_collection)
-            .bind(destination_name)
-            .fetch_optional(&mut *tx)
-            .await?
-            .is_some();
-        if existing && !overwrite {
-            return Err(StoreError::PreconditionFailed);
-        }
-
-        // The UID must stay unique in the destination; the source itself
-        // does not count when it is moved within its collection.
-        let conflict: Option<String> = sqlx::query(
-            "SELECT name FROM items WHERE collection_id = ?1 AND uid = ?2 AND name != ?3 \
-               AND NOT (?4 AND collection_id = ?5 AND name = ?6)",
-        )
-        .bind(destination_collection)
-        .bind(&uid)
-        .bind(destination_name)
-        .bind(remove_source)
-        .bind(source_collection)
-        .bind(source_name)
-        .fetch_optional(&mut *tx)
-        .await?
-        .map(|row| row.try_get("name"))
-        .transpose()?;
-        if let Some(other) = conflict {
-            return Err(StoreError::UidConflict(other));
-        }
-
-        if !existing && !(remove_source && same_collection) {
-            let count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM items WHERE collection_id = ?")
-                .bind(destination_collection)
-                .fetch_one(&mut *tx)
-                .await?
-                .try_get("n")?;
-            if count >= MAX_ITEMS_PER_COLLECTION {
-                return Err(StoreError::Limit("too many objects in collection"));
-            }
-        }
-
-        // A copy adds its size to the owner's usage (objects plus trash). A
-        // move stays within the owner's collections and never increases it,
-        // so it is not counted twice.
-        if !remove_source {
-            let used: i64 = sqlx::query(
-                "SELECT COALESCE(SUM(length(i.content)), 0) AS used FROM items i \
-                 JOIN collections c ON c.id = i.collection_id \
-                 WHERE c.owner_id = ?1 AND NOT (i.collection_id = ?2 AND i.name = ?3)",
-            )
-            .bind(owner_id)
-            .bind(destination_collection)
-            .bind(destination_name)
-            .fetch_one(&mut *tx)
-            .await?
-            .try_get("used")?;
-            // The trash counts towards the quota, as for PUT.
-            let used = used
-                .saturating_add(crate::trash::trash_bytes(&mut *tx, owner_id).await?)
-                .saturating_add(crate::properties::owner_bytes(&mut *tx, owner_id).await?);
-            let size = i64::try_from(content.len()).unwrap_or(i64::MAX);
-            if used.saturating_add(size) > self.settings.quota_bytes() {
-                return Err(StoreError::Limit("storage quota exceeded"));
-            }
-        }
-
-        if remove_source {
-            // Removed first: within one collection the UID must stay unique.
-            sqlx::query("DELETE FROM items WHERE collection_id = ? AND name = ?")
+                let Some(item) = sqlx::query(
+                    "SELECT uid, etag, component, range_start, range_end, recurring, index_version, \
+                       content FROM items WHERE collection_id = ? AND name = ?",
+                )
                 .bind(source_collection)
                 .bind(source_name)
+                .fetch_optional(&mut *tx)
+                .await?
+                else {
+                    return Ok(None);
+                };
+                let uid: String = item.try_get("uid")?;
+                let etag: String = item.try_get("etag")?;
+                let component: String = item.try_get("component")?;
+                let range_start: Option<i64> = item.try_get("range_start")?;
+                let range_end: Option<i64> = item.try_get("range_end")?;
+                let recurring: bool = item.try_get("recurring")?;
+                let index_version: i64 = item.try_get("index_version")?;
+                let content: Vec<u8> = item.try_get("content")?;
+                check(source_precondition, Some(&etag))?;
+
+                if kind == CollectionKind::Calendar.as_str() {
+                    let components: String = destination.try_get("components")?;
+                    if !components.split(',').any(|c| c == component) {
+                        return Err(StoreError::UnsupportedComponent);
+                    }
+                }
+
+                let existing = sqlx::query("SELECT 1 FROM items WHERE collection_id = ? AND name = ?")
+                    .bind(destination_collection)
+                    .bind(destination_name)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .is_some();
+                if existing && !overwrite {
+                    return Err(StoreError::PreconditionFailed);
+                }
+
+                // The UID must stay unique in the destination; the source itself
+                // does not count when it is moved within its collection.
+                let conflict: Option<String> = sqlx::query(
+                    "SELECT name FROM items WHERE collection_id = ?1 AND uid = ?2 AND name != ?3 \
+                       AND NOT (?4 AND collection_id = ?5 AND name = ?6)",
+                )
+                .bind(destination_collection)
+                .bind(&uid)
+                .bind(destination_name)
+                .bind(remove_source)
+                .bind(source_collection)
+                .bind(source_name)
+                .fetch_optional(&mut *tx)
+                .await?
+                .map(|row| row.try_get("name"))
+                .transpose()?;
+                if let Some(other) = conflict {
+                    return Err(StoreError::UidConflict(other));
+                }
+
+                if !existing && !(remove_source && same_collection) {
+                    let count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM items WHERE collection_id = ?")
+                        .bind(destination_collection)
+                        .fetch_one(&mut *tx)
+                        .await?
+                        .try_get("n")?;
+                    if count >= MAX_ITEMS_PER_COLLECTION {
+                        return Err(StoreError::Limit("too many objects in collection"));
+                    }
+                }
+
+                // A copy adds its size to the owner's usage (objects plus trash). A
+                // move stays within the owner's collections and never increases it,
+                // so it is not counted twice.
+                if !remove_source {
+                    let used: i64 = sqlx::query(
+                        "SELECT COALESCE(SUM(length(i.content)), 0) AS used FROM items i \
+                         JOIN collections c ON c.id = i.collection_id \
+                         WHERE c.owner_id = ?1 AND NOT (i.collection_id = ?2 AND i.name = ?3)",
+                    )
+                    .bind(owner_id)
+                    .bind(destination_collection)
+                    .bind(destination_name)
+                    .fetch_one(&mut *tx)
+                    .await?
+                    .try_get("used")?;
+                    // The trash counts towards the quota, as for PUT.
+                    let used = used
+                        .saturating_add(crate::trash::trash_bytes(&mut *tx, owner_id).await?)
+                        .saturating_add(crate::properties::owner_bytes(&mut *tx, owner_id).await?);
+                    let size = i64::try_from(content.len()).unwrap_or(i64::MAX);
+                    if used.saturating_add(size) > self.settings.quota_bytes() {
+                        return Err(StoreError::Limit("storage quota exceeded"));
+                    }
+                }
+
+                if remove_source {
+                    // Removed first: within one collection the UID must stay unique.
+                    sqlx::query("DELETE FROM items WHERE collection_id = ? AND name = ?")
+                        .bind(source_collection)
+                        .bind(source_name)
+                        .execute(&mut *tx)
+                        .await?;
+                    let revision = bump_revision(&mut tx, source_collection).await?;
+                    record_change(&mut tx, source_collection, revision, source_name, true).await?;
+                }
+
+                let revision = bump_revision(&mut tx, destination_collection).await?;
+                sqlx::query(
+                    "INSERT INTO items (collection_id, name, uid, etag, component, range_start, range_end, \
+                       recurring, index_version, content, revision) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                     ON CONFLICT (collection_id, name) DO UPDATE SET \
+                       uid = excluded.uid, etag = excluded.etag, component = excluded.component, \
+                       range_start = excluded.range_start, range_end = excluded.range_end, \
+                       recurring = excluded.recurring, index_version = excluded.index_version, \
+                       content = excluded.content, revision = excluded.revision, \
+                       modified_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+                )
+                .bind(destination_collection)
+                .bind(destination_name)
+                .bind(&uid)
+                .bind(&etag)
+                .bind(&component)
+                .bind(range_start)
+                .bind(range_end)
+                .bind(recurring)
+                .bind(index_version)
+                .bind(&content)
+                .bind(revision)
                 .execute(&mut *tx)
                 .await?;
-            let revision = bump_revision(&mut tx, source_collection).await?;
-            record_change(&mut tx, source_collection, revision, source_name, true).await?;
-        }
-
-        let revision = bump_revision(&mut tx, destination_collection).await?;
-        sqlx::query(
-            "INSERT INTO items (collection_id, name, uid, etag, component, range_start, range_end, \
-               recurring, index_version, content, revision) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT (collection_id, name) DO UPDATE SET \
-               uid = excluded.uid, etag = excluded.etag, component = excluded.component, \
-               range_start = excluded.range_start, range_end = excluded.range_end, \
-               recurring = excluded.recurring, index_version = excluded.index_version, \
-               content = excluded.content, revision = excluded.revision, \
-               modified_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+                record_change(
+                    &mut tx,
+                    destination_collection,
+                    revision,
+                    destination_name,
+                    false,
+                )
+                .await?;
+                tx.commit().await?;
+                Ok(Some(TransferOutcome {
+                    created: !existing,
+                    etag,
+                }))
+            }
+            .await,
         )
-        .bind(destination_collection)
-        .bind(destination_name)
-        .bind(&uid)
-        .bind(&etag)
-        .bind(&component)
-        .bind(range_start)
-        .bind(range_end)
-        .bind(recurring)
-        .bind(index_version)
-        .bind(&content)
-        .bind(revision)
-        .execute(&mut *tx)
-        .await?;
-        record_change(
-            &mut tx,
-            destination_collection,
-            revision,
-            destination_name,
-            false,
-        )
-        .await?;
-        tx.commit().await?;
-        Ok(Some(TransferOutcome {
-            created: !existing,
-            etag,
-        }))
     }
 
     /// Changes after revision `since`, oldest first, at most `limit` rows.

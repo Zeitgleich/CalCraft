@@ -1,11 +1,17 @@
 //! HTTP routing and middleware stack.
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
     Router,
     extract::{DefaultBodyLimit, State},
-    http::{StatusCode, header::LOCATION},
+    http::{
+        StatusCode,
+        header::{LOCATION, RETRY_AFTER},
+    },
     middleware,
     response::{IntoResponse, Response},
     routing::{any, get},
@@ -15,7 +21,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use calcraft_store::Store;
+use calcraft_store::{Readiness, Store};
 
 use crate::{auth::Authenticator, config::Config, dav, limits, net::ClientIp, security};
 
@@ -40,6 +46,8 @@ pub struct AppState {
     /// Bounds concurrent recurrence checks of calendar-query (CPU work on
     /// the blocking pool), separately from password hashing.
     pub expansion: Arc<tokio::sync::Semaphore>,
+    /// Cached result of the readiness probe (`/readyz`).
+    pub readiness: Arc<ReadinessCache>,
 }
 
 impl AppState {
@@ -54,6 +62,7 @@ impl AppState {
             updates: None,
             max_vcard_bytes: crate::config::DEFAULT_MAX_VCARD_BYTES,
             expansion: Arc::new(tokio::sync::Semaphore::new(expansion_permits())),
+            readiness: Arc::new(ReadinessCache::new(READINESS_TTL)),
         })
     }
 }
@@ -153,13 +162,88 @@ async fn well_known() -> impl IntoResponse {
     (StatusCode::MOVED_PERMANENTLY, [(LOCATION, DAV_ROOT)])
 }
 
-async fn ready(State(state): State<AppState>) -> impl IntoResponse {
-    match state.store.ping().await {
-        Ok(()) => (StatusCode::OK, "ok"),
-        Err(err) => {
-            tracing::error!(%err, "readiness check failed");
-            (StatusCode::SERVICE_UNAVAILABLE, "database unavailable")
+/// `/readyz`: 200 while the database can be read and written, else 503
+/// with a short reason and `Retry-After`. `/healthz` stays liveness only.
+async fn ready(State(state): State<AppState>) -> Response {
+    let readiness = state.readiness.check(&state.store).await;
+    if readiness.is_ready() {
+        (StatusCode::OK, "ok").into_response()
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(RETRY_AFTER, READINESS_RETRY_AFTER)],
+            readiness.reason(),
+        )
+            .into_response()
+    }
+}
+
+/// How long a readiness result is reused: load balancers and orchestrators
+/// may probe often, the write probe needs the single writer connection.
+pub const READINESS_TTL: Duration = Duration::from_secs(5);
+
+/// `Retry-After` of a 503 from `/readyz` (seconds), matching [`READINESS_TTL`].
+const READINESS_RETRY_AFTER: &str = "5";
+
+/// The last readiness result, reused for a short time. One probe runs at a
+/// time; concurrent `/readyz` requests wait for it and share its result.
+#[derive(Debug)]
+pub struct ReadinessCache {
+    ttl: Duration,
+    last: tokio::sync::Mutex<Option<CachedReadiness>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CachedReadiness {
+    at: Instant,
+    /// [`Store::write_failures`] when probed: a newer write failure makes
+    /// the result stale at once.
+    failures: u64,
+    readiness: Readiness,
+}
+
+impl ReadinessCache {
+    /// `ttl` zero probes on every request.
+    pub fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            last: tokio::sync::Mutex::new(None),
         }
+    }
+
+    /// The cached result if fresh, else the result of a new probe.
+    pub async fn check(&self, store: &Store) -> Readiness {
+        let mut last = self.last.lock().await;
+        if let Some(cached) = *last
+            && cached.at.elapsed() < self.ttl
+            && cached.failures == store.write_failures()
+        {
+            return cached.readiness;
+        }
+        // Read before probing: a real write failing meanwhile makes this
+        // result stale.
+        let failures = store.write_failures();
+        let Some(readiness) = store.probe_readiness().await else {
+            // The writer is busy (a burst of writes): no new information.
+            // Keep the last known state and probe again next time.
+            return store.assumed_readiness();
+        };
+        let previous = last.map(|cached| cached.readiness);
+        if previous != Some(readiness) {
+            if readiness.is_ready() {
+                if previous.is_some() {
+                    tracing::info!("instance ready again");
+                }
+            } else {
+                tracing::warn!(reason = readiness.reason(), "instance not ready");
+            }
+        }
+        *last = Some(CachedReadiness {
+            at: Instant::now(),
+            failures,
+            readiness,
+        });
+        readiness
     }
 }
 

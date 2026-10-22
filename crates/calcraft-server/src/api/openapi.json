@@ -858,6 +858,43 @@
         ]
       }
     },
+    "/v1/admin/users/{username}/sso": {
+      "delete": {
+        "summary": "Remove the SSO link of a user (admins only)",
+        "description": "Removes the OpenID Connect identities bound to the user (like `calcraft user unbind-sso`) and ends the user's web sessions. The account can only be linked again after an operator approval (`calcraft user allow-sso-link`). Admins cannot unlink themselves (409). The IdP subject is never returned or logged.",
+        "tags": [
+          "admin"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Unlinked (also if nothing was linked)"
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/admin/update": {
       "get": {
         "summary": "Result of the optional update check (admins only)",
@@ -1388,12 +1425,54 @@
           },
           "totp_enabled": {
             "type": "boolean"
+          },
+          "sso": {
+            "description": "Link of this account to the configured single sign-on; null if SSO is not configured. Only ever describes the logged-in user; the IdP subject is never included.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SsoLink"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
           "username",
           "is_admin",
           "totp_enabled"
+        ]
+      },
+      "SsoLink": {
+        "type": "object",
+        "properties": {
+          "linked": {
+            "type": "boolean",
+            "description": "The account is bound to an identity of issuer."
+          },
+          "issuer": {
+            "type": "string",
+            "description": "The configured issuer URL."
+          },
+          "linked_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "When the identity was bound (Unix seconds)."
+          },
+          "last_login_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Last SSO login (Unix seconds)."
+          }
+        },
+        "required": [
+          "linked",
+          "issuer"
         ]
       },
       "ChangePassword": {
@@ -1672,6 +1751,10 @@
           },
           "totp_enabled": {
             "type": "boolean"
+          },
+          "sso_linked": {
+            "type": "boolean",
+            "description": "The account is bound to an SSO (OpenID Connect) identity of any issuer."
           }
         },
         "required": [

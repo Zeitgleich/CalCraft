@@ -85,6 +85,10 @@ A step-by-step guide for production setups — DNS records, build or Docker,
 systemd service, TLS with Let's Encrypt and ready-to-use **nginx** and
 **Apache** configurations — is in [docs/installation.md](docs/installation.md).
 
+The Linux release archives contain the systemd unit, sysusers.d and
+tmpfiles.d files from [`contrib/systemd/`](contrib/systemd) (installation:
+section 6 of the guide).
+
 Released binaries (Linux, macOS, Windows) and the Docker image
 `ghcr.io/zeitgleich/calcraft` come with SHA-256 checksums, build provenance
 attestations and a keyless cosign signature; how to check them is described in
@@ -271,7 +275,14 @@ How accounts are matched:
   consumes the approval; any other IdP account with the same name fails with
   `account_exists` and leaves the approval in place.
 - Once bound, logins must present the same subject, so a different IdP account with
-  the same username cannot take over. `calcraft user unbind-sso <user>` resets it.
+  the same username cannot take over. `calcraft user unbind-sso <user>` (or **Unlink
+  SSO** in the administration page) removes the binding and ends the user's sessions;
+  linking again then needs a new `allow-sso-link` approval.
+- Where to see the link: the **Account** page shows "Linked to single sign-on (<IdP
+  host>) since …" or "Not linked to single sign-on" (only when SSO is configured; from
+  `sso` in `GET /api/v1/me`, which never contains the IdP subject). Administrators see
+  an **SSO** badge per linked user in the user list (`sso_linked` in
+  `GET /api/v1/admin/users`).
 - The IdP should not let users choose their username freely (open self-registration),
   otherwise someone can claim a name before its owner does. If it does, restrict SSO
   with `required_claim`/`required_value` (e.g. a group only admins assign).

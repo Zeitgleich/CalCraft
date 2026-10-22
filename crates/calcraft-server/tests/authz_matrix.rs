@@ -83,6 +83,9 @@ const BOB: Names = Names {
     card: "zqbobmark-card.vcf",
 };
 
+/// Issuer of bob's SSO identity (SSO itself is not configured).
+const BOB_ISSUER: &str = "https://zqbobmark-idp.example";
+
 /// A user that does not exist; paths use bob's names.
 const NOBODY: &str = "carol";
 
@@ -244,6 +247,15 @@ async fn snapshot(store: &Store, user: &User, session: &str) -> String {
         "{:?}\n",
         store.trash_entries(user.id, 1000, 0).await.unwrap()
     );
+    out += &format!(
+        "{:?} {}\n",
+        store.oidc_identity_info(user.id, BOB_ISSUER).await.unwrap(),
+        store
+            .oidc_linked_user_ids()
+            .await
+            .unwrap()
+            .contains(&user.id)
+    );
     out
 }
 
@@ -300,6 +312,10 @@ async fn fixture() -> Fixture {
     seed(&store, &bob, &BOB).await;
     seed_trash(&store, &alice, ALICE.prefix).await;
     let bob_trash_id = seed_trash(&store, &bob, BOB.prefix).await;
+    store
+        .bind_oidc_identity(bob.id, BOB_ISSUER, "zqbobmark-subject", now())
+        .await
+        .unwrap();
     let (_, alice_app) = app_password(&store, &alice, "alice-apppw").await;
     let (bob_app_id, bob_app) = app_password(&store, &bob, "zqbobmark-apppw").await;
     let alice_session = session(&store, &alice).await;
@@ -322,6 +338,8 @@ async fn fixture() -> Fixture {
         "zqbobmark-fn",
         "zqbobmark-trashed.ics",
         "zqbobmark-summary-trashed",
+        "zqbobmark-subject",
+        BOB_ISSUER,
         "/principals/bob",
         "/calendars/bob",
         "/addressbooks/bob",
@@ -1670,6 +1688,10 @@ mod api_matrix {
                     "/api/v1/admin/users/nobody-zz".to_owned(),
                 )
                 .body(json!({"disabled": true})),
+            case("delete", "/v1/admin/users/{username}/sso", 403).uri(
+                "/api/v1/admin/users/bob/sso".to_owned(),
+                "/api/v1/admin/users/nobody-zz/sso".to_owned(),
+            ),
             case("get", "/v1/admin/update", 403),
             case("post", "/v1/auth/logout", 204),
         ]
@@ -1864,6 +1886,42 @@ mod api_matrix {
         )
         .await;
         assert_eq!(reply.status, 200);
+        // Admins see the SSO flag in the list, never the identity itself.
+        let users: Value = serde_json::from_str(&reply.body).unwrap();
+        let flag = |name: &str| {
+            users
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|u| u["username"] == name)
+                .unwrap()["sso_linked"]
+                .clone()
+        };
+        assert_eq!(flag("bob"), json!(true));
+        assert_eq!(flag("alice"), json!(false));
+        assert!(
+            !reply.body.contains("zqbobmark-subject") && !reply.body.contains(super::BOB_ISSUER)
+        );
+        let (_, reply) = call(
+            &fx,
+            "delete",
+            "/api/v1/admin/users/nobody-zz/sso",
+            Some(&admin_session),
+            true,
+            None,
+        )
+        .await;
+        assert_eq!(reply.status, 404);
+        let (_, reply) = call(
+            &fx,
+            "delete",
+            "/api/v1/admin/users/root/sso",
+            Some(&admin_session),
+            true,
+            None,
+        )
+        .await;
+        assert_eq!(reply.status, 409);
         let (_, reply) = call(
             &fx,
             "get",

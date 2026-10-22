@@ -4,7 +4,9 @@
 //! The query value comes from the URL and is therefore untrusted: it is
 //! only ever compared against the fixed list of codes, never shown.
 
-use crate::text;
+use calcraft_core::api::SsoLink;
+
+use crate::{format_timestamp, text};
 
 /// Query parameter the server uses to report a failed SSO login.
 pub const SSO_ERROR_PARAM: &str = "sso_error";
@@ -77,6 +79,45 @@ pub fn login_url(url: &str) -> &str {
     } else {
         DEFAULT_LOGIN_URL
     }
+}
+
+/// Host (with port) of an issuer URL for display, e.g.
+/// `https://id.example.com/realms/staff` → `id.example.com`. Falls back to
+/// the trimmed input if it has no `scheme://`.
+pub fn issuer_host(issuer: &str) -> &str {
+    let issuer = issuer.trim();
+    let Some((_, rest)) = issuer.split_once("://") else {
+        return issuer;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    // Drop userinfo, should a misconfigured issuer contain any.
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    if host.is_empty() { issuer } else { host }
+}
+
+/// Status line of the account page, e.g. "Linked to single sign-on
+/// (id.example.com) since 2026-10-21 11:14 UTC".
+pub fn link_status(link: &SsoLink) -> String {
+    let host = issuer_host(&link.issuer);
+    if !link.linked {
+        return format!("{} ({host})", text::SSO_NOT_LINKED);
+    }
+    match link.linked_at {
+        Some(at) => format!(
+            "{} ({host}) {} {}",
+            text::SSO_LINKED,
+            text::SINCE,
+            format_timestamp(at)
+        ),
+        None => format!("{} ({host})", text::SSO_LINKED),
+    }
+}
+
+/// "Last single sign-on login: …", if known.
+pub fn last_login(link: &SsoLink) -> Option<String> {
+    link.last_login_at
+        .filter(|_| link.linked)
+        .map(|at| format!("{} {}", text::SSO_LAST_LOGIN, format_timestamp(at)))
 }
 
 #[cfg(test)]
