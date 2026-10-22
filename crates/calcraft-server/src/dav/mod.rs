@@ -17,7 +17,7 @@ use axum::{
     extract::{Request, State},
     http::{
         HeaderValue, Method, StatusCode,
-        header::{ALLOW, AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE},
+        header::{ALLOW, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER, WWW_AUTHENTICATE},
     },
     response::{IntoResponse, Response},
 };
@@ -57,6 +57,7 @@ pub async fn handle(State(state): State<AppState>, request: Request) -> Response
         // like wrong credentials (no account oracle).
         AuthOutcome::LockedOut => return unauthorized(),
         AuthOutcome::Error => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        AuthOutcome::Busy => return service_unavailable(),
     };
 
     let path = request.uri().path().to_owned();
@@ -136,13 +137,27 @@ fn dav_error(status: StatusCode, condition: &str) -> Response {
         .into_response()
 }
 
+/// Transient overload: clients retry (RFC 9110 §15.6.4, §10.2.3).
+fn service_unavailable() -> Response {
+    (StatusCode::SERVICE_UNAVAILABLE, [(RETRY_AFTER, "1")]).into_response()
+}
+
 fn store_error(err: StoreError) -> Response {
     match err {
         StoreError::PreconditionFailed => StatusCode::PRECONDITION_FAILED.into_response(),
         StoreError::Limit(reason) => (StatusCode::INSUFFICIENT_STORAGE, reason).into_response(),
+        // RFC 4918 §11.5; the transaction was rolled back.
+        StoreError::Full => {
+            tracing::error!("storage full: database or disk has no space left");
+            StatusCode::INSUFFICIENT_STORAGE.into_response()
+        }
         StoreError::CollectionExists => method_not_allowed(),
+        StoreError::Busy => {
+            tracing::error!("storage busy: database stayed locked");
+            service_unavailable()
+        }
         err => {
-            tracing::error!(%err, "storage error");
+            tracing::error!(%err, sqlite_code = err.sqlite_code(), "storage error");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }

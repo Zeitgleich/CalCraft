@@ -167,11 +167,14 @@ pub enum ApiError {
     TooLarge,
     /// An uploaded file that cannot be used, with the reason.
     InvalidData(String),
+    /// Temporarily unavailable (database busy); retry later.
+    Unavailable,
     Internal,
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let retry = matches!(self, Self::Unavailable);
         let (status, code, message) = match self {
             Self::BadRequest(message) => {
                 (StatusCode::BAD_REQUEST, "bad_request", message.to_owned())
@@ -216,6 +219,11 @@ impl IntoResponse for ApiError {
                 "request body too large".to_owned(),
             ),
             Self::InvalidData(message) => (StatusCode::BAD_REQUEST, "invalid_data", message),
+            Self::Unavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                "temporarily unavailable, try again".to_owned(),
+            ),
             Self::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal",
@@ -226,7 +234,14 @@ impl IntoResponse for ApiError {
             error: code.to_owned(),
             message,
         };
-        (status, Json(body)).into_response()
+        let mut response = (status, Json(body)).into_response();
+        if retry {
+            response.headers_mut().insert(
+                header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("1"),
+            );
+        }
+        response
     }
 }
 
@@ -234,10 +249,18 @@ impl From<StoreError> for ApiError {
     fn from(err: StoreError) -> Self {
         match err {
             StoreError::Limit(message) => Self::Limit(message),
+            StoreError::Full => {
+                tracing::error!("storage full: database or disk has no space left");
+                Self::Limit("storage is full")
+            }
             StoreError::CollectionExists => Self::Conflict("collection already exists"),
             StoreError::UserExists(_) => Self::Conflict("user already exists"),
+            StoreError::Busy => {
+                tracing::error!("storage busy: database stayed locked");
+                Self::Unavailable
+            }
             err => {
-                tracing::error!(%err, "storage error");
+                tracing::error!(%err, sqlite_code = err.sqlite_code(), "storage error");
                 Self::Internal
             }
         }

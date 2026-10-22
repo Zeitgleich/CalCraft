@@ -25,6 +25,20 @@ pub struct AppPassword {
     pub last_used_at: Option<i64>,
 }
 
+/// Result of [`Store::enable_totp_with_step`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TotpEnableOutcome {
+    /// 2FA is on now, with the new recovery codes.
+    Enabled,
+    /// It was already on (e.g. a concurrent request enabled it).
+    AlreadyEnabled,
+    /// The code's time step was already used (replay).
+    StepUsed,
+    /// No pending secret, or a different one than the code was checked
+    /// against (a concurrent setup replaced it).
+    NotSetUp,
+}
+
 /// Stored state of a user's TOTP configuration.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TotpState {
@@ -66,7 +80,7 @@ impl Store {
         let result = sqlx::query("UPDATE users SET is_admin = ? WHERE username = ?")
             .bind(admin)
             .bind(username.as_str())
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok(result.rows_affected() == 1)
     }
@@ -83,7 +97,7 @@ impl Store {
         // Expired sessions are removed opportunistically.
         sqlx::query("DELETE FROM sessions WHERE expires_at <= ?")
             .bind(now)
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         sqlx::query(
             "INSERT INTO sessions (user_id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?)",
@@ -92,7 +106,7 @@ impl Store {
         .bind(token_hash)
         .bind(now)
         .bind(expires_at)
-        .execute(&self.pool)
+        .execute(&self.writer)
         .await?;
         Ok(())
     }
@@ -120,7 +134,7 @@ impl Store {
     pub async fn delete_session(&self, token_hash: &str) -> Result<()> {
         sqlx::query("DELETE FROM sessions WHERE token_hash = ?")
             .bind(token_hash)
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok(())
     }
@@ -129,7 +143,7 @@ impl Store {
     pub async fn delete_sessions_of(&self, user_id: i64) -> Result<()> {
         sqlx::query("DELETE FROM sessions WHERE user_id = ?")
             .bind(user_id)
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok(())
     }
@@ -143,7 +157,7 @@ impl Store {
         secret_hash: &str,
         now: i64,
     ) -> Result<i64> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
         let count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM app_passwords WHERE user_id = ?")
             .bind(user_id)
             .fetch_one(&mut *tx)
@@ -190,7 +204,7 @@ impl Store {
         let result = sqlx::query("DELETE FROM app_passwords WHERE id = ? AND user_id = ?")
             .bind(id)
             .bind(user_id)
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok(result.rows_affected() == 1)
     }
@@ -214,7 +228,7 @@ impl Store {
         .bind(now)
         .bind(id)
         .bind(LAST_USED_GRANULARITY)
-        .execute(&self.pool)
+        .execute(&self.writer)
         .await?;
         Ok(())
     }
@@ -245,15 +259,72 @@ impl Store {
         )
         .bind(secret)
         .bind(user_id)
-        .execute(&self.pool)
+        .execute(&self.writer)
         .await?;
         Ok(result.rows_affected() == 1)
     }
 
     /// Enables 2FA and replaces the recovery codes.
-    pub async fn enable_totp(&self, user_id: i64, recovery_hashes: &[String]) -> Result<()> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query("UPDATE users SET totp_enabled = 1 WHERE id = ? AND totp_secret IS NOT NULL")
+    /// Enables 2FA with new recovery codes. Returns `false` (and changes
+    /// nothing) if it is already enabled or no secret was set up.
+    pub async fn enable_totp(&self, user_id: i64, recovery_hashes: &[String]) -> Result<bool> {
+        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+        let changed = sqlx::query(
+            "UPDATE users SET totp_enabled = 1 \
+             WHERE id = ? AND totp_secret IS NOT NULL AND totp_enabled = 0",
+        )
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if changed == 0 {
+            return Ok(false);
+        }
+        sqlx::query("DELETE FROM recovery_codes WHERE user_id = ?")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        for hash in recovery_hashes {
+            sqlx::query("INSERT INTO recovery_codes (user_id, code_hash) VALUES (?, ?)")
+                .bind(user_id)
+                .bind(hash)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Accepts the time step of a code verified against `secret` and enables
+    /// 2FA with new recovery codes, in one transaction: of concurrent
+    /// requests with the same code exactly one enables, the others see
+    /// [`TotpEnableOutcome::AlreadyEnabled`].
+    pub async fn enable_totp_with_step(
+        &self,
+        user_id: i64,
+        secret: &[u8],
+        step: i64,
+        recovery_hashes: &[String],
+    ) -> Result<TotpEnableOutcome> {
+        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+        let row = sqlx::query(
+            "SELECT totp_enabled, totp_last_step FROM users WHERE id = ? AND totp_secret = ?",
+        )
+        .bind(user_id)
+        .bind(secret)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else {
+            return Ok(TotpEnableOutcome::NotSetUp);
+        };
+        if row.try_get::<bool, _>("totp_enabled")? {
+            return Ok(TotpEnableOutcome::AlreadyEnabled);
+        }
+        if row.try_get::<i64, _>("totp_last_step")? >= step {
+            return Ok(TotpEnableOutcome::StepUsed);
+        }
+        sqlx::query("UPDATE users SET totp_enabled = 1, totp_last_step = ? WHERE id = ?")
+            .bind(step)
             .bind(user_id)
             .execute(&mut *tx)
             .await?;
@@ -269,11 +340,11 @@ impl Store {
                 .await?;
         }
         tx.commit().await?;
-        Ok(())
+        Ok(TotpEnableOutcome::Enabled)
     }
 
     pub async fn disable_totp(&self, user_id: i64) -> Result<()> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             "UPDATE users SET totp_secret = NULL, totp_enabled = 0, totp_last_step = 0 WHERE id = ?",
         )
@@ -296,7 +367,7 @@ impl Store {
         )
         .bind(step)
         .bind(user_id)
-        .execute(&self.pool)
+        .execute(&self.writer)
         .await?;
         Ok(result.rows_affected() == 1)
     }
@@ -306,7 +377,7 @@ impl Store {
         let result = sqlx::query("DELETE FROM recovery_codes WHERE user_id = ? AND code_hash = ?")
             .bind(user_id)
             .bind(code_hash)
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok(result.rows_affected() == 1)
     }

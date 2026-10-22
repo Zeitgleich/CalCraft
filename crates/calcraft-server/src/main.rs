@@ -154,7 +154,12 @@ fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
 }
 
 async fn open_store(config: &Config) -> anyhow::Result<Store> {
-    Store::open_with(&config.storage.database, &config.storage.store_options())
+    let mut options = config.storage.store_options();
+    // Overload must surface as 503 + Retry-After before the request timeout (408).
+    options.acquire_timeout = options
+        .acquire_timeout
+        .min(config.server.request_timeout() / 2);
+    Store::open_with(&config.storage.database, &options)
         .await
         .with_context(|| {
             format!(

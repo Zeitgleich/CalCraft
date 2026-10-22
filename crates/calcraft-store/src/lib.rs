@@ -16,14 +16,19 @@ mod accounts;
 mod backup;
 mod items;
 mod oidc;
+mod test_hooks;
 
-pub use accounts::{AppPassword, MAX_APP_PASSWORDS, RECOVERY_CODES, Session, TotpState};
+pub use accounts::{
+    AppPassword, MAX_APP_PASSWORDS, RECOVERY_CODES, Session, TotpEnableOutcome, TotpState,
+};
 pub use backup::{
-    BackupInfo, RestoreInfo, StoreOptions, backup_database, latest_migration,
-    pre_migration_backups, restore_database,
+    BackupInfo, DEFAULT_ACQUIRE_TIMEOUT, RestoreInfo, StoreOptions, backup_database,
+    latest_migration, pre_migration_backups, restore_database,
 };
 pub use items::{Change, Item, ItemMeta, NewItem, Precondition, PutOutcome};
 pub use oidc::{ApprovedBinding, OidcBinding};
+#[cfg(feature = "test-hooks")]
+pub use test_hooks::SimulatedFailure;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -33,7 +38,16 @@ pub const DEFAULT_COLLECTION_SLUG: &str = "default";
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("database error: {0}")]
-    Database(#[from] sqlx::Error),
+    Database(sqlx::Error),
+    /// The disk (or the database size limit) is full (`SQLITE_FULL`). The
+    /// failed transaction was rolled back; DAV answers 507.
+    #[error("database or disk is full")]
+    Full,
+    /// The database stayed locked (`SQLITE_BUSY`/`SQLITE_LOCKED` after the
+    /// busy timeout, or no connection within the pool timeout). Transient;
+    /// DAV answers 503 with `Retry-After`.
+    #[error("database is busy")]
+    Busy,
     #[error("database migration failed: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
     #[error("user {0} already exists")]
@@ -75,6 +89,43 @@ pub enum StoreError {
     NotCalcraft(String),
     #[error("backup before migrating failed, nothing was migrated: {0}")]
     PreMigrationBackup(String),
+}
+
+/// The SQLite result code (extended) of a database error.
+fn sqlite_code(err: &sqlx::Error) -> Option<i64> {
+    match err {
+        sqlx::Error::Database(db) => db.code().and_then(|code| code.parse().ok()),
+        _ => None,
+    }
+}
+
+impl StoreError {
+    /// The SQLite result code (extended) behind this error, for logs.
+    pub fn sqlite_code(&self) -> Option<i64> {
+        match self {
+            Self::Database(err) => sqlite_code(err),
+            _ => None,
+        }
+    }
+}
+
+impl From<sqlx::Error> for StoreError {
+    fn from(err: sqlx::Error) -> Self {
+        // Primary result codes; extended codes keep them in the low byte.
+        const SQLITE_BUSY: i64 = 5;
+        const SQLITE_LOCKED: i64 = 6;
+        const SQLITE_FULL: i64 = 13;
+        let primary = sqlite_code(&err).map(|code| code & 0xff);
+        if primary == Some(SQLITE_FULL) {
+            Self::Full
+        } else if matches!(primary, Some(SQLITE_BUSY | SQLITE_LOCKED))
+            || matches!(err, sqlx::Error::PoolTimedOut)
+        {
+            Self::Busy
+        } else {
+            Self::Database(err)
+        }
+    }
 }
 
 pub type Result<T, E = StoreError> = std::result::Result<T, E>;
@@ -131,11 +182,21 @@ pub struct Collection {
 #[derive(Debug, Clone)]
 pub struct Store {
     pub(crate) pool: SqlitePool,
+    /// The single connection all writes use. SQLite allows one writer at a
+    /// time anyway; queueing writers here (sqlx hands out connections in
+    /// FIFO order) instead of in SQLite's busy handler, which polls and
+    /// lets a waiter lose again and again until `busy_timeout` expires,
+    /// keeps a busy server from failing writes with `SQLITE_BUSY`. Other
+    /// processes (CLI backup, import) still meet the busy timeout.
+    pub(crate) writer: SqlitePool,
     /// Shared process lock on `<database>.lock`; `None` in memory.
     #[allow(dead_code)]
     lock: Option<Arc<backup::DbLock>>,
     /// Database file; `None` in memory.
     path: Option<Arc<std::path::PathBuf>>,
+    /// Simulated failures (feature `test-hooks`; empty otherwise).
+    #[allow(dead_code)]
+    simulation: test_hooks::Simulation,
 }
 
 impl Store {
@@ -149,19 +210,22 @@ impl Store {
     pub async fn in_memory() -> Result<Self> {
         let options = SqliteConnectOptions::from_str("sqlite::memory:")?.foreign_keys(true);
         // A single connection, because every connection gets its own in-memory database.
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
+        let simulation = test_hooks::Simulation::default();
+        let pool = simulation
+            .hook(
+                SqlitePoolOptions::new()
+                    .max_connections(1)
+                    .acquire_timeout(DEFAULT_ACQUIRE_TIMEOUT),
+            )
             .connect_with(options)
             .await?;
-        Self::init(pool).await
-    }
-
-    async fn init(pool: SqlitePool) -> Result<Self> {
         MIGRATOR.run(&pool).await?;
         Ok(Self {
+            writer: pool.clone(),
             pool,
             lock: None,
             path: None,
+            simulation,
         })
     }
 
@@ -169,6 +233,15 @@ impl Store {
     pub async fn ping(&self) -> Result<()> {
         sqlx::query("SELECT 1").execute(&self.pool).await?;
         Ok(())
+    }
+
+    /// Makes the database behave as if its file were read-only or the disk
+    /// full, or back to normal, for failure tests (feature `test-hooks`).
+    /// Every connection gets `PRAGMA query_only` / `max_page_count` when it
+    /// is opened or acquired.
+    #[cfg(feature = "test-hooks")]
+    pub fn simulate_failure(&self, failure: SimulatedFailure) {
+        self.simulation.set(failure);
     }
 
     /// Creates a user with a default calendar and address book.
@@ -190,7 +263,10 @@ impl Store {
         display_name: Option<&str>,
         is_admin: bool,
     ) -> Result<User> {
-        let mut tx = self.pool.begin().await?;
+        // Write transactions start IMMEDIATE (see `put_item`): a deferred one that
+        // reads first fails with SQLITE_BUSY instead of waiting when another
+        // writer commits in between.
+        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
         let result = sqlx::query(
             "INSERT INTO users (username, password_hash, display_name, is_admin) VALUES (?, ?, ?, ?) RETURNING id",
         )
@@ -266,7 +342,7 @@ impl Store {
         let result = sqlx::query("UPDATE users SET password_hash = ? WHERE username = ?")
             .bind(password_hash)
             .bind(username.as_str())
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok(result.rows_affected() == 1)
     }
@@ -276,7 +352,7 @@ impl Store {
         let result = sqlx::query("UPDATE users SET disabled = ? WHERE username = ?")
             .bind(disabled)
             .bind(username.as_str())
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok(result.rows_affected() == 1)
     }
@@ -516,5 +592,41 @@ mod tests {
         }
         drop(store);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_busy_writer_fails_with_busy_after_the_acquire_timeout() {
+        let dir = std::env::temp_dir().join(format!("calcraft-busy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let options = StoreOptions {
+            // Long enough to open a connection on slow CI runners (Windows),
+            // short enough to keep the test quick.
+            acquire_timeout: std::time::Duration::from_millis(500),
+            ..StoreOptions::default()
+        };
+        let store = Store::open_with(&dir.join("test.db"), &options)
+            .await
+            .unwrap();
+        // Someone holds the single write connection for too long.
+        // Open a reader connection first so the read below doesn't have to.
+        assert!(store.list_users().await.unwrap().is_empty());
+        let held = store.writer.acquire().await.unwrap();
+        let start = std::time::Instant::now();
+        let err = store
+            .create_user(&name("waiting"), "hash", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Busy), "{err:?}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        // Reads do not need the writer.
+        assert!(store.list_users().await.unwrap().is_empty());
+        drop(held);
+        store
+            .create_user(&name("waiting"), "hash", None)
+            .await
+            .unwrap();
+        // Close the pools first: Windows refuses to delete open files.
+        store.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
