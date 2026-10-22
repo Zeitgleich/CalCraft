@@ -18,13 +18,14 @@ use crate::{
     validate::{MAX_DISPLAY_NAME, clean_text},
 };
 
-fn info(user: User) -> AdminUserInfo {
+fn info(user: User, sso_linked: bool) -> AdminUserInfo {
     AdminUserInfo {
         username: user.username.to_string(),
         display_name: user.display_name,
         is_admin: user.is_admin,
         disabled: user.disabled,
         totp_enabled: user.totp_enabled,
+        sso_linked,
     }
 }
 
@@ -32,13 +33,17 @@ pub async fn list(
     State(state): State<AppState>,
     _admin: AdminUser,
 ) -> Result<Json<Vec<AdminUserInfo>>, ApiError> {
+    let linked = state.store.oidc_linked_user_ids().await?;
     Ok(Json(
         state
             .store
             .list_users()
             .await?
             .into_iter()
-            .map(info)
+            .map(|user| {
+                let sso_linked = linked.contains(&user.id);
+                info(user, sso_linked)
+            })
             .collect(),
     ))
 }
@@ -71,7 +76,7 @@ pub async fn create(
         .store
         .create_user_with_role(&username, &hash, display_name.as_deref(), request.is_admin)
         .await?;
-    Ok((StatusCode::CREATED, Json(info(user))))
+    Ok((StatusCode::CREATED, Json(info(user, false))))
 }
 
 pub async fn update(
@@ -102,6 +107,34 @@ pub async fn update(
     if let Some(is_admin) = request.is_admin {
         state.store.set_admin(&username, is_admin).await?;
     }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Removes the SSO identities bound to a user (like `calcraft user
+/// unbind-sso`) and ends the user's web sessions. The account can only be
+/// linked again after an operator approval (`calcraft user
+/// allow-sso-link`). Admins cannot unlink themselves.
+pub async fn unlink_sso(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    Path(username): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let username: Username = username.parse().map_err(|_| ApiError::NotFound)?;
+    let target = state
+        .store
+        .user_credentials(&username)
+        .await?
+        .ok_or(ApiError::NotFound)?
+        .user;
+    if target.id == admin.id {
+        return Err(ApiError::Conflict(
+            "you cannot unlink your own single sign-on",
+        ));
+    }
+    // Also ends the user's sessions, in the same transaction.
+    let removed = state.store.unbind_oidc_identities(target.id).await?;
+    // Never log the subject.
+    tracing::info!(admin = %admin.username, user = %username, removed, "admin removed SSO link");
     Ok(StatusCode::NO_CONTENT)
 }
 

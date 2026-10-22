@@ -155,6 +155,12 @@ jobs:
           name="calcraft-$VERSION-$TARGET"
           mkdir -p "pkg/$name" out
           cp "target/$TARGET/release/calcraft" LICENSE README.md calcraft.example.toml "pkg/$name/"
+          # systemd unit, sysusers.d and tmpfiles.d files (docs/installation.md, section 6).
+          if [ "$RUNNER_OS" = Linux ]; then
+            mkdir -p "pkg/$name/contrib/systemd"
+            cp contrib/systemd/calcraft.service contrib/systemd/calcraft.sysusers \
+              contrib/systemd/calcraft.tmpfiles "pkg/$name/contrib/systemd/"
+          fi
           tar -C pkg -czf "out/$name.tar.gz" "$name"
           "pkg/$name/calcraft" --version
       - name: Package (zip)

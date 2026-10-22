@@ -9,7 +9,7 @@ use std::{net::SocketAddr, path::PathBuf, process::ExitCode};
 use anyhow::Context;
 use calcraft_server::{
     API_COMPILED, AppState, Config, OIDC_COMPILED, UPDATE_CHECK_COMPILED, WEB_UI_COMPILED,
-    telemetry,
+    sd_notify, telemetry,
 };
 use calcraft_store::Store;
 use clap::{Args, Parser, Subcommand};
@@ -31,7 +31,7 @@ enum Command {
     /// Start the server.
     Serve(ServeArgs),
     /// Validate the configuration and print the effective values.
-    CheckConfig(ConfigArgs),
+    CheckConfig(CheckConfigArgs),
     /// Manage local user accounts.
     User {
         #[command(flatten)]
@@ -78,6 +78,16 @@ pub(crate) struct ConfigArgs {
 }
 
 #[derive(Debug, Args)]
+struct CheckConfigArgs {
+    #[command(flatten)]
+    config: ConfigArgs,
+    /// Print nothing when the configuration is valid (errors still go to
+    /// standard error), e.g. for systemd's `ExecStartPre=`.
+    #[arg(short, long)]
+    quiet: bool,
+}
+
+#[derive(Debug, Args)]
 struct ServeArgs {
     #[command(flatten)]
     config: ConfigArgs,
@@ -105,8 +115,10 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::CheckConfig(args) => {
-            let config = Config::load(args.config.as_deref())?;
-            println!("{config:#?}");
+            let config = Config::load(args.config.config.as_deref())?;
+            if !args.quiet {
+                println!("{config:#?}");
+            }
             Ok(())
         }
         Command::Serve(args) => {
@@ -233,6 +245,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         );
     }
 
+    sd_notify::notify("STATUS=Opening the database");
     let store = open_store(&config).await?;
     // Purges expired trash entries now and then regularly.
     calcraft_server::trash::warn_if_disabled_with_entries(&store).await;
@@ -261,8 +274,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let listener = TcpListener::bind(config.server.bind)
         .await
         .with_context(|| format!("failed to bind {}", config.server.bind))?;
+    let address = listener.local_addr()?;
     tracing::info!(
-        address = %listener.local_addr()?,
+        address = %address,
         web_ui = config.web_ui.enabled && WEB_UI_COMPILED,
         api = config.api.enabled && API_COMPILED,
         oidc = config.oidc.enabled && OIDC_COMPILED,
@@ -280,6 +294,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // The peer address is needed for the per-client limits.
     let app =
         calcraft_server::router(&config, state).into_make_service_with_connect_info::<SocketAddr>();
+    // Database open and migrated, listener bound: tell systemd (Type=notify)
+    // that the service is up. No-op outside systemd.
+    sd_notify::notify(&format!("READY=1\nSTATUS=Listening on {address}"));
+    sd_notify::spawn_watchdog();
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
@@ -317,4 +335,5 @@ async fn shutdown_signal() {
         () = terminate => {}
     }
     tracing::info!("shutdown signal received");
+    sd_notify::notify("STOPPING=1\nSTATUS=Shutting down");
 }

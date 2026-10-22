@@ -9,6 +9,48 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 
 ### Added
 
+- systemd integration shipped in `contrib/systemd/` (and in the Linux release
+  archives): `calcraft.service`, `calcraft.sysusers` and `calcraft.tmpfiles`.
+  The unit uses `Type=notify` – CalCraft sends `READY=1` after the database
+  is open (migrations applied) and the listener is bound, `STOPPING=1` on
+  graceful shutdown, a status line and watchdog keep-alives
+  (`WatchdogSec=30s`), implemented without new dependencies; outside
+  systemd (no `NOTIFY_SOCKET`) nothing changes. It checks the configuration
+  before starting (`ExecStartPre=calcraft check-config --quiet`), restarts
+  on failure, stops restarting after 5 failed starts in 5 minutes and keeps
+  the existing hardening and resource limits. A CI job installs the files on
+  a real systemd and tests readiness, automatic restart after `SIGKILL`,
+  graceful restart, persistence, the start limit and the
+  `systemd-analyze security` exposure level.
+- `calcraft check-config --quiet` validates without printing the effective
+  configuration.
+
+### Changed
+
+- `docs/installation.md` sections 4a and 6 install the shipped systemd files
+  instead of copy-pasted ones and explain readiness, the start limit and how
+  to check the service after a reboot.
+
+- `/readyz` now checks that the database can be written, not only read: it
+  answers `503` with `Retry-After` and a short reason (`database not
+  writable`, `storage full`, `database unavailable`) while the database is
+  read-only, a write failed for lack of space, or the database cannot be
+  read, and `200` again by itself once writes work. A busy writer (write
+  burst, lock held by another process) keeps the last known state. The write probe
+  rolls back, changes no data and does not grow the database; results are
+  cached for 5 seconds. `/healthz` stays liveness only. New migration
+  `0008_health` (one-row table for the probe).
+
+- SSO link status: `GET /api/v1/me` (and the login answer) has a new field
+  `sso` (`linked`, `issuer`, `linked_at`, `last_login_at`; `null` when SSO is
+  not configured; never the IdP subject), shown on the **Account** page.
+  `GET /api/v1/admin/users` has `sso_linked`, shown as an **SSO** badge in
+  the administration. New admin endpoint
+  `DELETE /api/v1/admin/users/{username}/sso` (button **Unlink SSO**, with
+  confirmation) removes a user's SSO binding like `calcraft user unbind-sso`
+  and ends the user's sessions; admins cannot unlink themselves. The new
+  fields are additive; older clients ignore them.
+
 - `calcraft migrate`: copies calendars, task lists and address books of one
   account from another CalDAV/CardDAV server (Synology Calendar/Contacts,
   Radicale, Baïkal, Nextcloud, …) into a local user. Discovery via

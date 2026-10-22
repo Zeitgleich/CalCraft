@@ -304,152 +304,162 @@ impl Store {
     where
         F: FnOnce(&[u8]) -> Option<String> + Send,
     {
-        if self.trash_retention_days() == 0 {
-            return self.delete_item(collection_id, name, precondition).await;
-        }
-        // Parse outside the write transaction; if the object changes in
-        // between, the entry simply has no display text.
-        let Some(before) = self.item(collection_id, name).await? else {
-            return Ok(false);
-        };
-        let summary = shorten(summary(&before.content));
-        drop(before.content);
+        self.observe(
+            async {
+                if self.trash_retention_days() == 0 {
+                    return self.delete_item(collection_id, name, precondition).await;
+                }
+                // Parse outside the write transaction; if the object changes in
+                // between, the entry simply has no display text.
+                let Some(before) = self.item(collection_id, name).await? else {
+                    return Ok(false);
+                };
+                let summary = shorten(summary(&before.content));
+                drop(before.content);
 
-        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-        let Some(row) = sqlx::query(
-            "SELECT i.etag, c.owner_id FROM items i JOIN collections c ON c.id = i.collection_id \
-             WHERE i.collection_id = ? AND i.name = ?",
+                let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                let Some(row) = sqlx::query(
+                    "SELECT i.etag, c.owner_id FROM items i JOIN collections c ON c.id = i.collection_id \
+                     WHERE i.collection_id = ? AND i.name = ?",
+                )
+                .bind(collection_id)
+                .bind(name)
+                .fetch_optional(&mut *tx)
+                .await?
+                else {
+                    return Ok(false);
+                };
+                let etag: String = row.try_get("etag")?;
+                check(precondition, Some(&etag))?;
+                let summary = summary.filter(|_| etag == before.etag);
+                let owner_id: i64 = row.try_get("owner_id")?;
+                if make_room(&mut tx, &self.settings, owner_id, 1).await? {
+                    sqlx::query(
+                        "INSERT INTO trash (public_id, owner_id, entry_kind, collection_kind, \
+                           collection_slug, collection_id, name, uid, etag, component, range_start, \
+                           range_end, content, modified_at, summary, size, deleted_at) \
+                         SELECT lower(hex(randomblob(16))), c.owner_id, 'item', c.kind, c.slug, \
+                           i.collection_id, i.name, i.uid, i.etag, i.component, i.range_start, \
+                           i.range_end, i.content, i.modified_at, ?, length(i.content), ? \
+                         FROM items i JOIN collections c ON c.id = i.collection_id \
+                         WHERE i.collection_id = ? AND i.name = ?",
+                    )
+                    .bind(summary)
+                    .bind(now)
+                    .bind(collection_id)
+                    .bind(name)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                sqlx::query("DELETE FROM items WHERE collection_id = ? AND name = ?")
+                    .bind(collection_id)
+                    .bind(name)
+                    .execute(&mut *tx)
+                    .await?;
+                let revision: i64 = sqlx::query(
+                    "UPDATE collections SET sync_revision = sync_revision + 1 WHERE id = ? RETURNING sync_revision",
+                )
+                .bind(collection_id)
+                .fetch_one(&mut *tx)
+                .await?
+                .try_get("sync_revision")?;
+                record_change(&mut tx, collection_id, revision, name, true).await?;
+                tx.commit().await?;
+                Ok(true)
+            }
+            .await,
         )
-        .bind(collection_id)
-        .bind(name)
-        .fetch_optional(&mut *tx)
-        .await?
-        else {
-            return Ok(false);
-        };
-        let etag: String = row.try_get("etag")?;
-        check(precondition, Some(&etag))?;
-        let summary = summary.filter(|_| etag == before.etag);
-        let owner_id: i64 = row.try_get("owner_id")?;
-        if make_room(&mut tx, &self.settings, owner_id, 1).await? {
-            sqlx::query(
-                "INSERT INTO trash (public_id, owner_id, entry_kind, collection_kind, \
-                   collection_slug, collection_id, name, uid, etag, component, range_start, \
-                   range_end, content, modified_at, summary, size, deleted_at) \
-                 SELECT lower(hex(randomblob(16))), c.owner_id, 'item', c.kind, c.slug, \
-                   i.collection_id, i.name, i.uid, i.etag, i.component, i.range_start, \
-                   i.range_end, i.content, i.modified_at, ?, length(i.content), ? \
-                 FROM items i JOIN collections c ON c.id = i.collection_id \
-                 WHERE i.collection_id = ? AND i.name = ?",
-            )
-            .bind(summary)
-            .bind(now)
-            .bind(collection_id)
-            .bind(name)
-            .execute(&mut *tx)
-            .await?;
-        }
-        sqlx::query("DELETE FROM items WHERE collection_id = ? AND name = ?")
-            .bind(collection_id)
-            .bind(name)
-            .execute(&mut *tx)
-            .await?;
-        let revision: i64 = sqlx::query(
-            "UPDATE collections SET sync_revision = sync_revision + 1 WHERE id = ? RETURNING sync_revision",
-        )
-        .bind(collection_id)
-        .fetch_one(&mut *tx)
-        .await?
-        .try_get("sync_revision")?;
-        record_change(&mut tx, collection_id, revision, name, true).await?;
-        tx.commit().await?;
-        Ok(true)
     }
 
     /// DELETE of a collection: moves it with all its objects into the
     /// owner's trash as one entry (or deletes it for good if the trash is
     /// disabled).
     pub async fn delete_collection_to_trash(&self, collection_id: i64, now: i64) -> Result<()> {
-        if self.trash_retention_days() == 0 {
-            return self.delete_collection(collection_id).await;
-        }
-        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-        let Some(collection) = sqlx::query(
-            "SELECT owner_id, kind, slug, display_name, description, color, components, \
-                    (SELECT COUNT(*) FROM items WHERE collection_id = c.id) AS items, \
-                    (SELECT COALESCE(SUM(length(content)), 0) FROM items WHERE collection_id = c.id) AS bytes \
-             FROM collections c WHERE id = ?",
+        self.observe(
+            async {
+                if self.trash_retention_days() == 0 {
+                    return self.delete_collection(collection_id).await;
+                }
+                let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                let Some(collection) = sqlx::query(
+                    "SELECT owner_id, kind, slug, display_name, description, color, components, \
+                            (SELECT COUNT(*) FROM items WHERE collection_id = c.id) AS items, \
+                            (SELECT COALESCE(SUM(length(content)), 0) FROM items WHERE collection_id = c.id) AS bytes \
+                     FROM collections c WHERE id = ?",
+                )
+                .bind(collection_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                else {
+                    return Ok(());
+                };
+                let owner_id: i64 = collection.try_get("owner_id")?;
+                let items: i64 = collection.try_get("items")?;
+                let room = make_room(&mut tx, &self.settings, owner_id, items.saturating_add(1)).await?;
+                if room {
+                    let display_name: Option<String> = collection.try_get("display_name")?;
+                    let entry: i64 = sqlx::query(
+                        "INSERT INTO trash (public_id, owner_id, entry_kind, collection_kind, \
+                           collection_slug, display_name, description, color, components, summary, \
+                           size, deleted_at) \
+                         VALUES (lower(hex(randomblob(16))), ?, 'collection', ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                         RETURNING id",
+                    )
+                    .bind(owner_id)
+                    .bind(collection.try_get::<String, _>("kind")?)
+                    .bind(collection.try_get::<String, _>("slug")?)
+                    .bind(&display_name)
+                    .bind(collection.try_get::<Option<String>, _>("description")?)
+                    .bind(collection.try_get::<Option<String>, _>("color")?)
+                    .bind(collection.try_get::<String, _>("components")?)
+                    .bind(shorten(display_name.clone()))
+                    .bind(collection.try_get::<i64, _>("bytes")?)
+                    .bind(now)
+                    .fetch_one(&mut *tx)
+                    .await?
+                    .try_get("id")?;
+                    sqlx::query(
+                        "INSERT INTO trash (owner_id, entry_kind, parent_id, collection_kind, \
+                           collection_slug, name, uid, etag, component, range_start, range_end, content, \
+                           modified_at, size, deleted_at) \
+                         SELECT ?, 'item', ?, ?, ?, name, uid, etag, component, range_start, range_end, \
+                           content, modified_at, length(content), ? \
+                         FROM items WHERE collection_id = ? ORDER BY revision",
+                    )
+                    .bind(owner_id)
+                    .bind(entry)
+                    .bind(collection.try_get::<String, _>("kind")?)
+                    .bind(collection.try_get::<String, _>("slug")?)
+                    .bind(now)
+                    .bind(collection_id)
+                    .execute(&mut *tx)
+                    .await?;
+                    // Objects deleted from it earlier follow the collection.
+                    sqlx::query(
+                        "UPDATE trash SET collection_entry = ? \
+                         WHERE owner_id = ? AND collection_id = ? AND parent_id IS NULL",
+                    )
+                    .bind(entry)
+                    .bind(owner_id)
+                    .bind(collection_id)
+                    .execute(&mut *tx)
+                    .await?;
+                } else {
+                    tracing::warn!(
+                        owner_id,
+                        items,
+                        "collection too large for the trash: deleted permanently"
+                    );
+                }
+                sqlx::query("DELETE FROM collections WHERE id = ?")
+                    .bind(collection_id)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                Ok(())
+            }
+            .await,
         )
-        .bind(collection_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        else {
-            return Ok(());
-        };
-        let owner_id: i64 = collection.try_get("owner_id")?;
-        let items: i64 = collection.try_get("items")?;
-        let room = make_room(&mut tx, &self.settings, owner_id, items.saturating_add(1)).await?;
-        if room {
-            let display_name: Option<String> = collection.try_get("display_name")?;
-            let entry: i64 = sqlx::query(
-                "INSERT INTO trash (public_id, owner_id, entry_kind, collection_kind, \
-                   collection_slug, display_name, description, color, components, summary, \
-                   size, deleted_at) \
-                 VALUES (lower(hex(randomblob(16))), ?, 'collection', ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-                 RETURNING id",
-            )
-            .bind(owner_id)
-            .bind(collection.try_get::<String, _>("kind")?)
-            .bind(collection.try_get::<String, _>("slug")?)
-            .bind(&display_name)
-            .bind(collection.try_get::<Option<String>, _>("description")?)
-            .bind(collection.try_get::<Option<String>, _>("color")?)
-            .bind(collection.try_get::<String, _>("components")?)
-            .bind(shorten(display_name.clone()))
-            .bind(collection.try_get::<i64, _>("bytes")?)
-            .bind(now)
-            .fetch_one(&mut *tx)
-            .await?
-            .try_get("id")?;
-            sqlx::query(
-                "INSERT INTO trash (owner_id, entry_kind, parent_id, collection_kind, \
-                   collection_slug, name, uid, etag, component, range_start, range_end, content, \
-                   modified_at, size, deleted_at) \
-                 SELECT ?, 'item', ?, ?, ?, name, uid, etag, component, range_start, range_end, \
-                   content, modified_at, length(content), ? \
-                 FROM items WHERE collection_id = ? ORDER BY revision",
-            )
-            .bind(owner_id)
-            .bind(entry)
-            .bind(collection.try_get::<String, _>("kind")?)
-            .bind(collection.try_get::<String, _>("slug")?)
-            .bind(now)
-            .bind(collection_id)
-            .execute(&mut *tx)
-            .await?;
-            // Objects deleted from it earlier follow the collection.
-            sqlx::query(
-                "UPDATE trash SET collection_entry = ? \
-                 WHERE owner_id = ? AND collection_id = ? AND parent_id IS NULL",
-            )
-            .bind(entry)
-            .bind(owner_id)
-            .bind(collection_id)
-            .execute(&mut *tx)
-            .await?;
-        } else {
-            tracing::warn!(
-                owner_id,
-                items,
-                "collection too large for the trash: deleted permanently"
-            );
-        }
-        sqlx::query("DELETE FROM collections WHERE id = ?")
-            .bind(collection_id)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        Ok(())
     }
 
     /// Top-level trash entries of a user, newest first.
@@ -502,114 +512,129 @@ impl Store {
         public_id: &str,
         target: Option<&Slug>,
     ) -> Result<Option<RestoredEntry>> {
-        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-        let Some(entry) = sqlx::query(
-            "SELECT id, entry_kind, collection_kind, collection_slug, collection_id, \
-                    (SELECT purge_pending FROM trash p WHERE p.id = t.collection_entry) AS collection_entry_pending, \
-                    collection_entry, name, uid, etag, component, range_start, range_end, content, \
-                    modified_at, display_name, description, color, components \
-             FROM trash t WHERE owner_id = ? AND public_id = ? AND parent_id IS NULL \
-               AND purge_pending = 0",
-        )
-        .bind(owner_id)
-        .bind(public_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        else {
-            return Ok(None);
-        };
-        let id: i64 = entry.try_get("id")?;
-        let kind = kind_of(&entry.try_get::<String, _>("entry_kind")?)?;
-        let collection_kind = collection_kind_of(&entry.try_get::<String, _>("collection_kind")?)?;
-        let slug: String = entry.try_get("collection_slug")?;
-        let collection_slug: Slug = slug
-            .clone()
-            .try_into()
-            .map_err(|err| StoreError::Corrupt(format!("{err}")))?;
-        let restored = match (kind, target) {
-            (TrashEntryKind::Item, target) => {
-                let target = match target {
-                    None => None,
-                    Some(slug) => {
-                        let row = sqlx::query(
-                            "SELECT id FROM collections WHERE owner_id = ? AND kind = ? AND slug = ?",
+        self.observe(
+            async {
+                let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                let Some(entry) = sqlx::query(
+                    "SELECT id, entry_kind, collection_kind, collection_slug, collection_id, \
+                            (SELECT purge_pending FROM trash p WHERE p.id = t.collection_entry) AS collection_entry_pending, \
+                            collection_entry, name, uid, etag, component, range_start, range_end, content, \
+                            modified_at, display_name, description, color, components \
+                     FROM trash t WHERE owner_id = ? AND public_id = ? AND parent_id IS NULL \
+                       AND purge_pending = 0",
+                )
+                .bind(owner_id)
+                .bind(public_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                else {
+                    return Ok(None);
+                };
+                let id: i64 = entry.try_get("id")?;
+                let kind = kind_of(&entry.try_get::<String, _>("entry_kind")?)?;
+                let collection_kind = collection_kind_of(&entry.try_get::<String, _>("collection_kind")?)?;
+                let slug: String = entry.try_get("collection_slug")?;
+                let collection_slug: Slug = slug
+                    .clone()
+                    .try_into()
+                    .map_err(|err| StoreError::Corrupt(format!("{err}")))?;
+                let restored = match (kind, target) {
+                    (TrashEntryKind::Item, target) => {
+                        let target = match target {
+                            None => None,
+                            Some(slug) => {
+                                let row = sqlx::query(
+                                    "SELECT id FROM collections WHERE owner_id = ? AND kind = ? AND slug = ?",
+                                )
+                                .bind(owner_id)
+                                .bind(collection_kind.as_str())
+                                .bind(slug.as_str())
+                                .fetch_optional(&mut *tx)
+                                .await?
+                                .ok_or(StoreError::TrashConflict(TrashConflict::InvalidTarget))?;
+                                Some((row.try_get::<i64, _>("id")?, slug.clone()))
+                            }
+                        };
+                        restore_item(
+                            &mut tx,
+                            owner_id,
+                            &entry,
+                            collection_kind,
+                            collection_slug,
+                            target,
                         )
-                        .bind(owner_id)
-                        .bind(collection_kind.as_str())
-                        .bind(slug.as_str())
-                        .fetch_optional(&mut *tx)
                         .await?
-                        .ok_or(StoreError::TrashConflict(TrashConflict::InvalidTarget))?;
-                        Some((row.try_get::<i64, _>("id")?, slug.clone()))
+                    }
+                    (TrashEntryKind::Collection, Some(_)) => {
+                        return Err(StoreError::TrashConflict(TrashConflict::InvalidTarget));
+                    }
+                    (TrashEntryKind::Collection, None) => {
+                        restore_collection(
+                            &mut tx,
+                            owner_id,
+                            id,
+                            &entry,
+                            collection_kind,
+                            collection_slug,
+                        )
+                        .await?
                     }
                 };
-                restore_item(
-                    &mut tx,
-                    owner_id,
-                    &entry,
-                    collection_kind,
-                    collection_slug,
-                    target,
-                )
-                .await?
+                sqlx::query("DELETE FROM trash WHERE id = ?")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                Ok(Some(restored))
             }
-            (TrashEntryKind::Collection, Some(_)) => {
-                return Err(StoreError::TrashConflict(TrashConflict::InvalidTarget));
-            }
-            (TrashEntryKind::Collection, None) => {
-                restore_collection(
-                    &mut tx,
-                    owner_id,
-                    id,
-                    &entry,
-                    collection_kind,
-                    collection_slug,
-                )
-                .await?
-            }
-        };
-        sqlx::query("DELETE FROM trash WHERE id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        Ok(Some(restored))
+            .await,
+        )
     }
 
     /// Deletes a top-level trash entry of `owner_id` for good: it is hidden
     /// and its bytes are freed at once, the rows are removed by the purge.
     /// Returns `false` if there is no such entry (of this user).
     pub async fn delete_trash_entry(&self, owner_id: i64, public_id: &str) -> Result<bool> {
-        let result = sqlx::query(
-            "UPDATE trash SET purge_pending = 1, deleted_at = 0 \
-             WHERE owner_id = ? AND public_id = ? AND parent_id IS NULL AND purge_pending = 0",
+        self.observe(
+            async {
+                let result = sqlx::query(
+                    "UPDATE trash SET purge_pending = 1, deleted_at = 0 \
+                     WHERE owner_id = ? AND public_id = ? AND parent_id IS NULL AND purge_pending = 0",
+                )
+                .bind(owner_id)
+                .bind(public_id)
+                .execute(&self.writer)
+                .await?;
+                let found = result.rows_affected() == 1;
+                if found {
+                    self.settings.request_purge();
+                }
+                Ok(found)
+            }
+            .await,
         )
-        .bind(owner_id)
-        .bind(public_id)
-        .execute(&self.writer)
-        .await?;
-        let found = result.rows_affected() == 1;
-        if found {
-            self.settings.request_purge();
-        }
-        Ok(found)
     }
 
     /// Deletes all trash entries of `owner_id` for good (like
     /// [`Store::delete_trash_entry`]); returns how many top-level entries
     /// there were.
     pub async fn empty_trash(&self, owner_id: i64) -> Result<u64> {
-        let result = sqlx::query(
-            "UPDATE trash SET purge_pending = 1, deleted_at = 0 \
-             WHERE owner_id = ? AND parent_id IS NULL AND purge_pending = 0",
+        self.observe(
+            async {
+                let result = sqlx::query(
+                    "UPDATE trash SET purge_pending = 1, deleted_at = 0 \
+                     WHERE owner_id = ? AND parent_id IS NULL AND purge_pending = 0",
+                )
+                .bind(owner_id)
+                .execute(&self.writer)
+                .await?;
+                if result.rows_affected() > 0 {
+                    self.settings.request_purge();
+                }
+                Ok(result.rows_affected())
+            }
+            .await,
         )
-        .bind(owner_id)
-        .execute(&self.writer)
-        .await?;
-        if result.rows_affected() > 0 {
-            self.settings.request_purge();
-        }
-        Ok(result.rows_affected())
     }
 
     /// Whether entries were deleted, emptied or evicted since the last call,
@@ -624,41 +649,46 @@ impl Store {
     /// until it returns 0. Objects of a collection entry go first, so that
     /// no single statement deletes more than `limit` rows.
     pub async fn purge_expired_trash(&self, now: i64, limit: u32) -> Result<u64> {
-        let days = i64::from(self.trash_retention_days());
-        let cutoff = if days == 0 {
-            i64::MAX
-        } else {
-            now.saturating_sub(days.saturating_mul(SECONDS_PER_DAY))
-        };
-        // Purge-pending entries have deleted_at = 0, so the cutoff covers them.
-        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-        let children = sqlx::query(
-            "DELETE FROM trash WHERE id IN (SELECT c.id FROM trash c \
-               JOIN trash p ON p.id = c.parent_id \
-               WHERE p.parent_id IS NULL AND p.deleted_at <= ?1 LIMIT ?2)",
+        self.observe(
+            async {
+                let days = i64::from(self.trash_retention_days());
+                let cutoff = if days == 0 {
+                    i64::MAX
+                } else {
+                    now.saturating_sub(days.saturating_mul(SECONDS_PER_DAY))
+                };
+                // Purge-pending entries have deleted_at = 0, so the cutoff covers them.
+                let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                let children = sqlx::query(
+                    "DELETE FROM trash WHERE id IN (SELECT c.id FROM trash c \
+                       JOIN trash p ON p.id = c.parent_id \
+                       WHERE p.parent_id IS NULL AND p.deleted_at <= ?1 LIMIT ?2)",
+                )
+                .bind(cutoff)
+                .bind(limit)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+                let remaining = u64::from(limit).saturating_sub(children);
+                let entries = if remaining > 0 {
+                    sqlx::query(
+                        "DELETE FROM trash WHERE id IN (SELECT t.id FROM trash t \
+                           WHERE t.parent_id IS NULL AND t.deleted_at <= ?1 \
+                             AND NOT EXISTS (SELECT 1 FROM trash c WHERE c.parent_id = t.id) LIMIT ?2)",
+                    )
+                    .bind(cutoff)
+                    .bind(i64::try_from(remaining).unwrap_or(i64::MAX))
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected()
+                } else {
+                    0
+                };
+                tx.commit().await?;
+                Ok(children + entries)
+            }
+            .await,
         )
-        .bind(cutoff)
-        .bind(limit)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-        let remaining = u64::from(limit).saturating_sub(children);
-        let entries = if remaining > 0 {
-            sqlx::query(
-                "DELETE FROM trash WHERE id IN (SELECT t.id FROM trash t \
-                   WHERE t.parent_id IS NULL AND t.deleted_at <= ?1 \
-                     AND NOT EXISTS (SELECT 1 FROM trash c WHERE c.parent_id = t.id) LIMIT ?2)",
-            )
-            .bind(cutoff)
-            .bind(i64::try_from(remaining).unwrap_or(i64::MAX))
-            .execute(&mut *tx)
-            .await?
-            .rows_affected()
-        } else {
-            0
-        };
-        tx.commit().await?;
-        Ok(children + entries)
     }
 }
 

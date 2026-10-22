@@ -142,6 +142,32 @@ jobs:
         if: always()
         run: cat "$RUNNER_TEMP/smoke/server.log" || true
 
+  systemd:
+    name: systemd service
+    # GitHub's Ubuntu runners boot with systemd as PID 1.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Debug build without embedded UI: the service behaviour is the same.
+      - name: Build server
+        run: cargo build -p calcraft-server
+      - name: Install and test the systemd service (contrib/systemd)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo scripts/systemd-test.sh "$PWD/target/debug/calcraft"
+      - name: Service log
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo systemctl status calcraft.service --no-pager --full || true
+          sudo journalctl --unit=calcraft.service --no-pager --output=short-precise || true
+
   fuzz:
     name: fuzz (smoke)
     runs-on: ubuntu-latest

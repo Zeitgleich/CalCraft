@@ -2,7 +2,7 @@
 
 use calcraft_core::api::{ChangePassword, RecoveryCodes, TotpDisable, TotpEnable, TotpSetup};
 use calcraft_ui::{
-    group_secret, text as t,
+    group_secret, sso, text as t,
     validate::{check_new_password, clean_code},
 };
 use leptos::prelude::*;
@@ -33,10 +33,34 @@ pub fn Settings() -> impl IntoView {
                 <dd>{display_name}</dd>
                 <dt>{t::ROLE}</dt>
                 <dd>{role}</dd>
+                <SsoFacts />
             </dl>
         </section>
         <PasswordForm />
         <TwoFactor />
+    }
+}
+
+/// SSO link status as a row of the account facts; nothing if SSO is not
+/// configured on the server.
+#[component]
+fn SsoFacts() -> impl IntoView {
+    let ctx = Ctx::get();
+    move || {
+        ctx.me().and_then(|me| me.sso).map(|link| {
+            let hint = if link.linked {
+                sso::last_login(&link)
+            } else {
+                Some(t::SSO_NOT_LINKED_HINT.to_owned())
+            };
+            view! {
+                <dt>{t::SSO}</dt>
+                <dd>
+                    {sso::link_status(&link)}
+                    {hint.map(|hint| view! { <span class="hint">{hint}</span> })}
+                </dd>
+            }
+        })
     }
 }
 
