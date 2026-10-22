@@ -13,3 +13,9 @@ follow [Semantic Versioning](https://semver.org/). Release process:
   macOS and Windows, `SHA256SUMS`, build provenance attestations and a
   signed multi-arch Docker image on `ghcr.io/zeitgleich/calcraft`; see
   [docs/release-verification.md](docs/release-verification.md).
+
+### Fixed
+
+- Web UI: the action column of the user and app-password tables now lines up
+  with the other cells; on phone widths the header is compact (user and
+  logout next to the name, navigation as a scrollable row below).

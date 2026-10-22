@@ -15,6 +15,17 @@ Self-hosted CalDAV/CardDAV server written in Rust, with an optional web interfac
 
 See [PLAN.md](PLAN.md) for the roadmap.
 
+## Screenshots
+
+The optional web UI, shown with fictional demo data:
+
+| | |
+|---|---|
+| ![Calendars and address books overview](docs/screenshots/collections.png)<br>Calendars and address books with their DAV URLs | ![Overview in dark mode](docs/screenshots/collections-dark.png)<br>Dark mode follows the system setting |
+| ![Login page](docs/screenshots/login.png)<br>Login with username and password | ![Login page with single sign-on button](docs/screenshots/login-sso.png)<br>Login with single sign-on (OpenID Connect) enabled |
+| ![Account settings](docs/screenshots/account.png)<br>Account: password and two-factor authentication | ![App passwords](docs/screenshots/app-passwords.png)<br>One app password per device, revocable individually |
+| ![Administration](docs/screenshots/admin.png)<br>Administration: users and update notice | ![Overview on a phone](docs/screenshots/mobile.png)<br>Phone-width layout |
+
 ## Building
 
 ```sh
