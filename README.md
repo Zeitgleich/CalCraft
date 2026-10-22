@@ -384,7 +384,8 @@ Integration suites of `calcraft-server` (`crates/calcraft-server/tests/`):
 - **API and authentication:** `api.rs`, `oidc.rs` (against a mock IdP).
 - **Limits and robustness:** `limits.rs` (global and per-client request
   limits, login throttling), `stress.rs` (32 parallel writers: no lost
-  updates, no 500; a heavier variant with 64 writers is `#[ignore]`d),
+  updates, no 500; a heavier variant with 64 writers is `#[ignore]`d and
+  runs nightly on Linux),
   `failures.rs` (read-only database, full disk, aborted uploads).
 - **Logs:** `log_secrets.rs` checks that passwords, tokens, TOTP and
   recovery codes, cookies and calendar/contact contents never reach the
@@ -395,9 +396,8 @@ Integration suites of `calcraft-server` (`crates/calcraft-server/tests/`):
 Further checks:
 
 - **Fuzzing** (`fuzz/`, cargo-fuzz): 4 targets (`ical_object`, `dav_xml`,
-  `recurrence`, `import`). CI runs `ical_object`, `dav_xml` and
-  `recurrence` for 60 s each on every change and for 20 min each nightly;
-  `import` is run manually.
+  `recurrence`, `import`). CI runs each of them for 60 s on every change
+  and for 20 min nightly.
 - **CI** on Linux, macOS and Windows: `cargo fmt`, Clippy, all tests with
   all features and DAV-only, wasm build of the web UI, a client
   compatibility run with python-caldav, an upgrade test from every older
