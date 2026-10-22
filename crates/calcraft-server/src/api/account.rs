@@ -15,12 +15,13 @@ use calcraft_core::{
 };
 use calcraft_store::{RECOVERY_CODES, User};
 
-use super::{ApiError, ApiJson, SESSION_TTL, SessionUser, session_cookie};
+use super::{ApiError, ApiJson, Client, SESSION_TTL, SessionUser, session_cookie};
 use crate::{
     app::AppState,
     auth::{
         APP_PASSWORD_PREFIX, AuthOutcome, MAX_PASSWORD_LEN, PasswordError, hash_password_async, now,
     },
+    net::ClientKey,
     secrets::{base32_encode, hash_secret, random_bytes, random_token, totp_uri, totp_verify},
     validate::clean_text,
 };
@@ -74,9 +75,11 @@ async fn second_factor(state: &AppState, user: &User, code: &str) -> Result<bool
 /// sensitive account changes. One reserved attempt covers both factors, so
 /// concurrent requests cannot bypass the lockout; failures of either factor
 /// count, and the counter is only reset after both succeeded. A locked
-/// account looks exactly like wrong credentials.
+/// account, or a client with too many failed logins, looks exactly like
+/// wrong credentials.
 async fn authenticate(
     state: &AppState,
+    client: Option<ClientKey>,
     username: &Username,
     password: &str,
     code: Option<&str>,
@@ -84,9 +87,12 @@ async fn authenticate(
     if password.is_empty() || password.len() > MAX_PASSWORD_LEN {
         return Err(ApiError::InvalidCredentials);
     }
-    let Some(attempt) = state.auth.reserve(username) else {
-        state.auth.locked_out().await;
-        return Err(ApiError::InvalidCredentials);
+    let attempt = match state.auth.reserve(username, client) {
+        Ok(attempt) => attempt,
+        Err(refusal) => {
+            state.auth.refused(refusal).await;
+            return Err(ApiError::InvalidCredentials);
+        }
     };
     let user = match state
         .auth
@@ -102,6 +108,7 @@ async fn authenticate(
             return Err(ApiError::TotpRequired);
         };
         if !second_factor(state, &user, code).await? {
+            state.auth.record_client_failure(attempt.client());
             state.auth.record_failure(username.clone());
             return Err(ApiError::InvalidCredentials);
         }
@@ -133,12 +140,14 @@ fn require_password_login(state: &AppState) -> Result<(), ApiError> {
 
 pub async fn login(
     State(state): State<AppState>,
+    Client(client): Client,
     ApiJson(request): ApiJson<LoginRequest>,
 ) -> Result<Response, ApiError> {
     require_password_login(&state)?;
     let username = parse_username(&request.username)?;
     let user = authenticate(
         &state,
+        client,
         &username,
         &request.password,
         request.code.as_deref(),
@@ -180,6 +189,7 @@ pub async fn me(session: SessionUser) -> Json<Me> {
 
 pub async fn change_password(
     State(state): State<AppState>,
+    Client(client): Client,
     session: SessionUser,
     ApiJson(request): ApiJson<ChangePassword>,
 ) -> Result<Response, ApiError> {
@@ -187,6 +197,7 @@ pub async fn change_password(
     let user = session.user;
     authenticate(
         &state,
+        client,
         &user.username,
         &request.current,
         request.code.as_deref(),
@@ -235,6 +246,7 @@ fn format_recovery_code(code: &str) -> String {
 
 pub async fn totp_enable(
     State(state): State<AppState>,
+    Client(client): Client,
     session: SessionUser,
     ApiJson(request): ApiJson<TotpEnable>,
 ) -> Result<Json<RecoveryCodes>, ApiError> {
@@ -248,12 +260,17 @@ pub async fn totp_enable(
             "two-factor authentication is already enabled",
         ));
     }
+    // A client with too many failed logins cannot guess codes here either.
+    if state.auth.client_blocked(client) {
+        return Err(ApiError::InvalidCredentials);
+    }
     // Proves that the authenticator app was set up correctly.
     let accepted = match totp_verify(&totp.secret, &request.code, now()) {
         Some(step) => state.store.accept_totp_step(user.id, step).await?,
         None => false,
     };
     if !accepted {
+        state.auth.record_client_failure(client);
         state.auth.record_failure(user.username.clone());
         return Err(ApiError::InvalidCredentials);
     }
@@ -267,6 +284,7 @@ pub async fn totp_enable(
 
 pub async fn totp_disable(
     State(state): State<AppState>,
+    Client(client): Client,
     session: SessionUser,
     ApiJson(request): ApiJson<TotpDisable>,
 ) -> Result<StatusCode, ApiError> {
@@ -279,6 +297,7 @@ pub async fn totp_disable(
     }
     authenticate(
         &state,
+        client,
         &user.username,
         &request.password,
         Some(&request.code),

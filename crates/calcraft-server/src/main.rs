@@ -240,7 +240,16 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         calcraft_core::VERSION,
     );
 
-    axum::serve(listener, calcraft_server::router(&config, state))
+    if !config.server.trusted_proxies.is_empty() {
+        tracing::info!(
+            trusted_proxies = ?config.server.trusted_proxies.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "client addresses are taken from X-Forwarded-For of trusted proxies"
+        );
+    }
+    // The peer address is needed for the per-client limits.
+    let app =
+        calcraft_server::router(&config, state).into_make_service_with_connect_info::<SocketAddr>();
+    axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server error")?;
