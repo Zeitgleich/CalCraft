@@ -322,6 +322,7 @@ impl Store {
                 drop(before.content);
 
                 let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                crate::items::ensure_writable(&mut tx, collection_id).await?;
                 let Some(row) = sqlx::query(
                     "SELECT i.etag, c.owner_id FROM items i JOIN collections c ON c.id = i.collection_id \
                      WHERE i.collection_id = ? AND i.name = ?",
@@ -385,6 +386,23 @@ impl Store {
                     return self.delete_collection(collection_id).await;
                 }
                 let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                // A subscription is deleted for good: its objects are a copy of
+                // the feed (subscribing again restores them), and a restored copy
+                // would be an editable calendar without its feed.
+                let read_only = sqlx::query("SELECT read_only FROM collections WHERE id = ?")
+                    .bind(collection_id)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .map(|row| row.try_get::<bool, _>("read_only"))
+                    .transpose()?;
+                if read_only == Some(true) {
+                    sqlx::query("DELETE FROM collections WHERE id = ?")
+                        .bind(collection_id)
+                        .execute(&mut *tx)
+                        .await?;
+                    tx.commit().await?;
+                    return Ok(());
+                }
                 let Some(collection) = sqlx::query(
                     "SELECT owner_id, kind, slug, display_name, description, color, components, \
                             (SELECT COUNT(*) FROM items WHERE collection_id = c.id) AS items, \
@@ -551,7 +569,8 @@ impl Store {
                             None => None,
                             Some(slug) => {
                                 let row = sqlx::query(
-                                    "SELECT id FROM collections WHERE owner_id = ? AND kind = ? AND slug = ?",
+                                    "SELECT id FROM collections \
+                                     WHERE owner_id = ? AND kind = ? AND slug = ? AND read_only = 0",
                                 )
                                 .bind(owner_id)
                                 .bind(collection_kind.as_str())
@@ -725,16 +744,21 @@ async fn restore_item(
     };
     // The reference is kept only while the collection exists; it must
     // still be this user's collection of the same kind.
-    let live =
-        sqlx::query("SELECT slug FROM collections WHERE id = ? AND owner_id = ? AND kind = ?")
-            .bind(collection_id)
-            .bind(owner_id)
-            .bind(collection_kind.as_str())
-            .fetch_optional(&mut **tx)
-            .await?;
+    let live = sqlx::query(
+        "SELECT slug, read_only FROM collections WHERE id = ? AND owner_id = ? AND kind = ?",
+    )
+    .bind(collection_id)
+    .bind(owner_id)
+    .bind(collection_kind.as_str())
+    .fetch_optional(&mut **tx)
+    .await?;
     let Some(live) = live else {
         return Err(StoreError::TrashConflict(TrashConflict::CollectionDeleted));
     };
+    // Subscriptions never take restored objects.
+    if live.try_get::<bool, _>("read_only")? {
+        return Err(StoreError::TrashConflict(TrashConflict::InvalidTarget));
+    }
     let live_slug: String = live.try_get("slug")?;
     let collection_slug = match target {
         Some((_, slug)) => slug,

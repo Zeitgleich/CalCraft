@@ -201,6 +201,45 @@ async fn seed(store: &Store, user: &User, n: &Names) {
     )
     .await;
     put_seed(store, &ab, p, n.card, &vcard("@UID@", &format!("{p}-fn"))).await;
+    // A calendar subscription (read-only calendar fed by the server).
+    let slug: calcraft_core::Slug = format!("{p}-sub").parse().unwrap();
+    let url = format!("https://{p}-feed.example/cal.ics?token={p}-feedtoken");
+    let content = event(&format!("{p}-uid-subevent"), &format!("{p}-summary-sub"));
+    store
+        .create_subscription(
+            &calcraft_store::NewSubscription {
+                owner_id: user.id,
+                slug: &slug,
+                display_name: Some(&format!("{p}-subname")),
+                color: None,
+                components: "VEVENT,VTODO",
+                source_url: &url,
+                refresh_secs: None,
+                max_per_user: 20,
+            },
+            &[calcraft_store::FeedItem {
+                name: format!("{p}-subevent.ics"),
+                uid: format!("{p}-uid-subevent"),
+                component: "VEVENT".to_owned(),
+                range_start: None,
+                range_end: None,
+                recurring: false,
+                index_version: 0,
+                etag: format!("\"{p}-etag-subevent\""),
+                content: content.into_bytes(),
+            }],
+            &calcraft_store::FeedState {
+                feed_ttl_secs: None,
+                http_etag: None,
+                http_last_modified: None,
+                content_hash: "x",
+                skipped: 0,
+                now: now(),
+                next_refresh_at: now() + 3600,
+            },
+        )
+        .await
+        .unwrap();
 }
 
 async fn app_password(store: &Store, user: &User, name: &str) -> (i64, String) {
@@ -237,6 +276,7 @@ async fn snapshot(store: &Store, user: &User, session: &str) -> String {
             }
         }
     }
+    out += &format!("{:?}\n", store.subscriptions(user.id).await.unwrap());
     out += &format!("{:?}\n", store.app_passwords(user.id).await.unwrap());
     out += &format!(
         "{:?}\n",
@@ -338,6 +378,11 @@ async fn fixture() -> Fixture {
         "zqbobmark-fn",
         "zqbobmark-trashed.ics",
         "zqbobmark-summary-trashed",
+        "zqbobmark-sub",
+        "zqbobmark-subname",
+        "zqbobmark-feed.example",
+        "zqbobmark-feedtoken",
+        "zqbobmark-summary-sub",
         "zqbobmark-subject",
         BOB_ISSUER,
         "/principals/bob",
@@ -378,7 +423,22 @@ async fn fixture() -> Fixture {
     config.server.client_rate_burst = u32::MAX;
     config.server.client_rate_per_second = u32::MAX;
     config.server.max_login_failures_per_client = u32::MAX;
-    let app = router(&config, AppState::new(store.clone()).unwrap());
+    #[allow(unused_mut)]
+    let mut state = AppState::new(store.clone()).unwrap();
+    // Subscriptions enabled with the production rules: alice's attempt to
+    // subscribe uses a loopback address and is refused before any request.
+    #[cfg(feature = "subscriptions")]
+    {
+        let subscriptions = calcraft_server::config::SubscriptionsConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        state.subscriptions = Some(calcraft_server::subscriptions::Subscriptions::new(
+            store.clone(),
+            &subscriptions,
+        ));
+    }
+    let app = router(&config, state);
     Fixture {
         app,
         store,
@@ -1630,6 +1690,16 @@ mod api_matrix {
         let bob_app_uri = format!("/api/v1/app-passwords/{bob_app_id}");
         let bob_cal = "/api/v1/collections/calendar/zqbobmark-cal2".to_owned();
         let no_cal = "/api/v1/collections/calendar/zz-missing".to_owned();
+        let bob_sub = "/api/v1/subscriptions/zqbobmark-sub".to_owned();
+        let no_sub = "/api/v1/subscriptions/zz-missing".to_owned();
+        // Without the feature the routes do not exist (404 for everyone).
+        let sub = |method, route, alice| {
+            if cfg!(feature = "subscriptions") {
+                case(method, route, alice)
+            } else {
+                case(method, route, 404).public(404)
+            }
+        };
         vec![
             case("get", "/v1/version", 200).public(200),
             case("get", "/v1/auth/methods", 200).public(200),
@@ -1668,6 +1738,18 @@ mod api_matrix {
                     &super::event("zzattack-import", "zzattack"),
                 ),
             case("delete", "/v1/collections/{kind}/{slug}", 404).uri(bob_cal, no_cal),
+            sub("get", "/v1/subscriptions", 200),
+            // Same slug as bob's subscription; refused as a loopback address.
+            sub("post", "/v1/subscriptions", 400).body(json!({
+                "url": "https://127.0.0.1/zzattack.ics",
+                "slug": "zqbobmark-sub"
+            })),
+            sub("patch", "/v1/subscriptions/{slug}", 404)
+                .uri(bob_sub.clone(), no_sub.clone())
+                .body(json!({"display_name": "zzattack", "refresh_minutes": 15})),
+            sub("post", "/v1/subscriptions/{slug}/refresh", 404)
+                .uri(format!("{bob_sub}/refresh"), format!("{no_sub}/refresh")),
+            sub("delete", "/v1/subscriptions/{slug}", 404).uri(bob_sub, no_sub),
             // Alice sees only her own trash; bob's entry ids are unknown to her.
             case("get", "/v1/trash", 200),
             case("post", "/v1/trash/{id}/restore", 404).uri(

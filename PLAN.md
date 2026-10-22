@@ -165,7 +165,31 @@ vCalendar 1.0 (Import, best effort), Webcal-Abos (eingehend und veröffentlichen
 
 Einschränkungen: CSV-Export enthält nur Termine (Master ohne Wiederholungsregel, lokale Zeiten ohne
 Zeitzone); jCard-Export behält `VERSION:3.0` bei 3.0-Karten; xCal-Export lässt Properties weg, deren Name
-kein gültiger XML-Name ist; Webcal-Abos folgen separat (SSRF-Schutz).
+kein gültiger XML-Name ist.
+
+**Stand M6b** – Webcal-Abos (eingehend, Cargo-Feature `subscriptions`, `[subscriptions] enabled`
+standardmäßig aus): Der Server holt den Feed und legt die Termine als normale Objekte eines
+read-only Kalenders ab (`collections.read_only`, Tabelle `subscriptions`, Migration
+`0009_subscriptions`); jeder CalDAV-Client sieht ihn inkl. sync-collection. Schreibzugriffe per DAV
+(PUT/DELETE/COPY/MOVE hinein, PROPPATCH) → 403 `DAV:need-privileges`, Privilegien nur `read`;
+Store, REST-Import und Papierkorb verweigern Schreibzugriffe ebenfalls; Löschen eines Abos ist
+endgültig (kein Papierkorb). Fetcher (`subscriptions/ssrf.rs`, `fetch.rs`): nur https (webcal →
+https, http nur mit `allow_http`), erlaubte Ports, keine Userinfo, strikte Hostnamen (keine
+numerischen/lokalen Namen, IDN nur als `xn--`), eigene DNS-Auflösung mit Prüfung **aller** Adressen
+(privat, Loopback, Link-Local/Metadaten, CGNAT, Multicast, Doku/Benchmark, außerhalb 2000::/3,
+NAT64, 6to4, Teredo, IPv4-mapped nach IPv4), Verbindung zur geprüften Adresse mit SNI/Host des
+Namens (Pinning), Redirects manuell (max. 3, jeder Hop neu geprüft, nie https → http), eine
+Deadline, Größenlimit, bedingte Requests, fester User-Agent, keine Cookies/Credentials; Logs nur
+mit Host. Refresh: gleicher Parser und gleiche Validierung wie der Import, stabile Namen pro UID,
+nur echte Änderungen bekommen eine neue Revision; kaputter Feed behält den letzten guten Stand
+(Fehler für den Besitzer sichtbar, Back-off). Hintergrund-Task: Intervall 15 min bis 7 Tage
+(Feed-`REFRESH-INTERVAL`/`X-PUBLISHED-TTL` innerhalb der Grenzen, Standard 6 h), Jitter, max. 2
+parallele Abrufe, 20 Abos und 10 Abo-Versuche pro 10 min je Benutzer, „Jetzt aktualisieren“
+höchstens einmal pro Minute. REST `/api/v1/subscriptions` (ROUTES, OpenAPI, Autorisierungsmatrix),
+Web-UI-Abschnitt auf der Übersicht.
+
+Offen: Abos mit eigenen Zugangsdaten (Basic), Veröffentlichen eigener Kalender als webcal-Feed,
+eine Admin-Ausnahmeliste für interne Feed-Server.
 
 ## 6. Web-UI (Leptos)
 
@@ -237,7 +261,7 @@ Der Client-Track startet nach M4 (wenn Web-UI-Komponenten existieren).
 | **M3** ✅ | sync-collection, CardDAV · aus Phase 3 erledigt: Kontaktfotos (`storage.max_vcard_bytes`) und Gruppen (Apple, vCard 4.0), `MOVE`/`COPY` zwischen eigenen Collections, Papierkorb, exakte RRULE-Expansion mit Budgets und eingebetteten VTIMEZONEs (`docs/caldav.md`; `expand` und Zeitzonen-Datenbank offen) |
 | **M4** | **M4a** ✅ REST-API + OpenAPI, Sessions, 2FA (TOTP + Wiederherstellungscodes), App-Passwörter, Admin · **M4b** ✅ Web-UI Stufe 1 · **M4c** 🟡 SSO-Login in der Web-UI ✅, Logo/Favicon/Design-System ✅, Termin- und Kontaktansichten offen |
 | **M5** | **M5a** ✅ OIDC/SSO (Keycloak & Co.) · Freigaben, Gruppen, Erinnerungen (SMTP), Web-UI Stufe 3–4 |
-| **M6** | **M6a** ✅ Import/Export aller Formate (REST + CLI) · Backup/Restore + Pre-Migration-Backups ✅ · **M6b** Webcal mit SSRF-Schutz · Migration aus Radicale/Baïkal |
+| **M6** | **M6a** ✅ Import/Export aller Formate (REST + CLI) · Backup/Restore + Pre-Migration-Backups ✅ · **M6b** ✅ Webcal-Abos (eingehend) mit SSRF-Schutz · Migration aus Radicale/Baïkal |
 | **M7** | Release-Pipeline 🟡 (Sigstore-Attestierung, Provenance, GHCR; Probelauf grün, echter Tag-Lauf offen), Update-Hinweis ✅ · externes Security-Review, Release v1.0 |
 
 ## 10. Weitere Anforderungen

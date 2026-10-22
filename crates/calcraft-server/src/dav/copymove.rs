@@ -20,7 +20,7 @@ use calcraft_core::CollectionKind;
 use calcraft_store::{StoreError, Transfer};
 
 use super::{
-    Ctx, dav_error, method_not_allowed, not_found,
+    Ctx, dav_error, method_not_allowed, need_privileges, not_found,
     objects::{header, ns, precondition},
     paths::{self, DestinationError, Resource, item_href},
     store_error,
@@ -69,6 +69,11 @@ pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request, mode: Mo
         Resource::Unmapped(..) => return not_found(),
         Resource::Root | Resource::Principal | Resource::Home(_) => return method_not_allowed(),
     };
+    // Objects cannot be moved out of a subscription (copies are fine).
+    if mode == Mode::Move && source.read_only {
+        let href = paths::collection_href(&source, &ctx.user.username);
+        return need_privileges(Some(&href), "unbind");
+    }
     let headers = request.headers();
     // Cheap early answer for a missing source; the store checks again.
     let meta = match ctx.state.store.item_meta(source.id, &name).await {
@@ -111,6 +116,10 @@ pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request, mode: Mo
         Ok(None) => return conflict(),
         Err(err) => return store_error(err),
     };
+    if target.read_only {
+        let href = paths::collection_href(&target, &ctx.user.username);
+        return need_privileges(Some(&href), "bind");
+    }
     if target.kind != source.kind {
         let condition = match target.kind {
             CollectionKind::Calendar => "<c:supported-calendar-data/>",

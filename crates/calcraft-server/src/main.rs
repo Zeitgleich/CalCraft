@@ -6,8 +6,8 @@ use std::{net::SocketAddr, path::PathBuf, process::ExitCode};
 
 use anyhow::Context;
 use calcraft_server::{
-    API_COMPILED, AppState, Config, OIDC_COMPILED, UPDATE_CHECK_COMPILED, WEB_UI_COMPILED,
-    sd_notify, telemetry,
+    API_COMPILED, AppState, Config, OIDC_COMPILED, SUBSCRIPTIONS_COMPILED, UPDATE_CHECK_COMPILED,
+    WEB_UI_COMPILED, sd_notify, telemetry,
 };
 use calcraft_store::Store;
 use clap::{Args, Parser, Subcommand};
@@ -219,6 +219,17 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         );
     }
 
+    if config.subscriptions.enabled && !SUBSCRIPTIONS_COMPILED {
+        tracing::warn!(
+            "calendar subscriptions are enabled in the configuration but not compiled into this binary"
+        );
+    }
+    if config.subscriptions.enabled && !config.api.enabled {
+        tracing::warn!(
+            "calendar subscriptions are enabled but the REST API (which manages them) is disabled; not refreshing"
+        );
+    }
+
     if !config.security.password_login && !(OIDC_COMPILED && config.api.enabled) {
         anyhow::bail!(
             "security.password_login = false needs single sign-on, but OIDC is not compiled in or the API is disabled"
@@ -251,6 +262,15 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     if config.updates.check && config.api.enabled {
         state.updates = Some(calcraft_server::updates::spawn(&config.updates));
     }
+    #[cfg(feature = "subscriptions")]
+    if config.subscriptions.enabled && config.api.enabled {
+        let subscriptions = calcraft_server::subscriptions::Subscriptions::new(
+            state.store.clone(),
+            &config.subscriptions,
+        );
+        subscriptions.spawn();
+        state.subscriptions = Some(subscriptions);
+    }
     let listener = TcpListener::bind(config.server.bind)
         .await
         .with_context(|| format!("failed to bind {}", config.server.bind))?;
@@ -261,6 +281,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         api = config.api.enabled && API_COMPILED,
         oidc = config.oidc.enabled && OIDC_COMPILED,
         update_check = config.updates.check && config.api.enabled && UPDATE_CHECK_COMPILED,
+        subscriptions =
+            config.subscriptions.enabled && config.api.enabled && SUBSCRIPTIONS_COMPILED,
         "CalCraft {} listening",
         calcraft_core::VERSION,
     );

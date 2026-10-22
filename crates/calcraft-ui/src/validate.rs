@@ -67,6 +67,24 @@ pub fn check_new_password(password: &str, confirmation: &str) -> Result<(), &'st
     Ok(())
 }
 
+/// Longest feed URL the server accepts.
+pub const MAX_FEED_URL: usize = 2048;
+
+/// Checks a calendar feed URL: `https://`, `webcal://` (or `http://`,
+/// which the server only accepts if its administrator allows it). The
+/// server checks the address itself.
+pub fn check_feed_url(url: &str) -> Result<(), &'static str> {
+    let url = url.trim();
+    let lower = url.to_ascii_lowercase();
+    let scheme = ["https://", "webcal://", "webcals://", "http://"]
+        .iter()
+        .any(|prefix| lower.starts_with(prefix) && lower.len() > prefix.len());
+    if !scheme || url.len() > MAX_FEED_URL || url.chars().any(char::is_whitespace) {
+        return Err(text::ERR_FEED_URL_INVALID);
+    }
+    Ok(())
+}
+
 /// Checks the name of a new app password.
 pub fn check_app_password_name(name: &str) -> Result<(), &'static str> {
     let name = name.trim();

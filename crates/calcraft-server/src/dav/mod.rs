@@ -142,6 +142,20 @@ fn dav_error(status: StatusCode, condition: &str) -> Response {
         .into_response()
 }
 
+/// `403` with `DAV:need-privileges` (RFC 3744 §7.1.1): the resource (a
+/// subscription calendar or one of its objects) is read-only.
+fn need_privileges(href: Option<&str>, privilege: &str) -> Response {
+    let resource = href.map_or_else(String::new, |href| {
+        format!(
+            "<d:resource><d:href>{href}</d:href><d:privilege><d:{privilege}/></d:privilege></d:resource>"
+        )
+    });
+    dav_error(
+        StatusCode::FORBIDDEN,
+        &format!("<d:need-privileges>{resource}</d:need-privileges>"),
+    )
+}
+
 /// Transient overload: clients retry (RFC 9110 §15.6.4, §10.2.3).
 fn service_unavailable() -> Response {
     (StatusCode::SERVICE_UNAVAILABLE, [(RETRY_AFTER, "1")]).into_response()
@@ -157,6 +171,7 @@ fn store_error(err: StoreError) -> Response {
             StatusCode::INSUFFICIENT_STORAGE.into_response()
         }
         StoreError::CollectionExists => method_not_allowed(),
+        StoreError::ReadOnly => need_privileges(None, "write-content"),
         StoreError::Busy => {
             tracing::error!("storage busy: database stayed locked");
             service_unavailable()

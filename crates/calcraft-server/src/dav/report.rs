@@ -136,11 +136,10 @@ async fn object_response(
     with_data: bool,
 ) -> Result<Option<DavResponse>, StoreError> {
     let user = ctx.user;
-    let kind = collection.kind;
     let href = item_href(collection, &user.username, &meta.name);
     let size = usize::try_from(meta.size).unwrap_or(0);
     if !with_data {
-        let available = item_properties(user, kind, &meta.etag, size, None);
+        let available = item_properties(user, collection, &meta.etag, size, None);
         return Ok(Some(respond(&href, &available, props)));
     }
     let Some(item) = ctx.state.store.item(collection.id, &meta.name).await? else {
@@ -159,7 +158,7 @@ fn item_response(
     let href = item_href(collection, &ctx.user.username, &item.name);
     let available = item_properties(
         ctx.user,
-        collection.kind,
+        collection,
         &item.etag,
         item.content.len(),
         Some(&item.content),

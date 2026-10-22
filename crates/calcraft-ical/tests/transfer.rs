@@ -595,3 +595,46 @@ fn many_timezones_are_handled_in_linear_time() {
     );
     assert!(started.elapsed().as_secs() < 20, "{:?}", started.elapsed());
 }
+
+#[test]
+fn feed_refresh_interval_from_the_calendar_header() {
+    let feed = |header: &str| {
+        format!(
+            "\u{feff}BEGIN:VCALENDAR\r\nVERSION:2.0\r\n{header}BEGIN:VEVENT\r\nUID:1\r\n\
+             REFRESH-INTERVAL;VALUE=DURATION:PT1M\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        )
+    };
+    let interval = |header: &str| transfer::feed_refresh_interval(feed(header).as_bytes());
+    assert_eq!(
+        interval(""),
+        None,
+        "properties inside components do not count"
+    );
+    assert_eq!(
+        interval("REFRESH-INTERVAL;VALUE=DURATION:P1D\r\n"),
+        Some(86_400)
+    );
+    assert_eq!(
+        interval("refresh-interval;value=duration:PT12H\r\n"),
+        Some(43_200)
+    );
+    assert_eq!(interval("X-PUBLISHED-TTL:PT1H\r\n"), Some(3_600));
+    assert_eq!(
+        interval("X-PUBLISHED-TTL:PT1H\r\nREFRESH-INTERVAL;VALUE=DURATION:PT2H\r\n"),
+        Some(7_200)
+    );
+    // Folded lines are unfolded.
+    assert_eq!(interval("X-PUBLISHED-TTL:P\r\n 1W\r\n"), Some(604_800));
+    for bad in [
+        "X-PUBLISHED-TTL:soon\r\n",
+        "X-PUBLISHED-TTL:-PT1H\r\n",
+        "X-PUBLISHED-TTL:PT0S\r\n",
+    ] {
+        assert_eq!(interval(bad), None, "{bad}");
+    }
+    assert_eq!(
+        transfer::feed_refresh_interval(b"<html>X-PUBLISHED-TTL:PT1H"),
+        None
+    );
+    assert_eq!(transfer::feed_refresh_interval(b""), None);
+}
