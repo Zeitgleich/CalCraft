@@ -421,6 +421,27 @@ With Docker the unit is not used: the container's restart policy
 (`--restart unless-stopped`) takes its place, and CalCraft ignores systemd
 notifications when `NOTIFY_SOCKET` is not set.
 
+Health checks (for load balancers, Kubernetes probes or monitoring; both are
+exempt from the global concurrency limit, not from the per-client rate limit):
+
+- `GET /healthz` – liveness: `200 ok` while the process serves requests. It
+  does not touch the database; do not restart CalCraft because of a storage
+  problem.
+- `GET /readyz` – readiness: `200 ok` only if the database can be read *and*
+  written. Otherwise `503` with `Retry-After: 5` and one of the bodies
+  `database not writable` (read-only file or file system), `storage full` (a
+  write failed for lack of space and there is still no room) or `database
+  unavailable` (the database cannot be read, or fails otherwise, e.g. with
+  an I/O error). The write check
+  takes the write lock and rolls back; it changes no data and does not grow
+  the database. After a full disk it commits and removes a 64 KiB test value
+  until that succeeds, so the instance becomes ready again by itself once
+  space is freed. If the writer is busy (a burst of writes, waiting longer
+  than 1 s, or another process holding the lock for more than 0.5 s), the
+  check gives no new information and the last known state is reported (ready
+  unless a write failure was recorded). Results are reused for 5 seconds, so
+  frequent probes do not compete with clients for the database.
+
 ## 7. Create the first user
 
 Create an administrator. The password is prompted for (never pass it as an
@@ -810,6 +831,8 @@ while it is off.
 | Symptom | Cause and fix |
 |---|---|
 | `502 Bad Gateway` | CalCraft is not running or listens elsewhere: `systemctl status calcraft`, `curl http://127.0.0.1:5232/readyz`. |
+| `/readyz` answers `503 storage full` | The disk (or file system quota) is full; writes answer `507`. Free space; the instance becomes ready again within seconds, without a restart. |
+| `/readyz` answers `503 database not writable` | The database file, its `-wal`/`-shm` files or the file system are read-only (e.g. remounted read-only after I/O errors, wrong owner). Writes answer `500`, reads keep working. Check `dmesg`, mounts and file ownership. |
 | Client reports wrong password, although it is correct | 2FA is enabled: use an app password. After 5 wrong attempts an account is locked for 15 minutes and refuses even the correct password. |
 | `413 Request Entity Too Large` (Apache over HTTP/2: `502`) on large uploads or imports | Raise `client_max_body_size` (nginx) / `LimitRequestBody` (Apache) to at least `server.max_body_bytes`. |
 | Contacts with large photos do not sync (`403`, `max-resource-size`) | Raise `storage.max_vcard_bytes` (default 2 MiB or `server.max_body_bytes` if smaller; at most 10 MiB and `server.max_body_bytes`). |

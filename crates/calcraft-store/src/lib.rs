@@ -22,6 +22,7 @@ use sqlx::{
 
 mod accounts;
 mod backup;
+mod health;
 mod items;
 mod oidc;
 mod test_hooks;
@@ -34,6 +35,7 @@ pub use backup::{
     BackupInfo, DEFAULT_ACQUIRE_TIMEOUT, RestoreInfo, StoreOptions, backup_database,
     latest_migration, pre_migration_backups, restore_database,
 };
+pub use health::{PROBE_ACQUIRE_TIMEOUT, PROBE_BUSY_TIMEOUT, Readiness};
 pub use items::{
     Change, Item, ItemIndex, ItemMeta, NewItem, Precondition, PutOutcome, QueryCandidate,
     StaleIndex, Transfer, TransferOutcome,
@@ -229,6 +231,8 @@ pub struct Store {
     simulation: test_hooks::Simulation,
     /// Runtime settings shared by all clones.
     pub(crate) settings: Arc<Settings>,
+    /// Recorded write failures, for [`Store::readiness`].
+    pub(crate) health: Arc<health::WriteHealth>,
 }
 
 /// Settings of a [`Store`] that are not part of the schema.
@@ -310,6 +314,7 @@ impl Store {
             path: None,
             simulation,
             settings: Settings::new(DEFAULT_TRASH_RETENTION_DAYS),
+            health: Arc::default(),
         })
     }
 
@@ -345,7 +350,8 @@ impl Store {
         self.settings.max_evict_rows.store(rows, Ordering::Relaxed);
     }
 
-    /// Checks that the database is reachable.
+    /// Checks that the database is reachable (reads only; see
+    /// [`Store::readiness`] for writes).
     pub async fn ping(&self) -> Result<()> {
         sqlx::query("SELECT 1").execute(&self.pool).await?;
         Ok(())
@@ -391,49 +397,54 @@ impl Store {
         display_name: Option<&str>,
         is_admin: bool,
     ) -> Result<User> {
-        // Write transactions start IMMEDIATE (see `put_item`): a deferred one that
-        // reads first fails with SQLITE_BUSY instead of waiting when another
-        // writer commits in between.
-        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-        let result = sqlx::query(
-            "INSERT INTO users (username, password_hash, display_name, is_admin) VALUES (?, ?, ?, ?) RETURNING id",
-        )
-        .bind(username.as_str())
-        .bind(password_hash)
-        .bind(display_name)
-        .bind(is_admin)
-        .fetch_one(&mut *tx)
-        .await;
-        let id: i64 = match result {
-            Ok(row) => row.try_get("id")?,
-            Err(sqlx::Error::Database(err)) if err.is_unique_violation() => {
-                return Err(StoreError::UserExists(username.clone()));
+        self.observe(
+            async {
+                // Write transactions start IMMEDIATE (see `put_item`): a deferred one that
+                // reads first fails with SQLITE_BUSY instead of waiting when another
+                // writer commits in between.
+                let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                let result = sqlx::query(
+                    "INSERT INTO users (username, password_hash, display_name, is_admin) VALUES (?, ?, ?, ?) RETURNING id",
+                )
+                .bind(username.as_str())
+                .bind(password_hash)
+                .bind(display_name)
+                .bind(is_admin)
+                .fetch_one(&mut *tx)
+                .await;
+                let id: i64 = match result {
+                    Ok(row) => row.try_get("id")?,
+                    Err(sqlx::Error::Database(err)) if err.is_unique_violation() => {
+                        return Err(StoreError::UserExists(username.clone()));
+                    }
+                    Err(err) => return Err(err.into()),
+                };
+                for (kind, name) in [
+                    (CollectionKind::Calendar, "Calendar"),
+                    (CollectionKind::Addressbook, "Contacts"),
+                ] {
+                    sqlx::query(
+                        "INSERT INTO collections (owner_id, kind, slug, display_name, token_salt) VALUES (?, ?, ?, ?, abs(random()))",
+                    )
+                    .bind(id)
+                    .bind(kind.as_str())
+                    .bind(DEFAULT_COLLECTION_SLUG)
+                    .bind(name)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                tx.commit().await?;
+                Ok(User {
+                    id,
+                    username: username.clone(),
+                    display_name: display_name.map(str::to_owned),
+                    disabled: false,
+                    is_admin,
+                    totp_enabled: false,
+                })
             }
-            Err(err) => return Err(err.into()),
-        };
-        for (kind, name) in [
-            (CollectionKind::Calendar, "Calendar"),
-            (CollectionKind::Addressbook, "Contacts"),
-        ] {
-            sqlx::query(
-                "INSERT INTO collections (owner_id, kind, slug, display_name, token_salt) VALUES (?, ?, ?, ?, abs(random()))",
-            )
-            .bind(id)
-            .bind(kind.as_str())
-            .bind(DEFAULT_COLLECTION_SLUG)
-            .bind(name)
-            .execute(&mut *tx)
-            .await?;
-        }
-        tx.commit().await?;
-        Ok(User {
-            id,
-            username: username.clone(),
-            display_name: display_name.map(str::to_owned),
-            disabled: false,
-            is_admin,
-            totp_enabled: false,
-        })
+            .await,
+        )
     }
 
     /// Looks up a user including the password hash.
@@ -467,22 +478,32 @@ impl Store {
         username: &Username,
         password_hash: &str,
     ) -> Result<bool> {
-        let result = sqlx::query("UPDATE users SET password_hash = ? WHERE username = ?")
-            .bind(password_hash)
-            .bind(username.as_str())
-            .execute(&self.writer)
-            .await?;
-        Ok(result.rows_affected() == 1)
+        self.observe(
+            async {
+                let result = sqlx::query("UPDATE users SET password_hash = ? WHERE username = ?")
+                    .bind(password_hash)
+                    .bind(username.as_str())
+                    .execute(&self.writer)
+                    .await?;
+                Ok(result.rows_affected() == 1)
+            }
+            .await,
+        )
     }
 
     /// Enables or disables a user. Returns `false` if the user does not exist.
     pub async fn set_disabled(&self, username: &Username, disabled: bool) -> Result<bool> {
-        let result = sqlx::query("UPDATE users SET disabled = ? WHERE username = ?")
-            .bind(disabled)
-            .bind(username.as_str())
-            .execute(&self.writer)
-            .await?;
-        Ok(result.rows_affected() == 1)
+        self.observe(
+            async {
+                let result = sqlx::query("UPDATE users SET disabled = ? WHERE username = ?")
+                    .bind(disabled)
+                    .bind(username.as_str())
+                    .execute(&self.writer)
+                    .await?;
+                Ok(result.rows_affected() == 1)
+            }
+            .await,
+        )
     }
 
     /// All collections of one kind owned by a user.
