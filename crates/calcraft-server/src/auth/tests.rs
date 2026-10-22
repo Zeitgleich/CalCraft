@@ -40,7 +40,7 @@ async fn clients_are_blocked_after_repeated_failures() {
     ));
     // A success elsewhere does not reset the client's counter.
     assert!(matches!(
-        auth.reserve(&"alice".parse().unwrap(), client(1)),
+        auth.reserve(&"alice".parse().unwrap(), client(1)).await,
         Err(Refusal::Client)
     ));
     assert!(auth.client_blocked(client(1)));
@@ -206,5 +206,345 @@ async fn disabled_users_are_denied() {
     assert!(matches!(
         auth.authenticate_test(Some(good.as_bytes())).await,
         AuthOutcome::Denied
+    ));
+}
+
+impl Authenticator {
+    /// Takes a slot without waiting, for tests.
+    fn try_reserve_now(&self, username: &Username) -> Attempt<'_> {
+        let mut failures = self.failures.lock().unwrap();
+        assert!(matches!(
+            try_reserve(&mut failures, username, false),
+            Reservation::Reserved
+        ));
+        Attempt::new(self, username, None)
+    }
+
+    fn waiting(&self, username: &Username) -> u32 {
+        let failures = self.failures.lock().unwrap();
+        failures.get(username).map_or(0, |entry| entry.waiting)
+    }
+}
+
+/// Runs `n` authentications of `header` at once.
+async fn parallel(auth: &Arc<Authenticator>, header: &str, n: u32) -> Vec<AuthOutcome> {
+    let handles: Vec<_> = (0..n)
+        .map(|_| {
+            let (auth, header) = (auth.clone(), header.to_owned());
+            tokio::spawn(async move { auth.authenticate_test(Some(header.as_bytes())).await })
+        })
+        .collect();
+    let mut outcomes = Vec::new();
+    for handle in handles {
+        outcomes.push(handle.await.unwrap());
+    }
+    outcomes
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn many_parallel_requests_with_valid_credentials_are_not_locked_out() {
+    let auth = setup().await;
+    let header = basic("alice", "correct horse battery");
+    // Not yet cached: more than the attempt limit, some of them wait.
+    for outcome in parallel(&auth, &header, MAX_FAILURES + 2).await {
+        assert!(
+            matches!(outcome, AuthOutcome::Authenticated(_)),
+            "{outcome:?}"
+        );
+    }
+    // Cached: verified without taking an attempt slot.
+    for outcome in parallel(&auth, &header, 8 * MAX_FAILURES).await {
+        assert!(
+            matches!(outcome, AuthOutcome::Authenticated(_)),
+            "{outcome:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn waiting_for_an_attempt_slot_is_capped_and_bounded() {
+    let auth = setup().await;
+    // Known and unknown names are limited alike.
+    for name in ["alice", "nobody"] {
+        let username: Username = name.parse().unwrap();
+        let held: Vec<_> = (0..MAX_FAILURES)
+            .map(|_| auth.try_reserve_now(&username))
+            .collect();
+        let waiters: Vec<_> = (0..MAX_WAITERS)
+            .map(|_| {
+                let (auth, username) = (auth.clone(), username.clone());
+                tokio::spawn(async move { auth.reserve(&username, None).await.is_ok() })
+            })
+            .collect();
+        while auth.waiting(&username) < MAX_WAITERS {
+            tokio::task::yield_now().await;
+        }
+        // Queue full: denied at once.
+        let start = Instant::now();
+        assert!(auth.reserve(&username, None).await.is_err());
+        assert!(start.elapsed() < Duration::from_secs(1));
+        if name == "alice" {
+            // One slot freed: the waiters get it one after another.
+            drop(held);
+            for waiter in waiters {
+                assert!(waiter.await.unwrap());
+            }
+        } else {
+            // No slot freed: every waiter gives up after MAX_WAIT.
+            for waiter in waiters {
+                assert!(!waiter.await.unwrap());
+            }
+            assert!(start.elapsed() >= MAX_WAIT - Duration::from_millis(100));
+            drop(held);
+        }
+        assert!(auth.reserve(&username, None).await.is_ok());
+        assert_eq!(auth.waiting(&username), 0);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_requests_keep_their_hash_permit_until_hashing_ends() {
+    let auth = setup().await;
+    let tasks: Vec<_> = (0..MAX_CONCURRENT_HASHES)
+        .map(|i| {
+            let auth = auth.clone();
+            let header = basic(&format!("ghost{i}"), "some wrong password");
+            tokio::spawn(async move { auth.authenticate_test(Some(header.as_bytes())).await })
+        })
+        .collect();
+    while auth.hashing.available_permits() > 0 {
+        tokio::task::yield_now().await;
+    }
+    // Client disconnects or timeouts drop the request futures ...
+    for task in &tasks {
+        task.abort();
+    }
+    for task in tasks {
+        assert!(task.await.unwrap_err().is_cancelled());
+    }
+    // ... but the Argon2 runs go on and keep the bound.
+    assert_eq!(auth.hashing.available_permits(), 0);
+    while auth.hashing.available_permits() < MAX_CONCURRENT_HASHES {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn blocked_clients_are_refused_before_waiting_and_waiters_still_count() {
+    let auth = setup().await;
+    auth.set_client_failure_limit(2, 100);
+    let username: Username = "alice".parse().unwrap();
+    let held: Vec<_> = (0..MAX_FAILURES)
+        .map(|_| auth.try_reserve_now(&username))
+        .collect();
+    // A wrong password that had to wait for a slot still counts for its client.
+    let wrong = basic("alice", "wrong password!!");
+    let waiting = {
+        let (auth, wrong) = (auth.clone(), wrong.clone());
+        tokio::spawn(async move { auth.authenticate(Some(wrong.as_bytes()), client(7)).await })
+    };
+    while auth.waiting(&username) == 0 {
+        tokio::task::yield_now().await;
+    }
+    drop(held);
+    assert!(matches!(waiting.await.unwrap(), AuthOutcome::Denied));
+    assert!(matches!(
+        auth.authenticate(Some(wrong.as_bytes()), client(7)).await,
+        AuthOutcome::Denied
+    ));
+    assert!(auth.client_blocked(client(7)));
+    // Blocked: refused at once even while an account is busy, without
+    // waiting or taking a slot.
+    let busy: Username = "bob".parse().unwrap();
+    let held: Vec<_> = (0..MAX_FAILURES)
+        .map(|_| auth.try_reserve_now(&busy))
+        .collect();
+    let start = Instant::now();
+    assert!(matches!(
+        auth.reserve(&busy, client(7)).await,
+        Err(Refusal::Client)
+    ));
+    assert_eq!(auth.waiting(&busy), 0);
+    let good = basic("alice", "correct horse battery");
+    assert!(matches!(
+        auth.authenticate(Some(good.as_bytes()), client(7)).await,
+        AuthOutcome::LockedOut
+    ));
+    assert!(start.elapsed() < Duration::from_secs(1));
+    assert_eq!(auth.waiting(&username), 0);
+    drop(held);
+}
+
+/// Starts a verification of `header` and cancels it while Argon2 runs, like
+/// a client that hangs up or a request timeout.
+async fn cancel_while_hashing(auth: &Arc<Authenticator>, header: &str, client: Option<ClientKey>) {
+    while auth.hashing.available_permits() < MAX_CONCURRENT_HASHES {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let task = {
+        let (auth, header) = (auth.clone(), header.to_owned());
+        tokio::spawn(async move { auth.authenticate(Some(header.as_bytes()), client).await })
+    };
+    while auth.hashing.available_permits() == MAX_CONCURRENT_HASHES {
+        tokio::task::yield_now().await;
+    }
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_verifications_still_count_as_failures() {
+    let auth = setup().await;
+    let wrong = basic("alice", "wrong password!!");
+    for _ in 0..MAX_FAILURES {
+        cancel_while_hashing(&auth, &wrong, None).await;
+    }
+    // Hanging up early did not get around the account lockout.
+    let good = basic("alice", "correct horse battery");
+    assert!(matches!(
+        auth.authenticate_test(Some(good.as_bytes())).await,
+        AuthOutcome::LockedOut
+    ));
+
+    // Nor around the client block, also for unknown names (which never
+    // get an account entry).
+    let auth = setup().await;
+    auth.set_client_failure_limit(3, 100);
+    for name in ["ghost1", "ghost2", "ghost3"] {
+        cancel_while_hashing(&auth, &basic(name, "whatever password"), client(5)).await;
+    }
+    assert!(auth.client_blocked(client(5)));
+    assert_eq!(auth.failures.lock().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn requests_for_a_locked_account_count_for_the_client() {
+    let auth = setup().await;
+    auth.set_client_failure_limit(2, 100);
+    let alice: Username = "alice".parse().unwrap();
+    for _ in 0..MAX_FAILURES {
+        auth.record_failure(alice.clone());
+    }
+    assert!(matches!(
+        auth.reserve(&alice, client(8)).await,
+        Err(Refusal::Account)
+    ));
+    // The second one blocks the client: from now on no dummy hash is spent.
+    assert!(matches!(
+        auth.reserve(&alice, client(8)).await,
+        Err(Refusal::Client)
+    ));
+    assert!(auth.client_blocked(client(8)));
+}
+
+#[tokio::test]
+async fn names_only_in_flight_leave_no_entries() {
+    let auth = setup().await;
+    for i in 0..MAX_TRACKED + 10 {
+        let name: Username = format!("ghost{i}").parse().unwrap();
+        let attempt = auth.reserve(&name, None).await.unwrap();
+        if i % 2 == 0 {
+            attempt.fail();
+        }
+    }
+    assert_eq!(auth.failures.lock().unwrap().len(), 0);
+    assert!(auth.reserve(&"fresh".parse().unwrap(), None).await.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_freed_slot_wakes_a_waiter() {
+    let auth = setup().await;
+    let username: Username = "alice".parse().unwrap();
+    let mut held: Vec<_> = (0..MAX_FAILURES)
+        .map(|_| auth.try_reserve_now(&username))
+        .collect();
+    let (acquired, mut slots) = tokio::sync::mpsc::channel(8);
+    let done = Arc::new(Semaphore::new(0));
+    for _ in 0..3 {
+        let (auth, username, acquired, done) = (
+            auth.clone(),
+            username.clone(),
+            acquired.clone(),
+            done.clone(),
+        );
+        tokio::spawn(async move {
+            let attempt = auth.reserve(&username, None).await.unwrap();
+            acquired.send(()).await.unwrap();
+            let _ = done.acquire().await;
+            drop(attempt);
+        });
+    }
+    while auth.waiting(&username) < 3 {
+        tokio::task::yield_now().await;
+    }
+    // Two slots freed at once: two waiters get one each, the third waits.
+    held.truncate(MAX_FAILURES as usize - 2);
+    for _ in 0..2 {
+        tokio::time::timeout(Duration::from_secs(1), slots.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), slots.recv())
+            .await
+            .is_err()
+    );
+    assert_eq!(auth.waiting(&username), 1);
+    done.add_permits(3);
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(1), slots.recv())
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_while_waiting_for_a_hash_permit_counts_for_nothing() {
+    let auth = setup().await;
+    auth.set_client_failure_limit(1, 100);
+    let alice: Username = "alice".parse().unwrap();
+    // Others keep all hash permits busy.
+    let busy = auth
+        .hashing
+        .clone()
+        .acquire_many_owned(u32::try_from(MAX_CONCURRENT_HASHES).unwrap())
+        .await
+        .unwrap();
+    let wrong = basic("alice", "wrong password!!");
+    for _ in 0..MAX_FAILURES + 1 {
+        let task = {
+            let (auth, wrong) = (auth.clone(), wrong.clone());
+            tokio::spawn(async move { auth.authenticate(Some(wrong.as_bytes()), client(3)).await })
+        };
+        // The request has its slot and waits for a permit; then it times
+        // out. (Bounded: a refused request finishes without taking a slot.)
+        let start = Instant::now();
+        while !task.is_finished()
+            && start.elapsed() < Duration::from_secs(5)
+            && auth
+                .failures
+                .lock()
+                .unwrap()
+                .get(&alice)
+                .is_none_or(|entry| entry.in_flight == 0)
+        {
+            tokio::task::yield_now().await;
+        }
+        // Past the user lookup, now queued for a permit.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!task.is_finished(), "the request was refused");
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+    }
+    // No password was compared: neither the account nor the client counts it.
+    assert!(!auth.is_locked(&alice));
+    assert!(auth.failures.lock().unwrap().get(&alice).is_none());
+    assert!(!auth.client_blocked(client(3)));
+    drop(busy);
+    let good = basic("alice", "correct horse battery");
+    assert!(matches!(
+        auth.authenticate(Some(good.as_bytes()), client(3)).await,
+        AuthOutcome::Authenticated(_)
     ));
 }

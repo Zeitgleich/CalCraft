@@ -121,7 +121,10 @@ impl Store {
         color: Option<&str>,
         components: &str,
     ) -> Result<Collection> {
-        let mut tx = self.pool.begin().await?;
+        // Write transactions start IMMEDIATE (see `put_item`): a deferred one that
+        // reads first fails with SQLITE_BUSY instead of waiting when another
+        // writer commits in between.
+        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
         let count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM collections WHERE owner_id = ?")
             .bind(owner_id)
             .fetch_one(&mut *tx)
@@ -160,7 +163,7 @@ impl Store {
     pub async fn delete_collection(&self, collection_id: i64) -> Result<()> {
         sqlx::query("DELETE FROM collections WHERE id = ?")
             .bind(collection_id)
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok(())
     }
@@ -174,7 +177,10 @@ impl Store {
         description: Option<Option<&str>>,
         color: Option<Option<&str>>,
     ) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        // Write transactions start IMMEDIATE (see `put_item`): a deferred one that
+        // reads first fails with SQLITE_BUSY instead of waiting when another
+        // writer commits in between.
+        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
         // Column names are fixed literals; values are always bound.
         for (column, value) in [
             ("display_name", display_name),
@@ -311,7 +317,7 @@ impl Store {
     ) -> Result<PutOutcome> {
         // IMMEDIATE takes the write lock up front, so the checks below and
         // the write are atomic and concurrent writers wait instead of failing.
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
         let existing: Option<String> =
             sqlx::query("SELECT etag FROM items WHERE collection_id = ? AND name = ?")
                 .bind(collection_id)
@@ -406,7 +412,7 @@ impl Store {
         name: &str,
         precondition: &Precondition,
     ) -> Result<bool> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
         let existing: Option<String> =
             sqlx::query("SELECT etag FROM items WHERE collection_id = ? AND name = ?")
                 .bind(collection_id)

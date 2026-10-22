@@ -13,13 +13,14 @@ use calcraft_core::{
         RecoveryCodes, TotpDisable, TotpEnable, TotpSetup,
     },
 };
-use calcraft_store::{RECOVERY_CODES, User};
+use calcraft_store::{RECOVERY_CODES, TotpEnableOutcome, User};
 
 use super::{ApiError, ApiJson, Client, SESSION_TTL, SessionUser, session_cookie};
 use crate::{
     app::AppState,
     auth::{
-        APP_PASSWORD_PREFIX, AuthOutcome, MAX_PASSWORD_LEN, PasswordError, hash_password_async, now,
+        APP_PASSWORD_PREFIX, Attempt, AuthOutcome, MAX_PASSWORD_LEN, PasswordError,
+        hash_password_async, now,
     },
     net::ClientKey,
     secrets::{base32_encode, hash_secret, random_bytes, random_token, totp_uri, totp_verify},
@@ -54,10 +55,17 @@ fn normalize_recovery_code(code: &str) -> String {
 }
 
 /// Checks a TOTP code (with replay protection) or consumes a recovery code.
-async fn second_factor(state: &AppState, user: &User, code: &str) -> Result<bool, ApiError> {
+/// Arms `attempt` once the code is compared (see [`Attempt::arm`]).
+async fn second_factor(
+    state: &AppState,
+    attempt: &Attempt<'_>,
+    user: &User,
+    code: &str,
+) -> Result<bool, ApiError> {
     let Some(totp) = state.store.totp_state(user.id).await? else {
         return Ok(false);
     };
+    attempt.arm();
     if let Some(step) = totp_verify(&totp.secret, code, now()) {
         return Ok(state.store.accept_totp_step(user.id, step).await?);
     }
@@ -87,7 +95,7 @@ async fn authenticate(
     if password.is_empty() || password.len() > MAX_PASSWORD_LEN {
         return Err(ApiError::InvalidCredentials);
     }
-    let attempt = match state.auth.reserve(username, client) {
+    let attempt = match state.auth.reserve(username, client).await {
         Ok(attempt) => attempt,
         Err(refusal) => {
             state.auth.refused(refusal).await;
@@ -102,19 +110,32 @@ async fn authenticate(
         AuthOutcome::Authenticated(user) => user,
         AuthOutcome::Denied | AuthOutcome::LockedOut => return Err(ApiError::InvalidCredentials),
         AuthOutcome::Error => return Err(ApiError::Internal),
+        AuthOutcome::Busy => return Err(ApiError::Unavailable),
     };
+    // The password was right: loading the second factor must not count as
+    // a failure if the request is cancelled; comparing it does.
+    attempt.disarm();
     if user.totp_enabled {
         let Some(code) = code else {
+            attempt.settle();
             return Err(ApiError::TotpRequired);
         };
-        if !second_factor(state, &user, code).await? {
-            state.auth.record_client_failure(attempt.client());
-            state.auth.record_failure(username.clone());
-            return Err(ApiError::InvalidCredentials);
+        // A request cancelled while the code is checked counts as a failure
+        // (the attempt is dropped unsettled and armed).
+        match second_factor(state, &attempt, &user, code).await {
+            Ok(true) => {}
+            Ok(false) => {
+                attempt.fail();
+                return Err(ApiError::InvalidCredentials);
+            }
+            Err(err) => {
+                attempt.settle();
+                return Err(err);
+            }
         }
     }
     state.auth.clear_failures(username);
-    drop(attempt);
+    attempt.settle();
     Ok(user)
 }
 
@@ -260,23 +281,53 @@ pub async fn totp_enable(
             "two-factor authentication is already enabled",
         ));
     }
-    // A client with too many failed logins cannot guess codes here either.
-    if state.auth.client_blocked(client) {
-        return Err(ApiError::InvalidCredentials);
-    }
-    // Proves that the authenticator app was set up correctly.
-    let accepted = match totp_verify(&totp.secret, &request.code, now()) {
-        Some(step) => state.store.accept_totp_step(user.id, step).await?,
-        None => false,
+    // Code guesses take a login attempt like any other: client block,
+    // account lockout and the concurrency bound apply.
+    let attempt = match state.auth.reserve(&user.username, client).await {
+        Ok(attempt) => attempt,
+        Err(refusal) => {
+            state.auth.refused(refusal).await;
+            return Err(ApiError::InvalidCredentials);
+        }
     };
-    if !accepted {
-        state.auth.record_client_failure(client);
-        state.auth.record_failure(user.username.clone());
+    attempt.mark_known();
+    attempt.arm();
+    // Proves that the authenticator app was set up correctly.
+    let Some(step) = totp_verify(&totp.secret, &request.code, now()) else {
+        attempt.fail();
         return Err(ApiError::InvalidCredentials);
-    }
+    };
     let codes: Vec<String> = (0..RECOVERY_CODES).map(|_| random_token::<10>()).collect();
     let hashes: Vec<String> = codes.iter().map(|code| hash_secret(code)).collect();
-    state.store.enable_totp(user.id, &hashes).await?;
+    // Accepting the step and enabling is one transaction, so of a double
+    // submit exactly one request enables and the other sees it enabled.
+    let outcome = state
+        .store
+        .enable_totp_with_step(user.id, &totp.secret, step, &hashes)
+        .await;
+    match outcome {
+        Ok(TotpEnableOutcome::Enabled) => attempt.settle(),
+        // A valid code: not a guess.
+        Ok(TotpEnableOutcome::AlreadyEnabled) => {
+            attempt.settle();
+            return Err(ApiError::Conflict(
+                "two-factor authentication is already enabled",
+            ));
+        }
+        Ok(TotpEnableOutcome::NotSetUp) => {
+            attempt.settle();
+            return Err(ApiError::BadRequest("call totp/setup first"));
+        }
+        Ok(TotpEnableOutcome::StepUsed) => {
+            attempt.fail();
+            return Err(ApiError::InvalidCredentials);
+        }
+        Err(err) => {
+            attempt.settle();
+            return Err(err.into());
+        }
+    }
+    drop(attempt);
     Ok(Json(RecoveryCodes {
         codes: codes.iter().map(|c| format_recovery_code(c)).collect(),
     }))

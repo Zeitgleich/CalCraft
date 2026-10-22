@@ -36,3 +36,28 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 - Web UI: the action column of the user and app-password tables now lines up
   with the other cells; on phone widths the header is compact (user and
   logout next to the name, navigation as a scrollable row below).
+- More than five parallel DAV requests of one account with correct
+  credentials no longer get 401: app passwords and cached passwords need no
+  login attempt slot, and other requests wait (at most 8 per account name,
+  5 s) for running attempts instead of counting as a lockout.
+- Login attempts cancelled while credentials are compared (client hangs
+  up, request timeout) count as failures; cancelled while still waiting
+  for a hash permit or the database, they count for nothing, so others
+  cannot lock an account by keeping the server busy. Waiting for a database
+  connection ends after at most 10 s (half the request timeout if that is
+  shorter) with 503 and `Retry-After` instead of the 408 request timeout;
+  waits for a login slot or a password-hash permit are still bounded by the
+  request timeout (408).
+- Cancelled requests keep their Argon2 permit until hashing ends, so no
+  more than four password hashes run at once.
+- Creating or renaming collections, creating users and OIDC link approvals
+  no longer fail with 500 (`SQLITE_BUSY`) under concurrent writes: all write
+  transactions start with `BEGIN IMMEDIATE`.
+- Under many concurrent writes (seen on Windows CI) a write could wait
+  longer than the 5 s busy timeout and fail with 500: SQLite's busy handler
+  polls and is not fair. All writes now queue in order for a single writer
+  connection; a database that stays locked anyway answers 503 with
+  `Retry-After` instead of 500, and storage errors log the SQLite code.
+- A full disk answers 507 Insufficient Storage instead of 500, and pooled
+  database connections whose transaction SQLite rolled back by itself (disk
+  full, I/O error) are closed instead of failing every later write.

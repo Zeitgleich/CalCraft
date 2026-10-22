@@ -40,13 +40,22 @@ pub struct StoreOptions {
     pub pre_migration_backup: bool,
     /// Number of pre-migration backups to keep (at least 1).
     pub pre_migration_backups_keep: usize,
+    /// How long a query waits for a pooled connection (in particular the
+    /// single write connection) before failing with [`StoreError::Busy`].
+    /// Keep it below the request timeout, so that overload is answered
+    /// with 503 and `Retry-After` instead of a request timeout.
+    pub acquire_timeout: Duration,
 }
+
+/// Default of [`StoreOptions::acquire_timeout`].
+pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl Default for StoreOptions {
     fn default() -> Self {
         Self {
             pre_migration_backup: true,
             pre_migration_backups_keep: 3,
+            acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
         }
     }
 }
@@ -236,9 +245,31 @@ fn connect_options(path: &Path) -> SqliteConnectOptions {
         .busy_timeout(Duration::from_secs(5))
 }
 
-async fn connect_pool(path: &Path, max_connections: u32) -> Result<SqlitePool> {
-    Ok(sqlx::sqlite::SqlitePoolOptions::new()
+async fn connect_pool(
+    path: &Path,
+    max_connections: u32,
+    acquire_timeout: Duration,
+    simulation: &crate::test_hooks::Simulation,
+) -> Result<SqlitePool> {
+    let options = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(max_connections)
+        .acquire_timeout(acquire_timeout);
+    Ok(simulation
+        .hook(options)
+        // On SQLITE_FULL or an I/O error SQLite may roll a transaction back
+        // by itself. sqlx's ROLLBACK on drop then fails and the connection
+        // stays marked as inside a transaction, so every later `BEGIN` on it
+        // fails. Such connections are closed instead of reused. Normally the
+        // rollback on drop is merely still queued: the ping waits for it.
+        .after_release(|conn, _| {
+            Box::pin(async move {
+                if !conn.is_in_transaction() {
+                    return Ok(true);
+                }
+                conn.ping().await?;
+                Ok(!conn.is_in_transaction())
+            })
+        })
         .connect_with(connect_options(path).create_if_missing(true))
         .await?)
 }
@@ -286,6 +317,7 @@ impl Store {
             crate::create_private(&file)?;
         }
         let lock = Arc::new(DbLock::open(path)?);
+        let simulation = crate::test_hooks::Simulation::default();
         // Normally one round; a second one after migrating. More rounds only
         // happen if other processes keep restoring or migrating concurrently.
         for _ in 0..4 {
@@ -296,7 +328,7 @@ impl Store {
                     lock.path.display()
                 )));
             }
-            let pool = connect_pool(path, 8).await?;
+            let pool = connect_pool(path, 8, options.acquire_timeout, &simulation).await?;
             let pending = match check_database(&pool, path).await {
                 Ok(pending) => pending,
                 Err(err) => {
@@ -310,10 +342,21 @@ impl Store {
                 for file in database_files(path) {
                     restrict_permissions(&file)?;
                 }
+                let writer = match connect_pool(path, 1, options.acquire_timeout, &simulation).await
+                {
+                    Ok(writer) => writer,
+                    Err(err) => {
+                        pool.close().await;
+                        lock.release()?;
+                        return Err(err);
+                    }
+                };
                 return Ok(Self {
                     pool,
+                    writer,
                     lock: Some(lock),
                     path: Some(Arc::new(path.to_path_buf())),
+                    simulation,
                 });
             }
             pool.close().await;
@@ -326,11 +369,13 @@ impl Store {
                     path.display()
                 )));
             }
-            let pool = connect_pool(path, 1).await?;
+            let pool = connect_pool(path, 1, options.acquire_timeout, &simulation).await?;
             let store = Self {
+                writer: pool.clone(),
                 pool,
                 lock: None,
                 path: Some(Arc::new(path.to_path_buf())),
+                simulation: simulation.clone(),
             };
             let result = store.migrate(path, options).await;
             store.pool.close().await;
@@ -397,6 +442,7 @@ impl Store {
     /// Closes all connections and releases the process lock (once all
     /// clones are dropped).
     pub async fn close(self) {
+        self.writer.close().await;
         self.pool.close().await;
     }
 
