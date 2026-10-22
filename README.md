@@ -93,6 +93,26 @@ use HTTP Basic authentication.
 Other user commands: `calcraft user list|passwd|disable|enable|set-admin|allow-sso-link|unbind-sso`
 (`calcraft user add alice --admin` creates an administrator).
 
+### Request limits and reverse proxies
+
+CalCraft rejects excess requests immediately instead of queueing them:
+
+- at most `server.max_concurrent_requests` (256) requests at the same time, further
+  ones get `503` with `Retry-After` (`/healthz` and `/readyz` are exempt);
+- per client 32 concurrent requests and a token bucket of 120 requests, refilled with
+  20 per second (`429` with `Retry-After`);
+- per client 20 failed logins in 15 minutes (DAV, web UI, second factor; known and
+  unknown usernames), in addition to the lockout per account (5 in 15 minutes).
+  Further logins from that client fail exactly like wrong credentials.
+
+IPv6 clients count per /64 (`client_ipv6_prefix`). The per-client tables are capped
+(`max_tracked_clients`, idle entries are evicted), so address hopping cannot exhaust
+memory. The client is the TCP peer address; `X-Forwarded-For` is only used when the
+peer is listed in `server.trusted_proxies` (empty by default), read from the right
+and skipping trusted proxies, so entries a client adds itself are ignored. Behind a
+reverse proxy on the same host set `trusted_proxies = ["127.0.0.1/32", "::1/128"]`,
+otherwise all users share the proxy's limits (see `docs/installation.md`).
+
 ### Backups and upgrades
 
 ```sh
@@ -186,8 +206,9 @@ How accounts are matched:
   password login API and DAV Basic auth with the account password are refused, app
   passwords keep working; changing the password and local 2FA setup are refused too
   (`password_login_disabled`). CalCraft refuses to start this way without `[oidc]`.
-- Pending logins are kept in a bounded table (oldest evicted); per-client rate limits
-  follow with the trusted-proxy configuration.
+- Pending logins are kept in a bounded table (oldest evicted); the per-client request
+  limits (see above) also apply to the SSO endpoints. Failed SSO callbacks do not
+  count as failed logins (they involve no guessable secret).
 
 The UI learns whether SSO is available from `GET /api/v1/auth/methods`. Errors are
 reported by redirecting to `/?sso_error=<code>`. Discovery, JWKS and token endpoints

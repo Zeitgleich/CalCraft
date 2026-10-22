@@ -292,7 +292,16 @@ async fn fixture() -> Fixture {
     assert!(!bob_sync_token.is_empty());
 
     let bob_snapshot = snapshot(&store, &bob, &bob_session).await;
-    let app = router(&Config::default(), AppState::new(store.clone()).unwrap());
+    // The matrix sends thousands of requests, many with wrong passwords,
+    // from one client: lift the per-client limits explicitly, so that only
+    // authorization decides the answers (the limits have their own tests in
+    // `tests/limits.rs`).
+    let mut config = Config::default();
+    config.server.max_concurrent_requests_per_client = u32::MAX;
+    config.server.client_rate_burst = u32::MAX;
+    config.server.client_rate_per_second = u32::MAX;
+    config.server.max_login_failures_per_client = u32::MAX;
+    let app = router(&config, AppState::new(store.clone()).unwrap());
     Fixture {
         app,
         store,
