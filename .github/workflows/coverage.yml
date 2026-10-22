@@ -1,0 +1,81 @@
+name: Coverage
+
+# Line coverage of the workspace tests with cargo-llvm-cov. Informational
+# only: no thresholds yet. The per-crate table goes to the job summary, the
+# lcov file and the HTML report are kept as an artifact for 14 days. Nothing
+# is sent to an external service. Local runs: docs/coverage.md.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install llvm-tools
+        run: rustup component add llvm-tools-preview
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-llvm-cov@0.9.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Run tests with coverage instrumentation
+        run: cargo llvm-cov --workspace --all-features --no-report
+      - name: Reports (lcov, HTML, summary)
+        run: |
+          out="$RUNNER_TEMP/coverage"
+          mkdir -p "$out"
+          cargo llvm-cov report --lcov --output-path "$out/lcov.info"
+          cargo llvm-cov report --html --output-dir "$out"
+          cargo llvm-cov report --json --summary-only --output-path "$out/summary.json"
+          cargo llvm-cov report --summary-only | tee "$out/summary.txt"
+      - name: Per-crate line coverage
+        run: |
+          out="$RUNNER_TEMP/coverage"
+          jq -r --arg root "$GITHUB_WORKSPACE/" '
+            [.data[0].files[]
+              | (.filename | ltrimstr($root)) as $f
+              | select($f | startswith("crates/"))
+              | {crate: ($f | split("/")[1]), count: .summary.lines.count, covered: .summary.lines.covered}]
+            | group_by(.crate)
+            | map({crate: .[0].crate, count: (map(.count) | add), covered: (map(.covered) | add)})
+            | (.[] | "| \(.crate) | \(.covered) / \(.count) | \(if .count > 0 then (.covered * 1000 / .count | round / 10) else 0 end) % |")
+          ' "$out/summary.json" > "$out/crates.md"
+          total=$(jq -r '.data[0].totals.lines | "\(.covered) / \(.count) | \(.percent * 10 | round / 10) %"' "$out/summary.json")
+          {
+            echo "## Line coverage"
+            echo
+            echo "| Crate | Lines covered | Coverage |"
+            echo "| --- | ---: | ---: |"
+            cat "$out/crates.md"
+            echo "| **total** | $total |"
+            echo
+            echo "<details><summary>Per-file report</summary>"
+            echo
+            echo '```'
+            cat "$out/summary.txt"
+            echo '```'
+            echo
+            echo "</details>"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage report
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: ${{ runner.temp }}/coverage
+          retention-days: 14
