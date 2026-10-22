@@ -1,7 +1,7 @@
 # Release erstellen (Checkliste für Maintainer)
 
 Ein Release entsteht ausschließlich durch ein gepushtes Tag `vX.Y.Z`
-(Vorabversion: `vX.Y.Z-rc.N`). Der Workflow
+(Vorabversion: `vX.Y.Z-alpha.N`, `vX.Y.Z-rc.N` o. Ä.). Der Workflow
 [`release.yml`](../.github/workflows/release.yml) baut dann Binaries,
 Archive, `SHA256SUMS`, das Docker-Image, signiert/attestiert alles und legt
 das GitHub-Release an. Lokal wird nichts gebaut oder signiert.
@@ -18,9 +18,11 @@ das GitHub-Release an. Lokal wird nichts gebaut oder signiert.
 
 1. Version in `Cargo.toml` setzen: `[workspace.package] version` **und**
    die `version` der internen Crates unter `[workspace.dependencies]`.
-   Danach `cargo check --workspace` (aktualisiert `Cargo.lock`).
+   Danach `cargo update -w` oder `cargo check --workspace` (aktualisiert
+   `Cargo.lock`; der Workflow prüft mit `--locked`).
 2. `CHANGELOG.md`: Abschnitt *Unreleased* in `## [X.Y.Z] – JJJJ-MM-TT`
-   umbenennen; Migrationen und Konfigurationsänderungen ausdrücklich nennen.
+   umbenennen und darüber ein leeres `## [Unreleased]` anlegen;
+   Migrationen und Konfigurationsänderungen ausdrücklich nennen.
 3. Commit über einen Pull Request nach `main` (`git commit -s`), CI abwarten,
    mergen.
 4. Auf dem gemergten Commit taggen (signiertes Tag, falls eingerichtet):
@@ -32,9 +34,10 @@ das GitHub-Release an. Lokal wird nichts gebaut oder signiert.
    ```
 
    Der Workflow bricht ab, wenn das Tag nicht zur Version in `Cargo.toml`
-   passt. Ein Tag mit `-` (z. B. `v1.3.0-rc.1`) wird als Vorabversion
-   veröffentlicht und bekommt nur das Image-Tag `1.3.0-rc.1`, nicht
-   `1.3`/`latest`.
+   passt. Ein Tag mit `-` (z. B. `v1.3.0-rc.1`, `v0.1.0-alpha.1`) wird als
+   Vorabversion (*Pre-release*) veröffentlicht und bekommt nur das
+   Image-Tag mit der vollen Version (z. B. `0.1.0-alpha.1`), nicht `0.1`/`latest`. Der Update-Hinweis im
+   Admin-Bereich ignoriert Vorabversionen.
 
 ## Danach
 

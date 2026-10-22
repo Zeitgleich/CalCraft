@@ -27,6 +27,7 @@ jobs:
   meta:
     name: version
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
@@ -87,6 +88,7 @@ jobs:
   ui:
     name: web UI assets
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       # Must match the wasm-bindgen version pinned in crates/calcraft-ui/Cargo.toml.
       WASM_BINDGEN_VERSION: 0.2.114
@@ -127,6 +129,7 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       TARGET: ${{ matrix.target }}
@@ -174,6 +177,7 @@ jobs:
     name: checksums and provenance
     needs: [meta, binaries]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       id-token: write
@@ -220,6 +224,7 @@ jobs:
             os: ubuntu-24.04-arm
             arch: arm64
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write
@@ -267,6 +272,7 @@ jobs:
     needs: [meta, docker]
     if: needs.meta.outputs.publish == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     outputs:
       digest: ${{ steps.index.outputs.digest }}
     permissions:
@@ -326,6 +332,7 @@ jobs:
     needs: [meta, checksums, docker-manifest]
     if: needs.meta.outputs.publish == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:

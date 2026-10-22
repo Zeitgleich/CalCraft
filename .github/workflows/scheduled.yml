@@ -15,6 +15,7 @@ jobs:
   advisories:
     name: dependency advisories
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -23,13 +24,28 @@ jobs:
         with:
           command: check advisories
 
+  stress:
+    name: stress test (heavy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Parallel writers (64 tasks, ignored in normal runs)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p calcraft-server --all-features --test stress -- --ignored
+
   fuzz:
     name: fuzz (${{ matrix.target }})
     strategy:
       fail-fast: false
       matrix:
-        target: [ical_object, dav_xml, recurrence]
+        target: [ical_object, dav_xml, recurrence, import]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -41,7 +57,9 @@ jobs:
       - name: Fuzz for 20 minutes
         env:
           TARGET: ${{ matrix.target }}
+        shell: bash
         run: |
+          set -euo pipefail
           # Checked-in seeds (fuzz/seeds/<target>) start the corpus.
           mkdir -p "fuzz/corpus/$TARGET"
           if [ -d "fuzz/seeds/$TARGET" ]; then cp fuzz/seeds/"$TARGET"/* "fuzz/corpus/$TARGET/"; fi

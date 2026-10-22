@@ -1,6 +1,6 @@
 # Produktionsreife – Anforderungen, Ist-Stand und Fahrplan
 
-Stand: 22.10.2026, `main` mit M5a (OIDC), M6a (Import/Export), Phase-2-Limits und -Robustheit, Release-Pipeline, Update-Hinweis, CodeQL/Coverage und neuer Web-UI.
+Stand: 22.10.2026, Vorabversion 0.1.0-alpha.1: `main` mit M5a (OIDC), M6a (Import/Export), Phase-2-Limits und -Robustheit, Release-Pipeline, Update-Hinweis, CodeQL/Coverage, neuer Web-UI und den Phase-3-Punkten Papierkorb, `MOVE`/`COPY`, CardDAV-Fotos/-Gruppen sowie RRULE-Expansion mit Zeitzonen.
 Dieses Dokument ist die Grundlage für die Freigabe einer stabilen Version.
 Ein Punkt gilt erst als **erledigt**, wenn es einen automatisierten Test
 (oder einen dokumentierten, wiederholbaren manuellen Nachweis) dafür gibt.
@@ -11,7 +11,7 @@ Legende: ✅ erledigt · 🟡 teilweise · ❌ offen · 👤 braucht reale Gerä
 
 | Anforderung | Stand | Nachweis / Lücke |
 |---|---|---|
-| Rechteprüfung für jede DAV-Methode und jeden Ressourcenpfad | ✅ | Zentrale Auflösung in `dav/paths.rs`: fremde Pfade → 404. Systematische Matrix in `crates/calcraft-server/tests/authz_matrix.rs`: jede Methode aus `ALLOWED_METHODS` (alle REPORT-Varianten, MKCOL, MKCALENDAR, PROPPATCH …) plus nicht implementierte Methoden × jeder Ressourcentyp (Root, Principal, Homes, Collections, Objekte, ungemappte/fehlende Pfade, Traversal- und Percent-Encoding-Varianten) × eigener/fremder/nicht existierender Benutzer × alle Credential-Arten; exakte Statuscodes, fremd = nicht existent (byte-identisch). |
+| Rechteprüfung für jede DAV-Methode und jeden Ressourcenpfad | ✅ | Zentrale Auflösung in `dav/paths.rs`: fremde Pfade → 404. Systematische Matrix in `crates/calcraft-server/tests/authz_matrix.rs`: jede Methode aus `ALLOWED_METHODS` (alle REPORT-Varianten, MKCOL, MKCALENDAR, PROPPATCH …) plus nicht implementierte Methoden × jeder Ressourcentyp (Root, Principal, Homes, Collections, Objekte, ungemappte/fehlende Pfade, Traversal- und Percent-Encoding-Varianten) × eigener/fremder/nicht existierender Benutzer × alle Credential-Arten, `COPY`/`MOVE` zusätzlich mit 13 `Destination`-Varianten; exakte Statuscodes, fremd = nicht existent (byte-identisch). Ein Lauf: rund 42 600 Anfragen, über 163 000 gezählte Prüfungen (Stand 22.10.2026). |
 | Tests gegen unberechtigten Zugriff auf fremde Kalender/Kontakte | ✅ | Isolationstests für DAV, multiget-hrefs, Sync-Tokens, REST-API, dazu `tests/authz_matrix.rs`: Marker-Strings in fremden Daten dürfen in keiner Antwort auftauchen, fremde Daten (ETag/Inhalt/CTag) bleiben nach jedem schreibenden Versuch unverändert, jede REST-Route aus `api::ROUTES` ohne Session, mit fremder Session und ohne CSRF-Header. Der Test schlägt fehl, wenn `ALLOWED_METHODS` oder `ROUTES` einen Eintrag ohne Matrix-Abdeckung enthält. |
 | Schutz gegen Brute-Force | ✅ | Sperre pro Konto (5/15 min) plus pro Client-IP (`server.max_login_failures_per_client`, 20/15 min, auch für unbekannte Namen und gesperrte Konten; Antwort wie falsches Passwort). Abgebrochene Anfragen zählen als Fehlversuch, sobald der Vergleich läuft; Warten paralleler Versuche begrenzt (8 pro Name, 5 s); 2FA-Aktivierung mit derselben Sperre. Client-IP per `server.trusted_proxies` (Standard Loopback; Warnung bei `X-Forwarded-For` von nicht vertrautem Peer). Tests: `auth/tests.rs`, `tests/limits.rs`, `tests/api.rs`. **Akzeptiertes Restrisiko (dokumentiert):** Kontosperre durch Dritte auslösbar (Kompromiss); ein Angreifer mit sehr vielen IPv6-Netzen kann die Zählung pro Client aussetzen (Sperre pro Konto bleibt). |
 | Schutz gegen Missbrauch und übergroße XML-/HTTP-Anfragen | 🟡 | Body-Limit, Timeout, XML-Limits (Tiefe, Elemente, keine DTD), iCal/vCard-Limits, REPORT-Budgets, Quota 512 MiB, Import-Budgets, Fuzzing. Global `server.max_concurrent_requests` (256 → 503 + `Retry-After`, Health ausgenommen), pro Client 32 parallel und Token-Bucket 120/20 s⁻¹ (429), IPv6 je /64, Tabellen hart begrenzt (`tests/limits.rs`). **Lücke:** keine Begrenzung offener Keep-alive-Verbindungen (nur `LimitNOFILE`), kein Header-Größen-Test. |
@@ -34,14 +34,14 @@ Legende: ✅ erledigt · 🟡 teilweise · ❌ offen · 👤 braucht reale Gerä
 
 | Anforderung | Stand | Nachweis / Lücke |
 |---|---|---|
-| Serientermine mit Ausnahmen und verschobenen Einzelterminen | 🟡 | Speichern/Abrufen inkl. `RECURRENCE-ID`-Overrides. **Lücke:** keine exakte RRULE-Expansion, Zeitraumabfragen konservativ (liefern ggf. zu viel); kein `expand`. |
-| Zeitzonen, Sommerzeit, ganztägige Termine | 🟡 | Ganztägig und lokale Zeiten werden konservativ indexiert (±14 h). **Lücke:** keine Zeitzonen-Datenbank, keine Tests über DST-Wechsel. |
+| Serientermine mit Ausnahmen und verschobenen Einzelterminen | 🟡 | Exakte Expansion für Zeitraumabfragen: RRULE (alle `FREQ`, BYxxx, `BYSETPOS`, `WKST`), RDATE/EXDATE, `RECURRENCE-ID`-Overrides auch bei Verschiebung in den/aus dem Zeitraum; RFC-5545-Beispiele als Tests. Budgets pro Objekt (200 000 Schritte, 10 000 Instanzen) und pro REPORT (2 000 000 Schritte, 1 000 Objekte, 64 MiB, 5 s), danach konservative Antwort (nie fehlend). Doku `docs/caldav.md`, Tests `tests/recurrence.rs`, `calcraft-ical` `rrule_tests.rs`/`recurrence_tests.rs`, Fuzz-Ziel `recurrence`. **Lücke:** kein `CALDAV:expand`/`limit-recurrence-set` (Objekte immer ganz); 👤 reale Clients nicht geprüft. |
+| Zeitzonen, Sommerzeit, ganztägige Termine | 🟡 | Lokale Zeiten mit `TZID` werden über die eingebettete VTIMEZONE (Regeln bis 2200) exakt nach UTC umgerechnet, Lücke/Überlappung bei DST nach RFC 5545 §3.3.5; DST-Tests (Berlin, New York). Nicht auswertbare VTIMEZONE: konservativ ±14 h. **Lücke:** Floating-Zeiten und ganztägige Termine nur konservativ (±14 h, `CALDAV:calendar-timezone` ungenutzt); keine Zeitzonen-Datenbank für `TZID`s ohne VTIMEZONE; 👤 reale Clients nicht geprüft. |
 | Konflikte bei Änderungen auf mehreren Geräten | 🟡 | 412 bei veralteter ETag. 👤 Verhalten realer Clients bei Konflikten nicht geprüft. |
 | Löschen | ✅ | DELETE mit Vorbedingungen, Tombstones für Sync. |
-| Verschieben | ❌ | `MOVE`/`COPY` nicht implementiert (405). Manche Clients verschieben Termine zwischen Kalendern per MOVE. |
+| Verschieben | ✅ | `MOVE`/`COPY` (RFC 4918) für Termine und Kontakte zwischen eigenen Collections gleicher Art, `Overwrite`, `If-Match`/`If-None-Match`, Quota; Quelle, Ziel, Tombstone und Sync-Tokens in einer Transaktion. Fremde und fehlende Ziel-Collections gleich beantwortet (409). Tests: `tests/move_copy.rs`, Autorisierungsmatrix mit 13 `Destination`-Varianten. Bewusst nicht unterstützt: ganze Collections, Collections anderer Benutzer, andere Server. |
 | Freigeben | ❌ | Freigaben/ACL (M5) noch nicht umgesetzt. |
-| Wiederherstellen (Papierkorb) | ❌ | Kein Soft-Delete/Papierkorb. |
-| CardDAV: Fotos, Gruppen, vCard 3.0/4.0 | 🟡 | vCard 3.0/4.0 validiert, Gruppen werden unverändert gespeichert. **Lücke:** Fotos > 1 MiB werden abgelehnt (Limit dokumentieren/konfigurierbar), keine Tests mit Fotos und Apple-Gruppen (`X-ADDRESSBOOKSERVER-KIND`). |
+| Wiederherstellen (Papierkorb) | ✅ | Löschen per DAV oder Web-UI verschiebt Objekte und ganze Collections in den Papierkorb (`storage.trash_retention_days`, Standard 30, `0` = endgültig); Wiederherstellen an Ort und Stelle mit gleicher ETag, Konflikte als 409 mit Code; REST `/api/v1/trash`, Seite *Trash* in der Web-UI; zählt zur Quota, Bereinigung beim Start und stündlich. Tests: `tests/trash.rs`, Store-Tests, Autorisierungsmatrix. |
+| CardDAV: Fotos, Gruppen, vCard 3.0/4.0 | ✅ | vCard 3.0/4.0 validiert; Größe konfigurierbar (`storage.max_vcard_bytes`, Standard 2 MiB, höchstens 10 MiB und `server.max_body_bytes`, als `CARDDAV:max-resource-size` gemeldet); `PHOTO`/`LOGO` nur als gültiges base64 von JPEG/PNG/GIF/WebP (Prüfung von `TYPE` und Magic Number) oder `http(s)`-URI (nie abgerufen). Gruppen nach vCard 4.0 (`KIND:group`/`MEMBER`) und Apple (`X-ADDRESSBOOKSERVER-KIND`) bytegenau. Tests: `tests/carddav_photos.rs` (Roundtrip, Limits, unsichere Fotos, Gruppen inkl. Sync, Quota); Doku im README. |
 
 ## P1 – Betrieb und Überwachung
 
@@ -64,7 +64,7 @@ laufen parallel, weil sie für den Pilotbetrieb gebraucht werden.
 ### Phase 1 – Audit und Bestandsaufnahme (≈ Woche 1)
 
 - [x] Abgleich aller Funktionen gegen diese Liste (dieses Dokument)
-- [x] Testabdeckung messen (`cargo llvm-cov`, 90,9 % Zeilen, Stand 22.10.2026; Workflow `coverage.yml`), kritische Lücken in `docs/coverage.md`
+- [x] Testabdeckung messen (`cargo llvm-cov`, 92,2 % Zeilen, Stand 22.10.2026, 0.1.0-alpha.1; Workflow `coverage.yml`), kritische Lücken in `docs/coverage.md`
 - [x] Statische Analyse: CodeQL für Rust und Workflows (`codeql.yml`) – `cargo-geiger`-Report steht noch aus
 - [ ] Ergebnis: priorisierte Fehlerliste als GitHub-Issues
 
@@ -81,10 +81,11 @@ laufen parallel, weil sie für den Pilotbetrieb gebraucht werden.
 
 ### Phase 3 – Kompatibilität und Ende-zu-Ende-Tests (≈ Woche 3–5)
 
-- [ ] `MOVE`/`COPY` für Objekte zwischen eigenen Collections
-- [ ] RRULE-Expansion mit Budget (exakte Zeitraumabfragen, `expand`), Zeitzonen-Datenbank, DST-Tests
-- [ ] Papierkorb (Soft-Delete mit Wiederherstellung)
-- [ ] CardDAV: Fotos (Limit konfigurierbar), Apple-Gruppen, Tests
+- [x] `MOVE`/`COPY` für Objekte zwischen eigenen Collections (`tests/move_copy.rs`, Autorisierungsmatrix)
+- [x] RRULE-Expansion mit Budget (exakte Zeitraumabfragen), Zeitzonen aus eingebetteter VTIMEZONE, DST-Tests (`docs/caldav.md`, `tests/recurrence.rs`)
+- [ ] `CALDAV:expand`/`limit-recurrence-set`, Floating-Zeiten über `calendar-timezone`, Zeitzonen-Datenbank für `TZID`s ohne VTIMEZONE
+- [x] Papierkorb (Soft-Delete mit Wiederherstellung, `tests/trash.rs`)
+- [x] CardDAV: Fotos (Limit konfigurierbar), Apple- und vCard-4.0-Gruppen, Tests (`tests/carddav_photos.rs`)
 - [ ] Freigaben/ACL (M5b)
 - [ ] 👤 Reale Clients: Apple Kalender/Kontakte (macOS, iOS), Thunderbird, DAVx⁵, GNOME – Testprotokoll in `docs/compat/`
 - [ ] Serientermine, Offlinebetrieb und Konflikte mit realen Clients

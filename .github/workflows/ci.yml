@@ -19,6 +19,7 @@ env:
 jobs:
   fmt:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -32,6 +33,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -51,6 +53,7 @@ jobs:
   web-ui:
     name: web UI (wasm)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       # Must match the wasm-bindgen version pinned in crates/calcraft-ui/Cargo.toml.
       WASM_BINDGEN_VERSION: 0.2.114
@@ -78,6 +81,7 @@ jobs:
 
   deny:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -89,6 +93,7 @@ jobs:
   compat:
     name: client compatibility
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -119,6 +124,7 @@ jobs:
   backup:
     name: backup/restore smoke test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -139,6 +145,7 @@ jobs:
   fuzz:
     name: fuzz (smoke)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -148,8 +155,10 @@ jobs:
           rustup toolchain install nightly --profile minimal
           cargo +nightly install cargo-fuzz --locked --version 0.13.2
       - name: Fuzz each target for 60 seconds
+        shell: bash
         run: |
-          for target in ical_object dav_xml recurrence; do
+          set -euo pipefail
+          for target in ical_object dav_xml recurrence import; do
             # Checked-in seeds (fuzz/seeds/<target>) start the corpus.
             mkdir -p "fuzz/corpus/$target"
             if [ -d "fuzz/seeds/$target" ]; then cp fuzz/seeds/"$target"/* "fuzz/corpus/$target/"; fi

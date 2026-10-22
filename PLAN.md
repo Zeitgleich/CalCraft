@@ -6,6 +6,10 @@ Alternative zu Radicale und Baïkal. Lizenz: **AGPL-3.0-or-later**.
 **Freigabe:** Anforderungen, Ist-Stand und Fahrplan bis zur stabilen Version stehen in
 [docs/produktionsreife.md](docs/produktionsreife.md) und haben Vorrang vor neuen Funktionen.
 
+**Stand 22.10.2026:** erste Vorabversion **0.1.0-alpha.1** (M0–M4b, M5a, M6a, Phase 2 und aus
+Phase 3 Papierkorb, `MOVE`/`COPY`, CardDAV-Fotos/-Gruppen, RRULE-Expansion mit Zeitzonen).
+Nicht für den Produktivbetrieb.
+
 ## 1. Ziele
 
 - Ein einziges, statisch gelinktes Binary (optional Docker-Image).
@@ -230,7 +234,7 @@ Der Client-Track startet nach M4 (wenn Web-UI-Komponenten existieren).
 | **M0** ✅ | Workspace, Lizenz, Doku, CI auf Linux/macOS/Windows (fmt, clippy, test, deny), Dockerfile, Server-Grundgerüst mit Config, Feature-Flags, Security-Headern, Health-Endpunkten, `.well-known` |
 | **M1** ✅ | WebDAV-Kern: OPTIONS, PROPFIND (Depth 0/1), Principal Discovery, Basic Auth, Storage (SQLite) |
 | **M2** ✅ | CalDAV: MKCALENDAR, PUT/GET/DELETE mit Preconditions, calendar-query, calendar-multiget; Parser-Limits + Fuzzing |
-| **M3** ✅ | sync-collection, CardDAV |
+| **M3** ✅ | sync-collection, CardDAV · aus Phase 3 erledigt: Kontaktfotos (`storage.max_vcard_bytes`) und Gruppen (Apple, vCard 4.0), `MOVE`/`COPY` zwischen eigenen Collections, Papierkorb, exakte RRULE-Expansion mit Budgets und eingebetteten VTIMEZONEs (`docs/caldav.md`; `expand` und Zeitzonen-Datenbank offen) |
 | **M4** | **M4a** ✅ REST-API + OpenAPI, Sessions, 2FA (TOTP + Wiederherstellungscodes), App-Passwörter, Admin · **M4b** ✅ Web-UI Stufe 1 · **M4c** 🟡 SSO-Login in der Web-UI ✅, Logo/Favicon/Design-System ✅, Termin- und Kontaktansichten offen |
 | **M5** | **M5a** ✅ OIDC/SSO (Keycloak & Co.) · Freigaben, Gruppen, Erinnerungen (SMTP), Web-UI Stufe 3–4 |
 | **M6** | **M6a** ✅ Import/Export aller Formate (REST + CLI) · Backup/Restore + Pre-Migration-Backups ✅ · **M6b** Webcal mit SSRF-Schutz · Migration aus Radicale/Baïkal |
@@ -240,7 +244,7 @@ Der Client-Track startet nach M4 (wenn Web-UI-Komponenten existieren).
 
 - Erinnerungen (VALARM per E-Mail), optional Webhooks/ntfy.
 - Backup/Restore per CLI, Datenexport und Kontolöschung (DSGVO).
-- Papierkorb (Soft-Delete) mit Wiederherstellung.
+- ✅ Papierkorb (Soft-Delete) mit Wiederherstellung (`storage.trash_retention_days`, `/api/v1/trash`, Web-UI-Seite *Trash*).
 - Gruppen-, Team- und Ressourcenkalender; Free/Busy; Quotas.
 - Observability: `/healthz`, `/readyz`, Prometheus `/metrics`, JSON-Logs.
 - Paketierung: Docker, Helm, `.deb`/`.rpm`, Homebrew, NixOS-Modul.
@@ -319,14 +323,16 @@ Der ausgehende HTTPS-Client liegt jetzt in `src/https.rs` (internes Feature
   mit Link (`target=_blank`, `rel="noopener noreferrer"`), bei `enabled: false` einen
   Hinweis zum Einschalten.
 
-## 13. Bekannte Einschränkungen (Stand M2)
+## 13. Bekannte Einschränkungen (Stand 0.1.0-alpha.1)
 
-- `calendar-query` filtert nach Komponententyp und Zeitraum. Der Zeitraum wird konservativ bestimmt:
-  Wiederholungen ohne `UNTIL` gelten als offen, lokale Zeiten werden um ±14 h erweitert. Es können also
-  zusätzliche Objekte zurückkommen, aber nie fehlen. Exakte RRULE-Expansion (mit Budget) folgt später.
+- `calendar-query` filtert nach Komponententyp und Zeitraum. Serientermine werden exakt expandiert
+  (RRULE, RDATE, EXDATE, Overrides), Zeiten mit `TZID` über die eingebettete VTIMEZONE umgerechnet.
+  Konservativ (±14 h bzw. offen) bleiben Floating-Zeiten und ganztägige Termine, `TZID`s ohne VTIMEZONE,
+  nicht auswertbare Regeln und erschöpfte Budgets: dann können zusätzliche Objekte zurückkommen, aber
+  nie fehlen. Details: `docs/caldav.md`.
 - `prop-filter`, `param-filter` und `text-match` werden mit `CALDAV:supported-filter` (403) abgelehnt
   statt stillschweigend ignoriert.
-- `calendar-data` liefert immer das ganze Objekt (keine Teilabfrage, kein `expand`).
+- `calendar-data` liefert immer das ganze Objekt (keine Teilabfrage, kein `expand`/`limit-recurrence-set`).
 - Unbekannte Properties bei MKCALENDAR (z. B. `calendar-order`) werden nicht gespeichert.
 - `addressbook-query` unterstützt nur einen leeren Filter (alle Kontakte); Filter werden mit
   `CARDDAV:supported-filter` abgelehnt.

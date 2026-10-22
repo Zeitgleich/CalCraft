@@ -23,6 +23,7 @@ Until 1.0, only the latest release receives security fixes.
 ## Security practices
 
 - `#![forbid(unsafe_code)]` in all crates
-- Dependency checks with `cargo-deny` and `cargo-audit` on every change
-- Fuzzing of all parsers (iCalendar, vCard, XML)
+- Dependency checks with `cargo-deny` (RustSec advisories, licenses, sources) on every change, advisories also daily
+- Fuzzing of the iCalendar, recurrence, XML and import parsers (four targets, on every change and nightly)
 - Strict HTTP security headers and conservative defaults
+- More detail: the *Security* section of the [README](README.md#security)
