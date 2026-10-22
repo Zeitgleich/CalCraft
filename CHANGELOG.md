@@ -17,10 +17,13 @@ follow [Semantic Versioning](https://semver.org/). Release process:
   batches (GET fallback) and validated like `calcraft import`, keeping UIDs.
   `--dry-run`, `--only`, `--map`, `--on-conflict skip|replace`,
   `--include-shared`; idempotent with `skip`. Password from a prompt,
-  `--password-file` (mode 600) or `CALCRAFT_MIGRATE_PASSWORD`, never from the
-  command line. HTTPS only (`--ca-file` for self-signed certificates,
-  `--allow-http` with a warning), redirects only within the origin or from
-  http to https on the same host. New Cargo feature `migrate` (default on).
+  `--password-file` (regular file, mode 600) or `CALCRAFT_MIGRATE_PASSWORD`,
+  never from the command line, zeroized after use. HTTPS only (`--ca-file` for
+  self-signed certificates, `--allow-http` with a warning), redirects only
+  within the origin or from http to https on the same host and port (80 to
+  443). Fetching stops once the quota or object limit is reached. New Cargo
+  feature `migrate` (default on; uses `zeroize`, already a dependency of
+  argon2 and rustls).
 
 ## [0.1.0-alpha.1] – 2026-10-22
 

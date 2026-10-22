@@ -11,7 +11,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::Duration,
 };
@@ -27,8 +27,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use calcraft_core::CollectionKind;
 use calcraft_server::{
     auth::hash_password,
-    config::Secret,
-    migrate::{self, Options, Summary},
+    migrate::{self, Options, Password, Summary},
     telemetry,
     transfer::OnConflict,
 };
@@ -155,6 +154,9 @@ struct FakeCollection {
 struct Fake {
     prefix: &'static str,
     multiget: bool,
+    /// Multiget answers also repeat hrefs (with other data) and add hrefs
+    /// that were not asked for.
+    noisy: AtomicBool,
     /// Where `/.well-known/*` redirects to.
     well_known: Mutex<String>,
     collections: Vec<FakeCollection>,
@@ -167,6 +169,7 @@ impl Fake {
         Self {
             prefix,
             multiget,
+            noisy: AtomicBool::new(false),
             well_known: Mutex::new(format!("{prefix}/")),
             collections: vec![
                 FakeCollection {
@@ -290,6 +293,9 @@ async fn handle(
     if path.starts_with("/.well-known/") {
         let target = fake.well_known.lock().unwrap().clone();
         return (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, target)]).into_response();
+    }
+    if path.starts_with("/loop/") {
+        return (StatusCode::FOUND, [(header::LOCATION, path)]).into_response();
     }
     let p = fake.prefix;
     if !path.starts_with(&format!("{p}/")) {
@@ -423,6 +429,21 @@ fn multiget(fake: &Fake, path: &str, body: &[u8]) -> Response {
             None => out.push_str(&format!(
                 "<d:response><d:href>{href}</d:href><d:status>HTTP/1.1 404 Not Found</d:status></d:response>"
             )),
+        }
+        if fake.noisy.load(Ordering::Relaxed) {
+            // The same href again with other data, and objects not asked for.
+            out.push_str(&response(
+                href,
+                &format!("<{data}>{}</{data}>", escape(SHARED_EVENT)),
+            ));
+            out.push_str(&response(
+                &format!("{}/calendars/alice-src/bobs/shared.ics", fake.prefix),
+                &format!("<{data}>{}</{data}>", escape(SHARED_EVENT)),
+            ));
+            out.push_str(&response(
+                &format!("{path}unasked.ics"),
+                &format!("<{data}>{}</{data}>", escape(SHARED_EVENT)),
+            ));
         }
     }
     multistatus(&out)
@@ -593,7 +614,12 @@ async fn local_store() -> Store {
 }
 
 fn options(from: String) -> Options {
-    let mut options = Options::new(&from, "alice-src", Secret::new(SOURCE_PASSWORD), LOCAL_USER);
+    let mut options = Options::new(
+        &from,
+        "alice-src",
+        Password::new(SOURCE_PASSWORD),
+        LOCAL_USER,
+    );
     options.batch_size = 2;
     options
 }
@@ -790,18 +816,18 @@ async fn migrates_over_tls_with_custom_ca() {
     assert_no_password(&String::from_utf8_lossy(&logs().0.lock().unwrap()));
 }
 
-/// Synology-like quirks: a path prefix, http redirected to https on
-/// another port, no multiget (GET per object), separate CardDAV URL;
-/// plus `--only` and `--map`.
+/// Synology-like quirks: a path prefix, no multiget (GET per object), and
+/// an http port that redirects to https on another port, which is refused
+/// (another port is another server); plus `--only` and `--map`.
 #[tokio::test]
-async fn synology_quirks_redirect_prefix_and_get_fallback() {
+async fn synology_quirks_prefix_get_fallback_and_port_redirect() {
     let server = start(Fake::new("/webdav/caldav", false)).await;
     let tls = tls_proxy(server.plain);
     let http = https_redirector(tls.port()).await;
     let store = local_store().await;
     let dir = TempDir::new();
 
-    // The http URL is refused without --allow-http.
+    // The http URL is refused without --allow-http …
     let from = format!("http://127.0.0.1:{}/webdav/caldav/", http.port());
     let refused = migrate::run(&store, &options(from.clone()))
         .await
@@ -810,9 +836,16 @@ async fn synology_quirks_redirect_prefix_and_get_fallback() {
         format!("{refused:#}").contains("--allow-http"),
         "{refused:#}"
     );
-
+    // … and its redirect to https on another port is not followed.
     let mut opts = options(from);
     opts.allow_http = true;
+    opts.ca_file = Some(dir.ca_file());
+    let err = migrate::run(&store, &opts).await.unwrap_err();
+    let message = format!("{err:#}");
+    assert!(message.contains("refused redirect"), "{message}");
+    assert!(server.fake.requests().is_empty());
+
+    let mut opts = options(format!("https://127.0.0.1:{}/webdav/caldav/", tls.port()));
     opts.ca_file = Some(dir.ca_file());
     opts.only = Some(CollectionKind::Calendar);
     opts.map = vec!["work=job".to_owned(), "nothing=else".to_owned()];
@@ -823,13 +856,8 @@ async fn synology_quirks_redirect_prefix_and_get_fallback() {
     assert_eq!(counts(&summary, "tasks-list"), (1, 0, 0, 0), "{report}");
     assert_eq!(summary.collections.len(), 2, "{report}");
     assert!(report.contains("excluded by --only"), "{report}");
-    assert!(report.contains("--allow-http"), "{report}");
     assert!(
         report.contains("--map nothing: no such source collection"),
-        "{report}"
-    );
-    assert!(
-        report.contains(&format!("redirected to https://127.0.0.1:{}", tls.port())),
         "{report}"
     );
 
@@ -843,13 +871,120 @@ async fn synology_quirks_redirect_prefix_and_get_fallback() {
         requests.iter().any(|r| r.starts_with("GET ")),
         "{requests:?}"
     );
-    assert!(
-        requests.iter().any(|r| r.starts_with("REPORT ")),
+    // One failed multiget per collection, then GETs only.
+    assert_eq!(
+        requests.iter().filter(|r| r.starts_with("REPORT ")).count(),
+        2,
         "{requests:?}"
     );
-    // One failed multiget per collection, then GETs only.
-    assert!(requests.iter().filter(|r| r.starts_with("REPORT ")).count() <= 2);
     assert_no_password(&report);
+}
+
+/// Objects above the size limit are rejected (GET is cut off at the limit),
+/// and a response above `max_response` fails its collection.
+#[tokio::test]
+async fn size_limits_are_enforced() {
+    let server = start(Fake::new("/dav", false)).await;
+    let store = local_store().await;
+    let mut opts = options(format!("http://127.0.0.1:{}/dav/", server.plain.port()));
+    opts.allow_http = true;
+    opts.only = Some(CollectionKind::Addressbook);
+    opts.max_vcard_bytes = 4096;
+    let summary = migrate::run(&store, &opts).await.unwrap();
+    let report = text(&summary);
+    assert_eq!(counts(&summary, "contacts"), (1, 0, 0, 1), "{report}");
+    assert!(report.contains("paula.vcf: object too large"), "{report}");
+
+    let server = start(Fake::new("/dav", true)).await;
+    let store = local_store().await;
+    let mut opts = options(format!("http://127.0.0.1:{}/dav/", server.plain.port()));
+    opts.allow_http = true;
+    opts.max_response = 6000;
+    let summary = migrate::run(&store, &opts).await.unwrap();
+    let report = text(&summary);
+    assert!(summary.failed(), "{report}");
+    let contacts = summary
+        .collections
+        .iter()
+        .find(|c| c.target.as_str() == "contacts")
+        .unwrap();
+    let error = contacts.error.as_deref().unwrap_or_default();
+    assert!(error.contains("too large"), "{report}");
+    assert_eq!(counts(&summary, "work"), (2, 0, 0, 1), "{report}");
+}
+
+/// Once the quota is reached, the rest of a collection is not fetched.
+#[tokio::test]
+async fn quota_stops_fetching() {
+    let server = start(Fake::new("/dav", true)).await;
+    let store = local_store().await;
+    store.set_quota_for_tests(i64::try_from(TODO.len() + EVENT_ONE.len() + 10).unwrap());
+    let mut opts = options(format!("http://127.0.0.1:{}/dav/", server.plain.port()));
+    opts.allow_http = true;
+    opts.only = Some(CollectionKind::Calendar);
+    opts.batch_size = 1;
+    let summary = migrate::run(&store, &opts).await.unwrap();
+    let report = text(&summary);
+    assert!(summary.failed(), "{report}");
+    assert_eq!(counts(&summary, "work"), (1, 0, 1, 1), "{report}");
+    assert!(
+        report.contains("storage quota exceeded: the remaining 1 objects were not fetched"),
+        "{report}"
+    );
+    let requests = server.fake.requests();
+    let reports = requests
+        .iter()
+        .filter(|r| r.starts_with("REPORT ") && r.ends_with("/work/"))
+        .count();
+    assert_eq!(reports, 2, "{requests:?}");
+}
+
+/// Redirect loops end after a few hops.
+#[tokio::test]
+async fn redirect_loops_end() {
+    let server = start(Fake::new("/dav", true)).await;
+    *server.fake.well_known.lock().unwrap() = "/loop/well-known".to_owned();
+    let store = local_store().await;
+    let mut opts = options(format!("http://127.0.0.1:{}/loop/", server.plain.port()));
+    opts.allow_http = true;
+    let err = migrate::run(&store, &opts).await.unwrap_err();
+    assert!(format!("{err:#}").contains("too many redirects"), "{err:#}");
+    let loops = server
+        .fake
+        .requests()
+        .iter()
+        .filter(|r| r.contains(" /loop/"))
+        .count();
+    // Each attempt: the request plus five redirects.
+    assert!((6..=24).contains(&loops), "{loops}");
+}
+
+/// Repeated and unrequested hrefs in a multiget answer are ignored: the
+/// first answer per requested href counts, nothing else is imported.
+#[tokio::test]
+async fn multiget_noise_is_ignored() {
+    let server = start(Fake::new("/dav", true)).await;
+    server.fake.noisy.store(true, Ordering::Relaxed);
+    let store = local_store().await;
+    let mut opts = options(format!("http://127.0.0.1:{}/dav/", server.plain.port()));
+    opts.allow_http = true;
+    opts.only = Some(CollectionKind::Calendar);
+    let summary = migrate::run(&store, &opts).await.unwrap();
+    let report = text(&summary);
+    assert_eq!(counts(&summary, "work"), (2, 0, 0, 1), "{report}");
+    let work = collection(&store, CollectionKind::Calendar, "work").await;
+    assert_eq!(store.items(work.id).await.unwrap().len(), 2);
+    assert_eq!(
+        content(&store, &work, "one@example.com").await,
+        EVENT_ONE.as_bytes()
+    );
+    assert!(
+        store
+            .item_name_by_uid(work.id, "shared@example.com")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 /// A dry run discovers, fetches and validates, but writes nothing.
@@ -884,7 +1019,7 @@ async fn wrong_password_and_foreign_redirects_are_refused() {
 
     let mut wrong = options(format!("http://127.0.0.1:{port}/dav/"));
     wrong.allow_http = true;
-    wrong.password = Secret::new("not the password");
+    wrong.password = Password::new("not the password");
     let err = migrate::run(&store, &wrong).await.unwrap_err();
     assert!(
         format!("{err:#}").contains("rejected the credentials"),

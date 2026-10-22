@@ -18,7 +18,7 @@ fn remote(start: &str) -> Remote {
         http,
         &uri(start),
         "alice",
-        &Secret::new("pw"),
+        &Password::new("pw"),
         limits,
         Duration::ZERO,
     )
@@ -39,8 +39,13 @@ fn origins_compare_scheme_host_and_port() {
         origin("http://nas.example.com/"),
         origin("https://nas.example.com/")
     );
-    assert!(origin("http://nas:5000/").is_upgrade_to(&origin("https://nas:5001/")));
-    assert!(!origin("http://nas:5000/").is_upgrade_to(&origin("https://evil:5001/")));
+    // Upgrades: same host and port, or the default ports 80 to 443.
+    assert!(origin("http://nas:5000/").is_upgrade_to(&origin("https://nas:5000/")));
+    assert!(origin("http://nas/").is_upgrade_to(&origin("https://nas/")));
+    assert!(!origin("http://nas:5000/").is_upgrade_to(&origin("https://nas:5001/")));
+    assert!(!origin("http://nas:5000/").is_upgrade_to(&origin("https://nas/")));
+    assert!(!origin("http://nas/").is_upgrade_to(&origin("https://nas:8443/")));
+    assert!(!origin("http://nas/").is_upgrade_to(&origin("https://evil/")));
     assert!(!origin("https://nas/").is_upgrade_to(&origin("http://nas/")));
     assert!(Origin::of(&uri("https://u:p@nas/")).is_err());
     assert!(Origin::of(&uri("/relative")).is_err());
@@ -90,13 +95,20 @@ fn redirects_follow_the_origin_rules() {
         remote.follow(&current, "https://evil.example.com/"),
         Err(RemoteError::Redirect(_))
     ));
+    // Another port is another server: refused, without query in the message.
+    let err = remote
+        .follow(&current, "https://nas:5001/caldav/?token=abc#x")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("https://nas:5001"), "{err}");
+    assert!(!err.contains("token"), "{err}");
     assert!(!remote.upgraded);
     assert_eq!(
         remote
-            .follow(&current, "https://nas:5001/caldav/")
+            .follow(&current, "https://nas:5000/caldav/")
             .unwrap()
             .to_string(),
-        "https://nas:5001/caldav/"
+        "https://nas:5000/caldav/"
     );
     assert!(remote.upgraded);
     // Afterwards, URLs of the old http origin go to https.
@@ -105,7 +117,7 @@ fn redirects_follow_the_origin_rules() {
             .rebase(&uri("http://nas:5000/.well-known/caldav"))
             .unwrap()
             .to_string(),
-        "https://nas:5001/.well-known/caldav"
+        "https://nas:5000/.well-known/caldav"
     );
     // No way back to http.
     assert!(remote.follow(&current, "http://nas:5000/x").is_err());
@@ -150,6 +162,19 @@ fn percent_decoding() {
 #[test]
 fn credentials_are_marked_sensitive() {
     let remote = remote("https://nas/");
-    assert!(remote.authorization.is_sensitive());
-    assert!(!format!("{:?}", remote.authorization).contains("YWxpY2U6cHc"));
+    assert_eq!(remote.authorization.as_str(), "Basic YWxpY2U6cHc=");
+    let header = remote.authorization_header().unwrap();
+    assert!(header.is_sensitive());
+    assert!(!format!("{header:?}").contains("YWxpY2U6cHc"));
+    assert_eq!(format!("{:?}", Password::new("pw")), "<redacted>");
+}
+
+#[test]
+fn urls_in_messages_are_redacted() {
+    assert_eq!(
+        redact_url(" https://u:p@nas:5001/caldav/?token=1#frag "),
+        "https://nas:5001/caldav/"
+    );
+    assert_eq!(redact_url("/a/b?x=1"), "/a/b");
+    assert_eq!(redact_url("https://nas/\u{1b}x"), "https://nas/\u{fffd}x");
 }

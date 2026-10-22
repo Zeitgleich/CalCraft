@@ -282,6 +282,12 @@ impl<'a> Writer<'a> {
         }
     }
 
+    /// The quota or object limit that stopped storing, if any.
+    #[cfg_attr(not(feature = "migrate"), allow(dead_code))]
+    pub(crate) fn limit(&self) -> Option<&'static str> {
+        self.limit
+    }
+
     #[cfg_attr(not(feature = "migrate"), allow(dead_code))]
     pub(crate) fn reject(&mut self, uid: Option<&str>, reason: &str) {
         reject(&mut self.report, uid, reason);

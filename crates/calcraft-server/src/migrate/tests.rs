@@ -70,6 +70,10 @@ fn foreign_owners_are_detected() {
     assert!(foreign_owner("principals/users/bob", me));
     assert!(foreign_owner("/remote.php/dav/principals/users/bob/", me));
     assert!(!foreign_owner("", me));
+    // Whole segments: `ice` is not `alice`, `users/alice` is not `xusers/alice`.
+    assert!(foreign_owner("ice", me));
+    assert!(foreign_owner("xusers/alice", me));
+    assert!(foreign_owner("/principals/users/alice/extra/", me));
 }
 
 #[test]
@@ -110,5 +114,13 @@ fn password_files_must_be_private() {
     assert_eq!(read_password_file(&path).unwrap().expose(), "s3cret pass");
     std::fs::write(&path, "\n").unwrap();
     assert!(read_password_file(&path).is_err());
+
+    // Links are not followed, directories are no password files.
+    std::fs::write(&path, "s3cret pass\n").unwrap();
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&path, &link).unwrap();
+    let err = read_password_file(&link).unwrap_err().to_string();
+    assert!(err.contains("regular file"), "{err}");
+    assert!(read_password_file(&dir).is_err());
     std::fs::remove_dir_all(&dir).unwrap();
 }

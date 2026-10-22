@@ -5,15 +5,17 @@ use std::{path::PathBuf, time::Duration};
 use anyhow::bail;
 use calcraft_core::CollectionKind;
 use calcraft_server::{
-    config::Secret,
-    migrate::{self, DEFAULT_BATCH, Options},
+    migrate::{self, DEFAULT_BATCH, Options, Password},
     transfer::OnConflict,
 };
 use calcraft_store::Store;
 use clap::Args;
 
 /// Environment variable that may hold the source password (for scripts;
-/// a password file or the prompt is preferable).
+/// a password file or the prompt is preferable). It is not removed from
+/// the process environment after reading: `std::env::remove_var` is
+/// `unsafe` in edition 2024 and this crate forbids unsafe code. The value
+/// read is held in zeroizing memory like the other sources.
 const PASSWORD_ENV: &str = "CALCRAFT_MIGRATE_PASSWORD";
 
 #[derive(Debug, Args)]
@@ -76,14 +78,14 @@ pub struct MigrateArgs {
     batch_size: u16,
 }
 
-fn password(args: &MigrateArgs) -> anyhow::Result<Secret> {
+fn password(args: &MigrateArgs) -> anyhow::Result<Password> {
     if let Some(path) = &args.password_file {
         return migrate::read_password_file(path);
     }
     if let Ok(password) = std::env::var(PASSWORD_ENV)
         && !password.is_empty()
     {
-        return Ok(Secret::new(password));
+        return Ok(Password::new(password));
     }
     let password = rpassword::prompt_password(format!(
         "Password of {} at the source server: ",
@@ -92,7 +94,7 @@ fn password(args: &MigrateArgs) -> anyhow::Result<Secret> {
     if password.is_empty() {
         bail!("no password given");
     }
-    Ok(Secret::new(password))
+    Ok(Password::new(password))
 }
 
 pub async fn run(store: &Store, args: MigrateArgs, max_vcard_bytes: usize) -> anyhow::Result<()> {

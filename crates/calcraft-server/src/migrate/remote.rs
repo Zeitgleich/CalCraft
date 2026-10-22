@@ -14,11 +14,49 @@ use calcraft_core::CollectionKind;
 use calcraft_dav::xml::{NS_CALDAV, NS_CARDDAV, NS_DAV, escape_text};
 use calcraft_ical::xml::{self, Node, XmlError, XmlLimits};
 
+use zeroize::Zeroizing;
+
 use crate::{
-    config::Secret,
     https::{HttpClient, HttpError, Limits},
     transfer::printable,
 };
+
+/// The source password: wiped from memory when dropped, never printed.
+#[derive(Clone)]
+pub struct Password(Zeroizing<String>);
+
+impl Password {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(Zeroizing::new(value.into()))
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Password {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+/// A URL for messages: without user info, query and fragment, printable.
+pub fn redact_url(text: &str) -> String {
+    let text = text.trim();
+    let text = &text[..text.find(['?', '#']).unwrap_or(text.len())];
+    let redacted = match text.find("://") {
+        Some(scheme_end) => {
+            let rest = &text[scheme_end + 3..];
+            let authority_end = rest.find('/').unwrap_or(rest.len());
+            let (authority, path) = rest.split_at(authority_end);
+            let host = authority.rsplit('@').next().unwrap_or(authority);
+            format!("{}{host}{path}", &text[..scheme_end + 3])
+        }
+        None => text.to_owned(),
+    };
+    printable(&redacted)
+}
 
 const MAX_REDIRECTS: usize = 5;
 const XML_MAX_DEPTH: usize = 32;
@@ -41,7 +79,7 @@ pub enum RemoteError {
     #[error(transparent)]
     Http(#[from] HttpError),
     #[error(
-        "refused redirect to {0}: only the same origin (or http to https on the same host) is followed"
+        "refused redirect to {0}: only the same origin (or http to https on the same host and port) is followed"
     )]
     Redirect(String),
     #[error("too many redirects")]
@@ -96,11 +134,15 @@ impl Origin {
         format!("{scheme}://{}:{}", self.host, self.port)
     }
 
-    /// The only cross-origin redirect followed: the same host from http to
-    /// https (Synology redirects port 5000 to 5001). Credentials then only
-    /// travel encrypted.
+    /// The only cross-origin redirect followed: the same host and port from
+    /// http to https, or the default port 80 to the default port 443.
+    /// Credentials then only travel encrypted. (A redirect to another port,
+    /// e.g. Synology's 5000 to 5001, is refused: give the https URL.)
     pub fn is_upgrade_to(&self, other: &Self) -> bool {
-        !self.https && other.https && self.host == other.host
+        !self.https
+            && other.https
+            && self.host == other.host
+            && (self.port == other.port || (self.port == 80 && other.port == 443))
     }
 }
 
@@ -210,7 +252,9 @@ pub fn path_key(uri: &Uri) -> String {
 pub struct Remote {
     http: HttpClient,
     origin: Origin,
-    authorization: HeaderValue,
+    /// `Basic …`, wiped on drop. The `HeaderValue` built from it for each
+    /// request is marked sensitive and lives only as long as the request.
+    authorization: Zeroizing<String>,
     limits: Limits,
     delay: Duration,
     /// Set once the server redirected from http to https.
@@ -222,23 +266,39 @@ impl Remote {
         http: HttpClient,
         start: &Uri,
         user: &str,
-        password: &Secret,
+        password: &Password,
         limits: Limits,
         delay: Duration,
     ) -> Result<Self, RemoteError> {
         let origin = Origin::of(start)?;
-        let credentials = STANDARD.encode(format!("{user}:{}", password.expose()));
-        let mut authorization = HeaderValue::try_from(format!("Basic {credentials}"))
-            .map_err(|_| RemoteError::Invalid("invalid user name".to_owned()))?;
-        authorization.set_sensitive(true);
-        Ok(Self {
+        // Buffers are allocated with their final size, so no copy is left
+        // behind by reallocation.
+        let password = password.expose();
+        let mut plain = Zeroizing::new(String::with_capacity(user.len() + 1 + password.len()));
+        plain.push_str(user);
+        plain.push(':');
+        plain.push_str(password);
+        let encoded = plain.len().div_ceil(3) * 4;
+        let mut authorization = Zeroizing::new(String::with_capacity(6 + encoded));
+        authorization.push_str("Basic ");
+        STANDARD.encode_string(plain.as_bytes(), &mut authorization);
+        let remote = Self {
             http,
             origin,
             authorization,
             limits,
             delay,
             upgraded: false,
-        })
+        };
+        remote.authorization_header()?;
+        Ok(remote)
+    }
+
+    fn authorization_header(&self) -> Result<HeaderValue, RemoteError> {
+        let mut value = HeaderValue::from_str(&self.authorization)
+            .map_err(|_| RemoteError::Invalid("invalid user name".to_owned()))?;
+        value.set_sensitive(true);
+        Ok(value)
     }
 
     pub fn origin(&self) -> &Origin {
@@ -342,7 +402,7 @@ impl Remote {
         if let Some(next) = self.resolve(current, location) {
             return Ok(next);
         }
-        let refused = || RemoteError::Redirect(printable(location.trim()));
+        let refused = || RemoteError::Redirect(redact_url(location));
         let target: Uri = location.trim().parse().map_err(|_| refused())?;
         let origin = Origin::of(&target).map_err(|_| refused())?;
         if self.origin.is_upgrade_to(&origin) {
@@ -366,7 +426,7 @@ impl Remote {
             tokio::time::sleep(self.delay).await;
         }
         let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, self.authorization.clone());
+        headers.insert(AUTHORIZATION, self.authorization_header()?);
         if let Some(depth) = depth {
             headers.insert(DEPTH, HeaderValue::from_static(depth));
         }

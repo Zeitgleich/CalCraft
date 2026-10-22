@@ -351,8 +351,10 @@ account on another CalDAV/CardDAV server into a CalCraft user. It finds them via
 `.well-known`, `current-user-principal` and the home sets, keeps name, color,
 description and component set (VEVENT/VTODO/VJOURNAL) of each collection, and
 imports every object through the same validation as `calcraft import`, keeping
-its UID. Valid objects are stored byte for byte; a resource with several UIDs is
-split, one without UID gets a UID derived from its source name.
+its UID. Valid objects are stored as received, after validation and after line
+endings are normalised to CRLF (multiget responses carry the data inside XML,
+whose parsing turns CRLF into LF); a resource with several UIDs is split, one
+without UID gets a UID derived from its source name.
 
 ```sh
 calcraft migrate --from https://nas.example.com:5001/caldav/ \
@@ -368,9 +370,12 @@ calcraft migrate --from https://nas.example.com:5001/caldav/ \
 | Nextcloud | `https://<host>/remote.php/dav/` | Use an app password; shared calendars only with `--include-shared`. |
 
 - **Password:** prompted for, or the first line of `--password-file <file>`
-  (mode `600`), or `CALCRAFT_MIGRATE_PASSWORD`; never on the command line, never
-  in the URL, never printed or logged. It is sent as HTTP Basic, only to the
-  origin of `--from`.
+  (a regular file, not a link, mode `600`), or `CALCRAFT_MIGRATE_PASSWORD`; never
+  on the command line, never in the URL, never printed or logged, and wiped from
+  memory when no longer needed. The environment variable is not removed from the
+  process environment (that needs `unsafe` code, which CalCraft forbids), so
+  prefer the prompt or the file. It is sent as HTTP Basic, only to the origin of
+  `--from`.
 - **Options:** `--dry-run` (discover, fetch and validate, write nothing),
   `--only calendars|addressbooks`, `--map source-slug=target-slug` (repeatable;
   otherwise the slug comes from the last path segment of the source, made safe),
@@ -391,8 +396,12 @@ calcraft migrate --from https://nas.example.com:5001/caldav/ \
 - **Network rules:** HTTPS only, with the system trust store plus `--ca-file`;
   there is no switch to disable certificate checks. `--allow-http` permits plain
   HTTP with a warning (password and data unencrypted). Redirects are followed only
-  within the origin, or from `http` to `https` on the same host (Synology's
-  5000 → 5001); hrefs pointing elsewhere are ignored. Private and loopback
+  within the origin, or from `http` to `https` on the same host and port (or
+  from port 80 to 443); a redirect to another port, such as Synology's
+  5000 → 5001, is refused – pass the `https://…:5001/` URL instead. Hrefs
+  pointing elsewhere are ignored, and URLs in messages lose query and fragment.
+  Once the quota or object limit is reached, the rest of a collection is not
+  fetched (reported as skipped). Private and loopback
   addresses are allowed: unlike server-side fetches such as webcal subscriptions,
   where users choose URLs and SSRF rules keep the server out of its own network,
   this command is run by the administrator against a server they name – usually

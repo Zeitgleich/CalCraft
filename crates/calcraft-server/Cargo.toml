@@ -23,7 +23,7 @@ oidc = ["api", "https-client", "dep:ring"]
 update-check = ["api", "https-client"]
 # `calcraft migrate`: copies calendars and address books from another
 # CalDAV/CardDAV server (outbound HTTPS client, no new crates).
-migrate = ["https-client"]
+migrate = ["https-client", "dep:zeroize"]
 # Outbound HTTPS client used by `oidc`, `update-check` and `migrate`; not
 # useful alone.
 https-client = [
@@ -66,6 +66,7 @@ tokio = { workspace = true, features = ["time"] }
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+zeroize = { workspace = true, optional = true }
 
 [dev-dependencies]
 calcraft-store = { workspace = true, features = ["test-hooks"] }

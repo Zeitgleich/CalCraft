@@ -15,14 +15,14 @@
 //! server-side fetches (webcal subscriptions), where users choose the URL
 //! and the server must not be turned into a proxy into its own network.
 //! Still, requests only go to the origin of `--from`: redirects to other
-//! origins are refused (except http to https on the same host), hrefs of
+//! origins are refused (except http to https on the same host and port), hrefs of
 //! other origins are ignored, and the password is only sent there, as HTTP
 //! Basic over TLS (plain HTTP only with `--allow-http`).
 
 mod remote;
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     io::{Read, Write},
     path::{Path, PathBuf},
     time::Duration,
@@ -34,14 +34,15 @@ use calcraft_core::{CollectionKind, Slug, Username, api::ImportReport};
 use calcraft_dav::xml::{NS_APPLE_ICAL, NS_CALDAV, NS_CALENDARSERVER, NS_CARDDAV, NS_DAV};
 use calcraft_ical::{ComponentKind, MAX_OBJECT_SIZE};
 use calcraft_store::{Collection, MAX_ITEMS_PER_COLLECTION, Store, StoreError};
+use zeroize::Zeroizing;
 
 use crate::{
-    config::Secret,
     https::{HttpClient, Limits},
     transfer::{OnConflict, Writer, prepare_fetched, printable},
     validate::{MAX_DESCRIPTION, MAX_DISPLAY_NAME, clean_color, clean_text},
 };
-use remote::{Entry, Remote, RemoteError, path_key, percent_decode};
+pub use remote::Password;
+use remote::{Entry, Remote, RemoteError, path_key, percent_decode, redact_url};
 
 /// Default cap for one response (listings and multiget batches).
 pub const DEFAULT_MAX_RESPONSE: usize = 32 * 1024 * 1024;
@@ -88,7 +89,7 @@ pub struct Options {
     /// CardDAV URL, if the server has a separate one (Synology).
     pub carddav_from: Option<String>,
     pub source_user: String,
-    pub password: Secret,
+    pub password: Password,
     /// Local user that receives the collections.
     pub user: String,
     pub dry_run: bool,
@@ -111,7 +112,7 @@ pub struct Options {
 }
 
 impl Options {
-    pub fn new(from: &str, source_user: &str, password: Secret, user: &str) -> Self {
+    pub fn new(from: &str, source_user: &str, password: Password, user: &str) -> Self {
         Self {
             from: from.to_owned(),
             carddav_from: None,
@@ -220,12 +221,16 @@ impl Summary {
     }
 }
 
-/// Reads a password from the first line of a file that only its owner can
-/// read (on Unix: no group or other permission bits).
-pub fn read_password_file(path: &Path) -> anyhow::Result<Secret> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("failed to open password file {}", path.display()))?;
-    let metadata = file.metadata()?;
+/// Checks that a password file is a regular file (no symlink, FIFO or
+/// device), small, and on Unix accessible only by its owner.
+fn check_password_file(path: &Path, metadata: &std::fs::Metadata) -> anyhow::Result<()> {
+    if !metadata.file_type().is_file() || metadata.len() > MAX_PASSWORD_FILE {
+        bail!(
+            "password file {} must be a regular file (not a link or device) of at most \
+             {MAX_PASSWORD_FILE} bytes",
+            path.display()
+        );
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -236,13 +241,34 @@ pub fn read_password_file(path: &Path) -> anyhow::Result<Secret> {
             );
         }
     }
-    if !metadata.is_file() || metadata.len() > MAX_PASSWORD_FILE {
-        bail!(
-            "password file {} must be a regular file of at most {MAX_PASSWORD_FILE} bytes",
-            path.display()
-        );
+    Ok(())
+}
+
+/// Reads a password from the first line of a file that only its owner can
+/// read. The path is checked without following links before it is opened,
+/// and the opened file is checked again (and on Unix must be the same file).
+pub fn read_password_file(path: &Path) -> anyhow::Result<Password> {
+    let before = std::fs::symlink_metadata(path)
+        .with_context(|| format!("failed to read password file {}", path.display()))?;
+    check_password_file(path, &before)?;
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("failed to open password file {}", path.display()))?;
+    let opened = file.metadata()?;
+    check_password_file(path, &opened)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (before.dev(), before.ino()) != (opened.dev(), opened.ino()) {
+            bail!(
+                "password file {} was replaced while reading it",
+                path.display()
+            );
+        }
     }
-    let mut text = String::new();
+    // Allocated once with room for the whole file, so no copy of the
+    // password is left behind by reallocation.
+    let capacity = usize::try_from(MAX_PASSWORD_FILE).unwrap_or(4096) + 1;
+    let mut text = Zeroizing::new(String::with_capacity(capacity));
     file.take(MAX_PASSWORD_FILE)
         .read_to_string(&mut text)
         .context("password file is not UTF-8")?;
@@ -250,7 +276,7 @@ pub fn read_password_file(path: &Path) -> anyhow::Result<Secret> {
     if password.is_empty() {
         bail!("password file {} is empty", path.display());
     }
-    Ok(Secret::new(password))
+    Ok(Password::new(password))
 }
 
 /// A calendar or address book found on the source server.
@@ -285,13 +311,13 @@ fn parse_url(text: &str, allow_http: bool) -> anyhow::Result<Uri> {
     let uri: Uri = text
         .trim()
         .parse()
-        .with_context(|| format!("invalid URL {:?}", printable(text)))?;
+        .with_context(|| format!("invalid URL {:?}", redact_url(text)))?;
     let origin = remote::Origin::of(&uri)?;
     if !origin.is_https() && !allow_http {
         bail!(
             "{} uses plain http: the password would be sent unencrypted. Use https \
              (with --ca-file for a self-signed certificate) or pass --allow-http",
-            printable(text)
+            redact_url(text)
         );
     }
     Ok(uri)
@@ -546,9 +572,17 @@ fn foreign_owner(owner: &str, principal: &str) -> bool {
         .or_else(|| owner.strip_prefix("https://"))
         .map_or(owner, |rest| rest.find('/').map_or("", |i| &rest[i..]));
     let owner = percent_decode(owner);
-    let owner = owner.trim_matches('/');
-    let principal = principal.trim_matches('/');
-    !owner.is_empty() && !principal.is_empty() && !principal.ends_with(owner)
+    let segments = |path: &str| -> Vec<String> {
+        path.split('/')
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let owner = segments(&owner);
+    let principal = segments(principal);
+    // `principals/users/alice` (ownCloud) names `/remote.php/dav/principals/users/alice/`:
+    // whole trailing segments must match.
+    !owner.is_empty() && !principal.is_empty() && !principal.ends_with(&owner)
 }
 
 async fn list_collections(
@@ -559,6 +593,7 @@ async fn list_collections(
     summary: &mut Summary,
 ) -> anyhow::Result<Vec<SourceCollection>> {
     let mut found: Vec<SourceCollection> = Vec::new();
+    let mut seen = HashSet::new();
     let mut listed = 0;
     let mut last_error = None;
     for home in homes {
@@ -577,7 +612,7 @@ async fn list_collections(
                 continue;
             };
             let key = path_key(&uri);
-            if key == home_key || found.iter().any(|c| path_key(&c.uri) == key) {
+            if key == home_key || !seen.insert(key) {
                 continue;
             }
             let Some(types) = entry.prop(NS_DAV, "resourcetype") else {
@@ -805,7 +840,16 @@ async fn copy_objects(
         CollectionKind::Addressbook => options.max_vcard_bytes,
     };
     let mut multiget = true;
-    for chunk in paths.chunks(options.batch_size) {
+    for (index, chunk) in paths.chunks(options.batch_size).enumerate() {
+        if let Some(reason) = writer.limit() {
+            // Quota or object limit: fetching more would be wasted.
+            let rest = paths.len() - index * options.batch_size;
+            writer.report.skipped += rest as u64;
+            return Err(RemoteError::Invalid(format!(
+                "{reason}: the remaining {rest} objects were not fetched"
+            ))
+            .into());
+        }
         let fetched = fetch(source, from, &at, chunk, &mut multiget, max_object).await?;
         let owned = collection.clone();
         let max_vcard_bytes = options.max_vcard_bytes;
@@ -875,7 +919,12 @@ async fn fetch(
     max_object: usize,
 ) -> Result<Fetched, RemoteError> {
     let mut fetched = Vec::with_capacity(paths.len());
-    let mut pending: Vec<&String> = paths.iter().collect();
+    // Requested paths by comparison key; answered ones are removed, so
+    // duplicate and unexpected hrefs in the answer are ignored.
+    let mut pending: HashMap<String, &String> = paths
+        .iter()
+        .map(|p| (percent_decode(p).trim_end_matches('/').to_owned(), p))
+        .collect();
     if *multiget {
         match source.multiget(&from.uri, from.kind, paths).await? {
             Some((report_at, entries)) => {
@@ -888,20 +937,17 @@ async fn fetch(
                         continue;
                     };
                     let key = path_key(&uri);
-                    let Some(index) = pending
-                        .iter()
-                        .position(|p| percent_decode(p).trim_end_matches('/') == key)
-                    else {
+                    let Some(&path) = pending.get(&key) else {
                         continue;
                     };
-                    let name = object_name(pending[index]);
+                    let name = object_name(path);
                     if let Some(data) = entry.prop(data_prop.0, data_prop.1)
                         && !data.text.trim().is_empty()
                     {
-                        pending.swap_remove(index);
+                        pending.remove(&key);
                         fetched.push((name, Ok(restore_line_endings(&data.text))));
                     } else if matches!(entry.status, Some(404 | 410)) {
-                        pending.swap_remove(index);
+                        pending.remove(&key);
                         fetched.push((name, Err("no longer exists on the source".to_owned())));
                     }
                 }
@@ -915,7 +961,12 @@ async fn fetch(
             }
         }
     }
-    for path in pending {
+    // The rest by GET, in the order listed.
+    let rest: Vec<&String> = paths
+        .iter()
+        .filter(|p| pending.contains_key(percent_decode(p).trim_end_matches('/')))
+        .collect();
+    for path in rest {
         let name = object_name(path);
         let Some(uri) = source.resolve(at, path) else {
             fetched.push((name, Err("invalid href".to_owned())));
