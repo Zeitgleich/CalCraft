@@ -4,7 +4,15 @@
 //! ever built from user input. A PostgreSQL backend and a storage trait
 //! follow once a second backend exists.
 
-use std::{fmt, path::Path, str::FromStr, sync::Arc};
+use std::{
+    fmt,
+    path::Path,
+    str::FromStr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering},
+    },
+};
 
 use calcraft_core::{CollectionKind, Slug, Username};
 use sqlx::{
@@ -17,6 +25,7 @@ mod backup;
 mod items;
 mod oidc;
 mod test_hooks;
+mod trash;
 
 pub use accounts::{
     AppPassword, MAX_APP_PASSWORDS, RECOVERY_CODES, Session, TotpEnableOutcome, TotpState,
@@ -29,9 +38,14 @@ pub use items::{
     Change, Item, ItemIndex, ItemMeta, NewItem, Precondition, PutOutcome, QueryCandidate,
     StaleIndex, Transfer, TransferOutcome,
 };
+pub use items::{MAX_BYTES_PER_USER, MAX_ITEMS_PER_COLLECTION};
 pub use oidc::{ApprovedBinding, OidcBinding};
 #[cfg(feature = "test-hooks")]
 pub use test_hooks::SimulatedFailure;
+pub use trash::{
+    DEFAULT_TRASH_RETENTION_DAYS, MAX_EVICT_ROWS, MAX_TRASH_ROWS_PER_USER, RestoredEntry,
+    TrashConflict, TrashEntry, TrashEntryKind, TrashPage,
+};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -79,6 +93,9 @@ pub enum StoreError {
     UnsupportedComponent,
     #[error("limit reached: {0}")]
     Limit(&'static str),
+    /// A trash entry cannot be restored (see [`TrashConflict`]).
+    #[error("cannot restore: {0}")]
+    TrashConflict(TrashConflict),
     #[error("{0}")]
     Backup(String),
     #[error("{0}")]
@@ -210,6 +227,59 @@ pub struct Store {
     /// Simulated failures (feature `test-hooks`; empty otherwise).
     #[allow(dead_code)]
     simulation: test_hooks::Simulation,
+    /// Runtime settings shared by all clones.
+    pub(crate) settings: Arc<Settings>,
+}
+
+/// Settings of a [`Store`] that are not part of the schema.
+#[derive(Debug)]
+pub(crate) struct Settings {
+    /// Days deleted objects stay in the trash; 0 disables the trash.
+    trash_retention_days: AtomicU32,
+    /// Storage quota per user (objects plus trash).
+    quota_bytes: AtomicI64,
+    /// Rows (objects and collections) in the trash per user.
+    max_trash_rows: AtomicI64,
+    /// Rows one delete may remove synchronously from a full trash.
+    max_evict_rows: AtomicI64,
+    /// Entries were hidden for the purge; run it soon.
+    purge_requested: AtomicBool,
+}
+
+impl Settings {
+    pub(crate) fn new(trash_retention_days: u32) -> Arc<Self> {
+        Arc::new(Self {
+            trash_retention_days: AtomicU32::new(trash_retention_days),
+            quota_bytes: AtomicI64::new(items::MAX_BYTES_PER_USER),
+            max_trash_rows: AtomicI64::new(trash::MAX_TRASH_ROWS_PER_USER),
+            max_evict_rows: AtomicI64::new(trash::MAX_EVICT_ROWS),
+            purge_requested: AtomicBool::new(false),
+        })
+    }
+
+    pub(crate) fn trash_retention_days(&self) -> u32 {
+        self.trash_retention_days.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn quota_bytes(&self) -> i64 {
+        self.quota_bytes.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn max_trash_rows(&self) -> i64 {
+        self.max_trash_rows.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn max_evict_rows(&self) -> i64 {
+        self.max_evict_rows.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn request_purge(&self) {
+        self.purge_requested.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn take_purge_request(&self) -> bool {
+        self.purge_requested.swap(false, Ordering::Relaxed)
+    }
 }
 
 impl Store {
@@ -239,7 +309,40 @@ impl Store {
             lock: None,
             path: None,
             simulation,
+            settings: Settings::new(DEFAULT_TRASH_RETENTION_DAYS),
         })
+    }
+
+    /// Days deleted objects stay in the trash; 0 means the trash is
+    /// disabled and deletions are final.
+    pub fn trash_retention_days(&self) -> u32 {
+        self.settings.trash_retention_days()
+    }
+
+    /// Changes the trash retention (`storage.trash_retention_days`).
+    pub fn set_trash_retention_days(&self, days: u32) {
+        self.settings
+            .trash_retention_days
+            .store(days, Ordering::Relaxed);
+    }
+
+    /// Lowers the per-user quota and the trash size limit, for tests of
+    /// the limits (feature `test-hooks`).
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_limits_for_testing(&self, quota_bytes: i64, max_trash_rows: i64) {
+        self.settings
+            .quota_bytes
+            .store(quota_bytes, Ordering::Relaxed);
+        self.settings
+            .max_trash_rows
+            .store(max_trash_rows, Ordering::Relaxed);
+    }
+
+    /// Lowers the number of rows a delete may remove synchronously from a
+    /// full trash, for tests (feature `test-hooks`).
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_eviction_budget_for_testing(&self, rows: i64) {
+        self.settings.max_evict_rows.store(rows, Ordering::Relaxed);
     }
 
     /// Checks that the database is reachable.
@@ -261,7 +364,12 @@ impl Store {
     /// so quota tests need not write 512 MiB (feature `test-hooks`).
     #[cfg(feature = "test-hooks")]
     pub fn set_quota_for_tests(&self, bytes: i64) {
-        self.simulation.set_quota(bytes);
+        let bytes = if bytes > 0 {
+            bytes
+        } else {
+            items::MAX_BYTES_PER_USER
+        };
+        self.settings.quota_bytes.store(bytes, Ordering::Relaxed);
     }
 
     /// Creates a user with a default calendar and address book.

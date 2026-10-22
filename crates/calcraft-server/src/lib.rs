@@ -17,6 +17,7 @@ pub mod secrets;
 pub mod security;
 pub mod telemetry;
 pub mod transfer;
+pub mod trash;
 #[cfg(feature = "update-check")]
 pub mod updates;
 pub mod validate;

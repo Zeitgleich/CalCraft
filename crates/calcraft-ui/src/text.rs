@@ -8,6 +8,7 @@ pub const NAV_LABEL: &str = "Main navigation";
 pub const NAV_OVERVIEW: &str = "Overview";
 pub const NAV_SETTINGS: &str = "Account";
 pub const NAV_APP_PASSWORDS: &str = "App passwords";
+pub const NAV_TRASH: &str = "Trash";
 pub const NAV_ADMIN: &str = "Administration";
 pub const LOGOUT: &str = "Log out";
 pub const LOADING: &str = "Loading …";
@@ -79,7 +80,48 @@ pub const USE_COLOR: &str = "Use a color";
 pub const DELETE_CONFIRM: &str = "Delete permanently";
 
 pub fn confirm_delete_collection(name: &str) -> String {
-    format!("Delete “{name}” with all its entries? This cannot be undone.")
+    format!(
+        "Delete “{name}” with all its entries? Unless the trash is disabled on this server, you can restore it from the trash."
+    )
+}
+
+// Trash
+pub const TRASH_TITLE: &str = "Trash";
+pub const TRASH_EMPTY: &str = "The trash is empty.";
+pub const TRASH_DISABLED: &str = "The trash is disabled on this server: deleted entries are removed immediately and cannot be restored.";
+pub const RESTORE: &str = "Restore";
+pub const DELETE_FOREVER: &str = "Delete permanently";
+pub const EMPTY_TRASH: &str = "Empty trash";
+pub const EMPTY_TRASH_CONFIRM: &str =
+    "Delete everything in the trash permanently? This cannot be undone.";
+pub const CONFIRM_DELETE_FOREVER: &str = "Delete this entry permanently? This cannot be undone.";
+pub const TRASH_DELETED: &str = "Deleted";
+pub const TRASH_EVENT: &str = "Calendar entry";
+pub const TRASH_CONTACT: &str = "Contact";
+pub const TRASH_REMOVED: &str = "removed for good";
+pub const TRASH_RESTORED: &str = "Restored. Your apps will sync it back.";
+pub const TRASH_EMPTIED: &str = "The trash has been emptied.";
+pub const TRASH_LOAD_MORE: &str = "Load more";
+pub const TRASH_RESTORE_INTO: &str = "Restore into";
+pub const TRASH_NO_TARGET: &str = "There is no other calendar or address book of this type. Create one on the overview page first.";
+
+pub fn trash_hint(days: u32) -> String {
+    format!(
+        "Deleted calendar entries, contacts, calendars and address books are kept here for {days} days, then removed for good. Until then they count towards your storage."
+    )
+}
+
+pub fn trash_usage(total: i64, size: &str) -> String {
+    format!("{} · {size}", trash_items(total))
+}
+
+pub fn trash_more(shown: usize, total: i64) -> String {
+    format!("Showing the newest {shown} of {total} entries.")
+}
+
+pub fn trash_items(count: i64) -> String {
+    let entries = if count == 1 { "entry" } else { "entries" };
+    format!("{count} {entries}")
 }
 
 // Account settings
@@ -172,6 +214,17 @@ pub const ERR_CSRF: &str = "The request was rejected (missing CSRF header).";
 pub const ERR_NETWORK: &str = "The server could not be reached. Please check your connection.";
 pub const ERR_NOT_FOUND: &str = "Not found. It may have been deleted in the meantime.";
 pub const ERR_UNKNOWN: &str = "Something went wrong.";
+pub const ERR_RESTORE_NAME_TAKEN: &str =
+    "Cannot restore: an entry with the same name exists again. Delete it first.";
+pub const ERR_RESTORE_UID_TAKEN: &str =
+    "Cannot restore: the same entry (same UID) exists again in its collection.";
+pub const ERR_RESTORE_COLLECTION_EXISTS: &str = "Cannot restore: a calendar or address book with the same short name exists again. Delete it first.";
+pub const ERR_RESTORE_COLLECTION_IN_TRASH: &str =
+    "Its calendar or address book is in the trash as well. Restore that first.";
+pub const ERR_RESTORE_COLLECTION_DELETED: &str =
+    "Its calendar or address book was deleted permanently. Choose another one to restore it into.";
+pub const ERR_RESTORE_INVALID_TARGET: &str =
+    "Please choose an existing calendar or address book of the same type.";
 pub const ERR_LOGIN_FIELDS: &str = "Please enter username and password.";
 pub const ERR_CURRENT_PASSWORD: &str = "Please enter your current password.";
 pub const ERR_DISABLE_FIELDS: &str = "Please enter your password and a code.";

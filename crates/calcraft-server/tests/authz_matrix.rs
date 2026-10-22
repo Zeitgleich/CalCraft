@@ -96,6 +96,9 @@ struct Fixture {
     bob_app: String,
     #[cfg_attr(not(feature = "api"), allow(dead_code))]
     bob_app_id: i64,
+    /// Id of the entry in bob's trash.
+    #[cfg_attr(not(feature = "api"), allow(dead_code))]
+    bob_trash_id: String,
     /// Raw session tokens (cookie values).
     alice_session: String,
     bob_session: String,
@@ -224,7 +227,42 @@ async fn snapshot(store: &Store, user: &User, session: &str) -> String {
         store.session(&hash_secret(session), now()).await.unwrap()
     );
     out += &format!("{:?}\n", store.totp_state(user.id).await.unwrap());
+    out += &format!(
+        "{:?}\n",
+        store.trash_entries(user.id, 1000, 0).await.unwrap()
+    );
     out
+}
+
+/// Puts an extra object into the default calendar and deletes it into the
+/// trash; returns the trash entry id.
+async fn seed_trash(store: &Store, user: &User, prefix: &str) -> String {
+    let cal = store
+        .collection(
+            user.id,
+            CollectionKind::Calendar,
+            &"default".parse().unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let name = format!("{prefix}-trashed.ics");
+    put_seed(
+        store,
+        &cal,
+        prefix,
+        &name,
+        &event("@UID@", &format!("{prefix}-summary-trashed")),
+    )
+    .await;
+    store
+        .delete_item_to_trash(cal.id, &name, &Precondition::None, now(), |_| {
+            Some(format!("{prefix}-summary-trashed"))
+        })
+        .await
+        .unwrap();
+    let entries = store.trash_entries(user.id, 10, 0).await.unwrap().entries;
+    entries[0].id.clone()
 }
 
 async fn fixture() -> Fixture {
@@ -247,6 +285,8 @@ async fn fixture() -> Fixture {
         .unwrap();
     seed(&store, &alice, &ALICE).await;
     seed(&store, &bob, &BOB).await;
+    seed_trash(&store, &alice, ALICE.prefix).await;
+    let bob_trash_id = seed_trash(&store, &bob, BOB.prefix).await;
     let (_, alice_app) = app_password(&store, &alice, "alice-apppw").await;
     let (bob_app_id, bob_app) = app_password(&store, &bob, "zqbobmark-apppw").await;
     let alice_session = session(&store, &alice).await;
@@ -267,6 +307,8 @@ async fn fixture() -> Fixture {
         "zqbobmark-summary-ev1",
         "zqbobmark-summary-ev2",
         "zqbobmark-fn",
+        "zqbobmark-trashed.ics",
+        "zqbobmark-summary-trashed",
         "/principals/bob",
         "/calendars/bob",
         "/addressbooks/bob",
@@ -274,7 +316,7 @@ async fn fixture() -> Fixture {
     .iter()
     .map(|m| (*m).to_owned())
     .collect();
-    markers.extend([bob_app.clone(), bob_session.clone()]);
+    markers.extend([bob_app.clone(), bob_session.clone(), bob_trash_id.clone()]);
     let mut bob_sync_token = String::new();
     for kind in KINDS {
         for collection in store.collections(bob.id, kind).await.unwrap() {
@@ -314,6 +356,7 @@ async fn fixture() -> Fixture {
         alice_app,
         bob_app,
         bob_app_id,
+        bob_trash_id,
         alice_session,
         bob_session,
         bob_sync_token,
@@ -1541,7 +1584,9 @@ mod api_matrix {
 
     /// The matrix, in execution order. Every route of `ROUTES` must appear
     /// exactly once; logout comes last because it ends alice's session.
-    fn cases(bob_app: &str, bob_app_id: i64) -> Vec<ApiCase> {
+    fn cases(bob_app: &str, bob_app_id: i64, bob_trash_id: &str) -> Vec<ApiCase> {
+        let bob_trash = format!("/api/v1/trash/{bob_trash_id}");
+        let no_trash = "/api/v1/trash/00000000000000000000000000000000".to_owned();
         let bob_app_uri = format!("/api/v1/app-passwords/{bob_app_id}");
         let bob_cal = "/api/v1/collections/calendar/zqbobmark-cal2".to_owned();
         let no_cal = "/api/v1/collections/calendar/zz-missing".to_owned();
@@ -1583,6 +1628,14 @@ mod api_matrix {
                     &super::event("zzattack-import", "zzattack"),
                 ),
             case("delete", "/v1/collections/{kind}/{slug}", 404).uri(bob_cal, no_cal),
+            // Alice sees only her own trash; bob's entry ids are unknown to her.
+            case("get", "/v1/trash", 200),
+            case("post", "/v1/trash/{id}/restore", 404).uri(
+                format!("{bob_trash}/restore"),
+                format!("{no_trash}/restore"),
+            ),
+            case("delete", "/v1/trash/{id}", 404).uri(bob_trash, no_trash),
+            case("delete", "/v1/trash", 204),
             case("get", "/v1/admin/users", 403),
             case("post", "/v1/admin/users", 403).body(json!({
                 "username": "mallory",
@@ -1633,7 +1686,7 @@ mod api_matrix {
 
     #[test]
     fn api_matrix_covers_every_route() {
-        let table = cases("ccap_1_x", 1);
+        let table = cases("ccap_1_x", 1, "0123456789abcdef0123456789abcdef");
         let covered: Vec<(&str, &str)> = table.iter().map(|c| (c.method, c.route)).collect();
         let unique: BTreeSet<_> = covered.iter().copied().collect();
         assert_eq!(unique.len(), covered.len(), "duplicate matrix entries");
@@ -1666,7 +1719,7 @@ mod api_matrix {
         let mut unauthorized: Option<Reply> = None;
         let mut csrf: Option<Reply> = None;
 
-        for case in cases(&fx.bob_app, fx.bob_app_id) {
+        for case in cases(&fx.bob_app, fx.bob_app_id, &fx.bob_trash_id) {
             let method = case.method;
             let body = case.body.as_ref();
             let context = format!("{method} {}", case.route);

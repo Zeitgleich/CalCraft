@@ -13,6 +13,8 @@ use calcraft_core::CollectionKind;
 use calcraft_ical::{CalendarObject, INDEX_VERSION, IcalError, MAX_OBJECT_SIZE, VCard};
 use calcraft_store::{Collection, NewItem, Precondition, PutOutcome, StoreError};
 
+use crate::auth::now;
+
 use super::{
     Ctx, dav_error, method_not_allowed, not_found,
     paths::{Resource, item_href},
@@ -292,10 +294,15 @@ pub async fn delete(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
     };
     match resource {
         Resource::Item(collection, name) => {
+            // Into the trash (unless disabled); for sync clients it is
+            // deleted either way.
+            let kind = collection.kind;
             match ctx
                 .state
                 .store
-                .delete_item(collection.id, &name, &precondition)
+                .delete_item_to_trash(collection.id, &name, &precondition, now(), |content| {
+                    crate::trash::summary(kind, content)
+                })
                 .await
             {
                 Ok(true) => StatusCode::NO_CONTENT.into_response(),
@@ -308,7 +315,12 @@ pub async fn delete(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
             if !matches!(precondition, Precondition::None | Precondition::MustExist) {
                 return StatusCode::PRECONDITION_FAILED.into_response();
             }
-            match ctx.state.store.delete_collection(collection.id).await {
+            match ctx
+                .state
+                .store
+                .delete_collection_to_trash(collection.id, now())
+                .await
+            {
                 Ok(()) => StatusCode::NO_CONTENT.into_response(),
                 Err(err) => store_error(err),
             }

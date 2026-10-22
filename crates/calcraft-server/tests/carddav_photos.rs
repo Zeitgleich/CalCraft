@@ -514,11 +514,23 @@ async fn photos_count_towards_the_quota() {
     .await;
     assert_eq!(reply.status, StatusCode::INSUFFICIENT_STORAGE);
 
-    // Deleting frees the space again.
+    // Deleting moves the contact to the trash, which still counts towards
+    // the quota; emptying the trash frees the space.
     assert_eq!(
         send(&app, "DELETE", &uri, &[], "").await.status,
         StatusCode::NO_CONTENT
     );
+    let third = v3_with_photo("third", &photo_base64(16));
+    let reply = put_card(&app, &format!("{BOOK}third.vcf"), &third).await;
+    assert_eq!(reply.status, StatusCode::INSUFFICIENT_STORAGE);
+    let alice = store
+        .list_users()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|user| user.username.as_str() == "alice")
+        .unwrap();
+    store.empty_trash(alice.id).await.unwrap();
     let reply = put_card(
         &app,
         &format!("{BOOK}third.vcf"),

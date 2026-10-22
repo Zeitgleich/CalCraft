@@ -457,6 +457,29 @@ async fn copy_counts_against_the_quota_move_does_not() {
     assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
 }
 
+/// The trash counts towards the quota for COPY as it does for PUT.
+#[tokio::test]
+async fn copy_counts_the_trash_against_the_quota() {
+    let (app, store) = app().await;
+    let deleted = format!("{CAL}deleted.ics");
+    let body = event("trash-uid", "VEVENT");
+    put(&app, &deleted, &body).await;
+    let reply = send(&app, ALICE, "DELETE", &deleted, &[], "").await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+    let source = format!("{CAL}a.ics");
+    put(&app, &source, &event("copy-uid", "VEVENT")).await;
+    let size = i64::try_from(body.len()).unwrap();
+    // Room for the source and its copy, but not for the trashed object too.
+    store.set_quota_for_tests(size * 5 / 2);
+    let reply = transfer(&app, "COPY", &source, &format!("{WORK}copy.ics"), &[]).await;
+    assert_eq!(
+        reply.status,
+        StatusCode::INSUFFICIENT_STORAGE,
+        "{}",
+        reply.body
+    );
+}
+
 struct TempDir(PathBuf);
 
 impl TempDir {

@@ -45,6 +45,8 @@ pub struct StoreOptions {
     /// Keep it below the request timeout, so that overload is answered
     /// with 503 and `Retry-After` instead of a request timeout.
     pub acquire_timeout: Duration,
+    /// Days deleted objects stay in the trash; 0 disables the trash.
+    pub trash_retention_days: u32,
 }
 
 /// Default of [`StoreOptions::acquire_timeout`].
@@ -56,6 +58,7 @@ impl Default for StoreOptions {
             pre_migration_backup: true,
             pre_migration_backups_keep: 3,
             acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
+            trash_retention_days: crate::DEFAULT_TRASH_RETENTION_DAYS,
         }
     }
 }
@@ -357,6 +360,7 @@ impl Store {
                     lock: Some(lock),
                     path: Some(Arc::new(path.to_path_buf())),
                     simulation,
+                    settings: crate::Settings::new(options.trash_retention_days),
                 });
             }
             pool.close().await;
@@ -376,6 +380,7 @@ impl Store {
                 lock: None,
                 path: Some(Arc::new(path.to_path_buf())),
                 simulation: simulation.clone(),
+                settings: crate::Settings::new(options.trash_retention_days),
             };
             let result = store.migrate(path, options).await;
             store.pool.close().await;

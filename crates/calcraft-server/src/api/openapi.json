@@ -1119,6 +1119,180 @@
           }
         ]
       }
+    },
+    "/v1/trash": {
+      "get": {
+        "summary": "List the trash of the logged-in user",
+        "description": "Deleted objects and collections, newest first. Entries are purged after storage.trash_retention_days (retention_days in the response; 0 = trash disabled). Their bytes count towards the storage quota until they are restored, deleted or purged.",
+        "tags": [
+          "trash"
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Entries per page (1-200, default 100).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Entries to skip.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of the trash",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrashList"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Empty the trash",
+        "description": "Deletes all entries of the logged-in user permanently. They disappear and stop counting towards the quota at once; the rows are removed by the background purge shortly after.",
+        "tags": [
+          "trash"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Emptied"
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/trash/{id}/restore": {
+      "post": {
+        "summary": "Restore a trash entry",
+        "description": "Puts an object back into its original collection under its original name, or recreates a collection with all its objects. DAV clients see the restored objects as new changes (sync-collection). Conflicts answer 409 with error = name_taken, uid_taken, collection_exists, collection_in_trash (restore the collection first) collection_deleted (restore into another collection with ?collection=) or invalid_target.",
+        "tags": [
+          "trash"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Opaque entry id (32 hex digits) from the listing. Ids of other users are answered like unknown ids.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "collection",
+            "in": "query",
+            "required": false,
+            "description": "Restore an object into this collection (short name, same kind) instead of its original one, e.g. when that was deleted permanently (collection_deleted). Not allowed for collection entries.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Restored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoredTrashEntry"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/trash/{id}": {
+      "delete": {
+        "summary": "Delete a trash entry permanently",
+        "tags": [
+          "trash"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Opaque entry id (32 hex digits) from the listing. Ids of other users are answered like unknown ids.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1675,6 +1849,152 @@
             "type": "string"
           }
         }
+      },
+      "TrashEntry": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "item",
+              "collection"
+            ]
+          },
+          "collection_kind": {
+            "type": "string",
+            "enum": [
+              "calendar",
+              "addressbook"
+            ]
+          },
+          "collection": {
+            "type": "string",
+            "description": "Short name (slug) of the collection"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Resource name of an object; null for collections"
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SUMMARY, FN or collection display name (plain text, untrusted)"
+          },
+          "size": {
+            "type": "integer",
+            "description": "Bytes"
+          },
+          "items": {
+            "type": "integer",
+            "description": "Objects in a collection entry"
+          },
+          "deleted_at": {
+            "type": "integer",
+            "description": "Unix seconds"
+          },
+          "expires_at": {
+            "type": "integer",
+            "description": "Unix seconds"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "collection_kind",
+          "collection",
+          "size",
+          "items",
+          "deleted_at",
+          "expires_at"
+        ]
+      },
+      "TrashList": {
+        "type": "object",
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TrashEntry"
+            }
+          },
+          "total": {
+            "type": "integer"
+          },
+          "bytes": {
+            "type": "integer"
+          },
+          "retention_days": {
+            "type": "integer",
+            "description": "0 = trash disabled"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "limit": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "entries",
+          "total",
+          "bytes",
+          "retention_days",
+          "offset",
+          "limit"
+        ]
+      },
+      "RestoredTrashEntry": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "item",
+              "collection"
+            ]
+          },
+          "collection_kind": {
+            "type": "string",
+            "enum": [
+              "calendar",
+              "addressbook"
+            ]
+          },
+          "collection": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "etag": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Entity tag of a restored object (unchanged)"
+          },
+          "href": {
+            "type": "string",
+            "description": "DAV URL"
+          }
+        },
+        "required": [
+          "kind",
+          "collection_kind",
+          "collection",
+          "href"
+        ]
       }
     }
   }

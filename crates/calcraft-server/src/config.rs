@@ -109,6 +109,10 @@ pub struct StorageConfig {
     pub pre_migration_backup: bool,
     /// Number of pre-migration backups to keep; older ones are deleted.
     pub pre_migration_backups_keep: usize,
+    /// Days deleted objects and collections stay in the trash before they
+    /// are purged; 0 disables the trash (deletions are final, entries left
+    /// in the trash are purged).
+    pub trash_retention_days: u32,
     /// Largest accepted vCard in bytes (`CARDDAV:max-resource-size`),
     /// including embedded photos. At most [`MAX_VCARD_BYTES`] and
     /// `server.max_body_bytes`. Unset: [`DEFAULT_MAX_VCARD_BYTES`], or
@@ -117,6 +121,9 @@ pub struct StorageConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_vcard_bytes: Option<usize>,
 }
+
+/// Largest accepted `storage.trash_retention_days`.
+pub const MAX_TRASH_RETENTION_DAYS: u32 = 3650;
 
 /// Default of `storage.max_vcard_bytes`: room for a high-resolution
 /// contact photo (base64 adds a third).
@@ -132,6 +139,7 @@ impl Default for StorageConfig {
             database: PathBuf::from("calcraft.db"),
             pre_migration_backup: true,
             pre_migration_backups_keep: 3,
+            trash_retention_days: calcraft_store::DEFAULT_TRASH_RETENTION_DAYS,
             max_vcard_bytes: None,
         }
     }
@@ -142,6 +150,7 @@ impl StorageConfig {
         calcraft_store::StoreOptions {
             pre_migration_backup: self.pre_migration_backup,
             pre_migration_backups_keep: self.pre_migration_backups_keep,
+            trash_retention_days: self.trash_retention_days,
             ..calcraft_store::StoreOptions::default()
         }
     }
@@ -610,6 +619,11 @@ impl Config {
                 "storage.pre_migration_backups_keep must be at least 1",
             ));
         }
+        if self.storage.trash_retention_days > MAX_TRASH_RETENTION_DAYS {
+            return Err(ConfigError::Invalid(
+                "storage.trash_retention_days must be at most 3650 (0 disables the trash)",
+            ));
+        }
         // Only an explicit value is checked: the default adapts to a smaller
         // body limit, so existing configurations keep working.
         if let Some(vcard) = self.storage.max_vcard_bytes {
@@ -729,6 +743,17 @@ mod tests {
                 .unwrap();
         assert!(!config.storage.store_options().pre_migration_backup);
         assert_eq!(config.storage.store_options().pre_migration_backups_keep, 5);
+    }
+
+    #[test]
+    fn trash_retention() {
+        let config = Config::default();
+        assert_eq!(config.storage.trash_retention_days, 30);
+        assert_eq!(config.storage.store_options().trash_retention_days, 30);
+        let config = from_toml("[storage]\ntrash_retention_days = 0\n").unwrap();
+        assert_eq!(config.storage.store_options().trash_retention_days, 0);
+        assert!(from_toml("[storage]\ntrash_retention_days = 3651\n").is_err());
+        assert!(from_toml("[storage]\ntrash_retention_days = -1\n").is_err());
     }
 
     #[test]

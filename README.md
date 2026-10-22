@@ -182,6 +182,27 @@ backup with the previous version. Details in
 Time-range queries, recurrence and time zones (what is exact, what is
 conservative, budgets): [`docs/caldav.md`](docs/caldav.md).
 
+### Trash
+
+Deleting a calendar entry, contact, calendar or address book (from a DAV
+client or the web UI) moves it into the owner's trash for
+`storage.trash_retention_days` (default 30; `0` disables the trash). DAV
+clients see the deletion as usual. On the **Trash** page (or
+`/api/v1/trash`) users restore entries – into the original collection under
+the original name, so clients sync them back – or delete them permanently.
+A deleted collection goes to the trash with all its entries and is restored
+as a whole; entries whose collection was deleted permanently can be
+restored into another collection. The trash counts towards the user's storage
+quota until it is emptied or its entries expire; expired entries are purged
+at startup and hourly.
+
+Deleted data stays on the server (and in backups) for the retention period,
+which matters for deletion requests (GDPR Art. 17): users remove it at once
+with **Empty trash** / **Delete permanently**; operators can set
+`trash_retention_days = 0` and restart, which purges **all** trash entries
+of all users (CalCraft logs a warning with their number). Backups taken
+before keep the data until they are rotated.
+
 Optionally, the admin area shows a notice when a new release is out:
 
 ```toml
