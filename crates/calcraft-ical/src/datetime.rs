@@ -25,11 +25,11 @@ fn digits(s: &str) -> Result<i64, IcalError> {
         .map_err(|_| IcalError::Malformed("invalid date/time"))
 }
 
-fn is_leap(year: i64) -> bool {
+pub(crate) fn is_leap(year: i64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
-fn days_in_month(year: i64, month: i64) -> i64 {
+pub(crate) fn days_in_month(year: i64, month: i64) -> i64 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
@@ -39,7 +39,7 @@ fn days_in_month(year: i64, month: i64) -> i64 {
 }
 
 /// Days since 1970-01-01 (proleptic Gregorian, H. Hinnant's algorithm).
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+pub(crate) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let y = if month <= 2 { year - 1 } else { year };
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
@@ -47,6 +47,54 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let doy = (153 * mp + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146_097 + doe - 719_468
+}
+
+/// Calendar date `(year, month, day)` of a day number (inverse of
+/// [`days_from_civil`]).
+pub(crate) fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    (year, month, day)
+}
+
+/// Weekday of a day number, 0 = Monday … 6 = Sunday.
+pub(crate) fn weekday(days: i64) -> i64 {
+    // 1970-01-01 was a Thursday.
+    (days + 3).rem_euclid(7)
+}
+
+/// First second of year 10000: every DATE or DATE-TIME (four-digit years)
+/// lies before it.
+pub(crate) const MAX_TIME: i64 = 253_402_300_800;
+
+/// Parses a UTC offset `+HHMM` or `-HHMMSS` (RFC 5545 §3.3.14) into seconds.
+pub(crate) fn parse_utc_offset(value: &str) -> Option<i64> {
+    let (sign, rest) = match value.as_bytes().first()? {
+        b'+' => (1, &value[1..]),
+        b'-' => (-1, &value[1..]),
+        _ => return None,
+    };
+    if !(rest.len() == 4 || rest.len() == 6) || !rest.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let hours: i64 = rest[0..2].parse().ok()?;
+    let minutes: i64 = rest[2..4].parse().ok()?;
+    let seconds: i64 = if rest.len() == 6 {
+        rest[4..6].parse().ok()?
+    } else {
+        0
+    };
+    if hours > 23 || minutes > 59 || seconds > 59 {
+        return None;
+    }
+    Some(sign * (hours * 3600 + minutes * 60 + seconds))
 }
 
 fn parse_date(s: &str) -> Result<i64, IcalError> {
@@ -205,6 +253,24 @@ mod tests {
         }
         assert!(parse_utc_datetime("20261021").is_err());
         assert!(parse_utc_datetime("20261021T100000").is_err());
+    }
+
+    #[test]
+    fn civil_roundtrip_and_weekdays() {
+        for days in [-719_468, -1, 0, 1, 10_957, 19_782, 20_000, 2_932_896] {
+            let (y, m, d) = civil_from_days(days);
+            assert_eq!(days_from_civil(y, m, d), days);
+        }
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(weekday(0), 3);
+        // 2026-10-22 is a Thursday.
+        assert_eq!(weekday(days_from_civil(2026, 10, 22)), 3);
+        assert_eq!(MAX_TIME, days_from_civil(10_000, 1, 1) * 86_400);
+        assert_eq!(parse_utc_offset("+0100"), Some(3600));
+        assert_eq!(parse_utc_offset("-053000"), Some(-19_800));
+        for bad in ["", "0100", "+01", "+2400", "+0160", "+01000", "+01:00"] {
+            assert_eq!(parse_utc_offset(bad), None, "{bad:?}");
+        }
     }
 
     #[test]
