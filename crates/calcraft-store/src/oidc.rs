@@ -3,6 +3,8 @@
 //! An identity is the pair issuer + subject (`iss` + `sub` of the ID
 //! token). E-mail addresses are never used for linking.
 
+use std::collections::HashSet;
+
 use sqlx::Row;
 
 use crate::{Result, Store};
@@ -17,6 +19,16 @@ pub enum OidcBinding {
     /// The user is bound to a different subject of this issuer, or the
     /// subject is bound to another user.
     Mismatch,
+}
+
+/// When an identity was bound and last used; the subject is left out on
+/// purpose (it is not needed for display).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OidcIdentityInfo {
+    /// Unix seconds.
+    pub created_at: i64,
+    /// Unix seconds.
+    pub last_login_at: i64,
 }
 
 /// Result of [`Store::bind_approved_oidc_identity`].
@@ -99,6 +111,39 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.is_some())
+    }
+
+    /// The identity of this issuer bound to the user, without the subject.
+    pub async fn oidc_identity_info(
+        &self,
+        user_id: i64,
+        issuer: &str,
+    ) -> Result<Option<OidcIdentityInfo>> {
+        let row = sqlx::query(
+            "SELECT created_at, last_login_at FROM oidc_identities WHERE user_id = ? AND issuer = ?",
+        )
+        .bind(user_id)
+        .bind(issuer)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(OidcIdentityInfo {
+                created_at: row.try_get("created_at")?,
+                last_login_at: row.try_get("last_login_at")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Ids of all users bound to at least one SSO identity (any issuer),
+    /// for the user list of the administration.
+    pub async fn oidc_linked_user_ids(&self) -> Result<HashSet<i64>> {
+        let rows = sqlx::query("SELECT DISTINCT user_id FROM oidc_identities")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter()
+            .map(|row| row.try_get("user_id").map_err(Into::into))
+            .collect()
     }
 
     /// Allows the next SSO login of exactly this IdP identity to bind the

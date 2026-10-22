@@ -10,7 +10,7 @@ use calcraft_core::{
     Username,
     api::{
         AppPasswordInfo, ChangePassword, CreateAppPassword, CreatedAppPassword, LoginRequest, Me,
-        RecoveryCodes, TotpDisable, TotpEnable, TotpSetup,
+        RecoveryCodes, SsoLink, TotpDisable, TotpEnable, TotpSetup,
     },
 };
 use calcraft_store::{RECOVERY_CODES, TotpEnableOutcome, User};
@@ -29,13 +29,34 @@ use crate::{
 
 const MAX_APP_PASSWORD_NAME: usize = 64;
 
-pub fn me_of(user: &User) -> Me {
-    Me {
+/// The logged-in user as shown to that user, with the SSO link status
+/// (only of this user, without the IdP subject).
+pub async fn me_of(state: &AppState, user: &User) -> Result<Me, ApiError> {
+    Ok(Me {
         username: user.username.to_string(),
         display_name: user.display_name.clone(),
         is_admin: user.is_admin,
         totp_enabled: user.totp_enabled,
+        sso: sso_link(state, user).await?,
+    })
+}
+
+/// `None` if SSO is not configured (or not compiled in).
+async fn sso_link(state: &AppState, user: &User) -> Result<Option<SsoLink>, ApiError> {
+    #[cfg(feature = "oidc")]
+    if let Some(oidc) = &state.oidc {
+        let issuer = oidc.issuer();
+        let info = state.store.oidc_identity_info(user.id, issuer).await?;
+        return Ok(Some(SsoLink {
+            linked: info.is_some(),
+            issuer: issuer.to_owned(),
+            linked_at: info.map(|i| i.created_at),
+            last_login_at: info.map(|i| i.last_login_at),
+        }));
     }
+    #[cfg(not(feature = "oidc"))]
+    let _ = (state, user);
+    Ok(None)
 }
 
 fn parse_username(name: &str) -> Result<Username, ApiError> {
@@ -175,7 +196,7 @@ pub async fn login(
     )
     .await?;
     let cookie = start_session(&state, &user).await?;
-    Ok(([(SET_COOKIE, cookie)], Json(me_of(&user))).into_response())
+    Ok(([(SET_COOKIE, cookie)], Json(me_of(&state, &user).await?)).into_response())
 }
 
 /// Creates a session for an authenticated user and returns the
@@ -204,8 +225,8 @@ pub async fn logout(
     Ok((StatusCode::NO_CONTENT, [(SET_COOKIE, cookie)]).into_response())
 }
 
-pub async fn me(session: SessionUser) -> Json<Me> {
-    Json(me_of(&session.user))
+pub async fn me(State(state): State<AppState>, session: SessionUser) -> Result<Json<Me>, ApiError> {
+    Ok(Json(me_of(&state, &session.user).await?))
 }
 
 pub async fn change_password(

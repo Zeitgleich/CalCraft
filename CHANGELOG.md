@@ -7,6 +7,18 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 
 ## [Unreleased]
 
+### Added
+
+- SSO link status: `GET /api/v1/me` (and the login answer) has a new field
+  `sso` (`linked`, `issuer`, `linked_at`, `last_login_at`; `null` when SSO is
+  not configured; never the IdP subject), shown on the **Account** page.
+  `GET /api/v1/admin/users` has `sso_linked`, shown as an **SSO** badge in
+  the administration. New admin endpoint
+  `DELETE /api/v1/admin/users/{username}/sso` (button **Unlink SSO**, with
+  confirmation) removes a user's SSO binding like `calcraft user unbind-sso`
+  and ends the user's sessions; admins cannot unlink themselves. The new
+  fields are additive; older clients ignore them.
+
 ## [0.1.0-alpha.1] – 2026-10-22
 
 First pre-release, for testing only – not for production use (open points:

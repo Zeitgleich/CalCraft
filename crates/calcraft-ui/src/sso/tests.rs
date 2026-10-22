@@ -1,5 +1,55 @@
 use super::*;
 
+fn link(linked: bool, linked_at: Option<i64>, last: Option<i64>) -> SsoLink {
+    SsoLink {
+        linked,
+        issuer: "https://id.example.com/realms/staff".to_owned(),
+        linked_at,
+        last_login_at: last,
+    }
+}
+
+#[test]
+fn issuer_hosts() {
+    assert_eq!(
+        issuer_host("https://id.example.com/realms/staff"),
+        "id.example.com"
+    );
+    assert_eq!(
+        issuer_host("https://id.example.com:8443"),
+        "id.example.com:8443"
+    );
+    assert_eq!(
+        issuer_host(" https://u:p@id.example.com/x "),
+        "id.example.com"
+    );
+    assert_eq!(issuer_host("https://id.example.com?x#y"), "id.example.com");
+    assert_eq!(issuer_host("id.example.com"), "id.example.com");
+    assert_eq!(issuer_host("https:///path"), "https:///path");
+}
+
+#[test]
+fn link_status_texts() {
+    assert_eq!(
+        link_status(&link(true, Some(0), Some(60))),
+        "Linked to single sign-on (id.example.com) since 1970-01-01 00:00 UTC"
+    );
+    assert_eq!(
+        link_status(&link(true, None, None)),
+        "Linked to single sign-on (id.example.com)"
+    );
+    assert_eq!(
+        link_status(&link(false, None, None)),
+        "Not linked to single sign-on (id.example.com)"
+    );
+    assert_eq!(
+        last_login(&link(true, Some(0), Some(60))).as_deref(),
+        Some("Last single sign-on login: 1970-01-01 00:01 UTC")
+    );
+    assert_eq!(last_login(&link(true, Some(0), None)), None);
+    assert_eq!(last_login(&link(false, None, Some(60))), None);
+}
+
 #[test]
 fn known_codes_have_own_texts() {
     let codes = [

@@ -1,6 +1,57 @@
 use super::*;
 
 #[tokio::test]
+async fn identity_info_and_linked_users() {
+    let store = Store::in_memory().await.unwrap();
+    let alice = store
+        .create_user(&"alice".parse().unwrap(), "h", None)
+        .await
+        .unwrap();
+    let bob = store
+        .create_user(&"bob".parse().unwrap(), "h", None)
+        .await
+        .unwrap();
+    let iss = "https://idp.example";
+    assert_eq!(store.oidc_identity_info(alice.id, iss).await.unwrap(), None);
+    assert!(store.oidc_linked_user_ids().await.unwrap().is_empty());
+
+    store
+        .bind_oidc_identity(alice.id, iss, "s1", 5)
+        .await
+        .unwrap();
+    store
+        .bind_oidc_identity(alice.id, iss, "s1", 9)
+        .await
+        .unwrap();
+    store
+        .bind_oidc_identity(alice.id, "https://other.example", "s1", 7)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.oidc_identity_info(alice.id, iss).await.unwrap(),
+        Some(OidcIdentityInfo {
+            created_at: 5,
+            last_login_at: 9
+        })
+    );
+    // Per user and per issuer.
+    assert_eq!(store.oidc_identity_info(bob.id, iss).await.unwrap(), None);
+    assert_eq!(
+        store
+            .oidc_identity_info(alice.id, "https://third.example")
+            .await
+            .unwrap(),
+        None
+    );
+    let linked = store.oidc_linked_user_ids().await.unwrap();
+    assert_eq!(linked.len(), 1);
+    assert!(linked.contains(&alice.id) && !linked.contains(&bob.id));
+
+    assert_eq!(store.unbind_oidc_identities(alice.id).await.unwrap(), 2);
+    assert!(store.oidc_linked_user_ids().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn identities_bind_once_and_are_unique() {
     let store = Store::in_memory().await.unwrap();
     let alice = store

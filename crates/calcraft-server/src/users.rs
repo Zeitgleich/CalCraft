@@ -42,7 +42,8 @@ pub enum UserCommand {
         revoke: bool,
     },
     /// Remove the SSO (OIDC) identity bound to a user, e.g. after the IdP
-    /// account was recreated. The next SSO login binds the new identity.
+    /// account was recreated. Ends the user's sessions; linking again needs
+    /// a new `allow-sso-link` approval.
     UnbindSso { username: String },
     /// Allow the IdP account with this subject (user ID in the IdP admin
     /// console) to bind the existing account on its next SSO login (single

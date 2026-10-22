@@ -869,6 +869,26 @@ tr.disabled td {
     min-width: 0;
 }
 
+.facts dd .hint {
+    display: block;
+    margin-top: 0.15rem;
+}
+
+/* Small label next to a value, e.g. "SSO" in the user list. */
+.badge {
+    display: inline-block;
+    margin-left: var(--space-2);
+    padding: 0.05rem 0.45rem;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent-soft-text);
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1.4;
+    vertical-align: 0.05em;
+    white-space: nowrap;
+}
+
 .codes {
     list-style: none;
     padding: 0;

@@ -148,6 +148,30 @@ fn UserRow(user: AdminUser, on_change: Callback<()>) -> impl IntoView {
         })
     };
 
+    // Removing the SSO link, after a confirmation.
+    let confirming = RwSignal::new(false);
+    let sso_path = format!("/v1/admin/users/{}/sso", user.username);
+    let unlink = move |_| {
+        if busy.get_untracked() {
+            return;
+        }
+        busy.set(true);
+        let path = sso_path.clone();
+        leptos::task::spawn_local(async move {
+            let result = api::send_empty("DELETE", &path).await;
+            busy.try_set(false);
+            confirming.try_set(false);
+            match result {
+                Ok(()) => on_change.run(()),
+                Err(failure) => {
+                    error.try_set(Some(ctx.fail(&failure)));
+                }
+            }
+        });
+    };
+    let confirm_text = t::confirm_unlink_sso(&user.username);
+    let can_unlink = user.sso_linked && !is_self;
+
     let mut status = Vec::new();
     if user.is_admin {
         status.push(t::ROLE_ADMIN);
@@ -168,7 +192,12 @@ fn UserRow(user: AdminUser, on_change: Callback<()>) -> impl IntoView {
                 {is_self.then(|| view! { " " <span class="muted">{t::YOU}</span> })}
             </td>
             <td>{user.display_name.clone().unwrap_or_default()}</td>
-            <td>{status.join(" · ")}</td>
+            <td>
+                {status.join(" · ")}
+                {user
+                    .sso_linked
+                    .then(|| view! { <span class="badge" title=t::SSO_BADGE_TITLE>{t::SSO_BADGE}</span> })}
+            </td>
             <td>
                 <div class="actions">
                     {(!is_self)
@@ -190,6 +219,45 @@ fn UserRow(user: AdminUser, on_change: Callback<()>) -> impl IntoView {
                                 >
                                     {if user.is_admin { t::REVOKE_ADMIN } else { t::GRANT_ADMIN }}
                                 </button>
+                            }
+                        })}
+                    {can_unlink
+                        .then(|| {
+                            view! {
+                                <Show
+                                    when=move || confirming.get()
+                                    fallback=move || {
+                                        view! {
+                                            <button
+                                                type="button"
+                                                class="secondary"
+                                                disabled=move || busy.get()
+                                                on:click=move |_| confirming.set(true)
+                                            >
+                                                {t::UNLINK_SSO}
+                                            </button>
+                                        }
+                                    }
+                                >
+                                    <span class="confirm-inline">
+                                        <span>{confirm_text.clone()}</span>
+                                        <button
+                                            type="button"
+                                            class="danger"
+                                            on:click=unlink.clone()
+                                            disabled=move || busy.get()
+                                        >
+                                            {t::UNLINK_SSO_CONFIRM}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class="secondary"
+                                            on:click=move |_| confirming.set(false)
+                                        >
+                                            {t::CANCEL}
+                                        </button>
+                                    </span>
+                                </Show>
                             }
                         })}
                     <ErrorText error />
