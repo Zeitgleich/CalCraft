@@ -18,12 +18,13 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   analyze:
     name: analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       actions: read
       contents: read

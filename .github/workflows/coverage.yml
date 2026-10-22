@@ -15,7 +15,7 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,6 +24,7 @@ env:
 jobs:
   coverage:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -38,6 +39,7 @@ jobs:
         run: cargo llvm-cov --workspace --all-features --no-report
       - name: Reports (lcov, HTML, summary)
         run: |
+          set -euo pipefail
           out="$RUNNER_TEMP/coverage"
           mkdir -p "$out"
           cargo llvm-cov report --lcov --output-path "$out/lcov.info"
@@ -46,6 +48,7 @@ jobs:
           cargo llvm-cov report --summary-only | tee "$out/summary.txt"
       - name: Per-crate line coverage
         run: |
+          set -euo pipefail
           out="$RUNNER_TEMP/coverage"
           jq -r --arg root "$GITHUB_WORKSPACE/" '
             [.data[0].files[]
