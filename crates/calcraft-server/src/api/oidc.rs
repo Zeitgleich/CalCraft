@@ -23,11 +23,12 @@ use axum::{
 };
 use calcraft_store::{ApprovedBinding, OidcBinding, User};
 
-use super::{ApiError, account::start_session};
+use super::{ApiError, SESSION_TTL, session_cookie};
 use crate::{
     app::AppState,
     auth::{UNUSABLE_PASSWORD_HASH, now},
     oidc::{BINDING_COOKIE, CallbackParams, Oidc, OidcError, PENDING_TTL, jwt::IdToken},
+    secrets::{hash_secret, random_token},
 };
 
 /// Path the binding cookie is restricted to.
@@ -161,12 +162,32 @@ pub async fn callback(
         Ok(user) => user,
         Err(reason) => return failure(reason, secure),
     };
-    match start_session(&state, &user).await {
-        Ok(session) => {
+    // The session is only created while the identity is still bound (one
+    // statement), so an unlink racing with this login leaves no session.
+    let token_value = random_token::<32>();
+    let created = now();
+    match state
+        .store
+        .create_oidc_session(
+            user.id,
+            oidc.issuer(),
+            &token.subject,
+            &hash_secret(&token_value),
+            created,
+            created + SESSION_TTL,
+        )
+        .await
+    {
+        Ok(true) => {
             tracing::info!(user = %user.username, "SSO login");
+            let session = session_cookie(Some(&token_value), secure);
             redirect("/", &[binding_cookie(None, secure), session])
         }
-        Err(_) => failure(Failure::Unavailable, secure),
+        Ok(false) => {
+            tracing::warn!(user = %user.username, "SSO login rejected: SSO link removed during login");
+            failure(Failure::LoginFailed, secure)
+        }
+        Err(err) => failure(store_failure(err), secure),
     }
 }
 
@@ -270,12 +291,27 @@ async fn map_user(state: &AppState, oidc: &Oidc, token: &IdToken) -> Result<User
             }
             ApprovedBinding::Mismatch => OidcBinding::Mismatch,
         }
-    } else {
+    } else if created {
+        // Created above by this login: bound right away.
         state
             .store
             .bind_oidc_identity(user.id, issuer, &token.subject, now())
             .await
             .map_err(store_failure)?
+    } else {
+        // Already linked: only touch the existing binding, never insert
+        // one. If it was unlinked since the checks above, this fails
+        // instead of silently binding again without an approval.
+        if state
+            .store
+            .touch_oidc_identity(user.id, issuer, &token.subject, now())
+            .await
+            .map_err(store_failure)?
+        {
+            OidcBinding::Matches
+        } else {
+            OidcBinding::Mismatch
+        }
     };
     match binding {
         OidcBinding::Bound => {
@@ -285,7 +321,7 @@ async fn map_user(state: &AppState, oidc: &Oidc, token: &IdToken) -> Result<User
         OidcBinding::Mismatch => {
             tracing::warn!(
                 user = %username,
-                "SSO login rejected: account is bound to a different identity of this issuer"
+                "SSO login rejected: account is bound to a different identity of this issuer, or was unlinked"
             );
             return Err(Failure::LoginFailed);
         }

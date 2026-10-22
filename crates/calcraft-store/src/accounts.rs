@@ -77,12 +77,17 @@ impl Store {
 
     /// Grants or revokes admin rights. Returns `false` if the user does not exist.
     pub async fn set_admin(&self, username: &Username, admin: bool) -> Result<bool> {
-        let result = sqlx::query("UPDATE users SET is_admin = ? WHERE username = ?")
-            .bind(admin)
-            .bind(username.as_str())
-            .execute(&self.writer)
-            .await?;
-        Ok(result.rows_affected() == 1)
+        self.observe(
+            async {
+                let result = sqlx::query("UPDATE users SET is_admin = ? WHERE username = ?")
+                    .bind(admin)
+                    .bind(username.as_str())
+                    .execute(&self.writer)
+                    .await?;
+                Ok(result.rows_affected() == 1)
+            }
+            .await,
+        )
     }
 
     // --- sessions -------------------------------------------------------
@@ -94,21 +99,26 @@ impl Store {
         now: i64,
         expires_at: i64,
     ) -> Result<()> {
-        // Expired sessions are removed opportunistically.
-        sqlx::query("DELETE FROM sessions WHERE expires_at <= ?")
-            .bind(now)
-            .execute(&self.writer)
-            .await?;
-        sqlx::query(
-            "INSERT INTO sessions (user_id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?)",
+        self.observe(
+            async {
+                // Expired sessions are removed opportunistically.
+                sqlx::query("DELETE FROM sessions WHERE expires_at <= ?")
+                    .bind(now)
+                    .execute(&self.writer)
+                    .await?;
+                sqlx::query(
+                    "INSERT INTO sessions (user_id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?)",
+                )
+                .bind(user_id)
+                .bind(token_hash)
+                .bind(now)
+                .bind(expires_at)
+                .execute(&self.writer)
+                .await?;
+                Ok(())
+            }
+            .await,
         )
-        .bind(user_id)
-        .bind(token_hash)
-        .bind(now)
-        .bind(expires_at)
-        .execute(&self.writer)
-        .await?;
-        Ok(())
     }
 
     /// The user of a valid, unexpired session.
@@ -132,20 +142,30 @@ impl Store {
     }
 
     pub async fn delete_session(&self, token_hash: &str) -> Result<()> {
-        sqlx::query("DELETE FROM sessions WHERE token_hash = ?")
-            .bind(token_hash)
-            .execute(&self.writer)
-            .await?;
-        Ok(())
+        self.observe(
+            async {
+                sqlx::query("DELETE FROM sessions WHERE token_hash = ?")
+                    .bind(token_hash)
+                    .execute(&self.writer)
+                    .await?;
+                Ok(())
+            }
+            .await,
+        )
     }
 
     /// Ends all sessions of a user, e.g. after a password change.
     pub async fn delete_sessions_of(&self, user_id: i64) -> Result<()> {
-        sqlx::query("DELETE FROM sessions WHERE user_id = ?")
-            .bind(user_id)
-            .execute(&self.writer)
-            .await?;
-        Ok(())
+        self.observe(
+            async {
+                sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+                    .bind(user_id)
+                    .execute(&self.writer)
+                    .await?;
+                Ok(())
+            }
+            .await,
+        )
     }
 
     // --- app passwords --------------------------------------------------
@@ -157,27 +177,32 @@ impl Store {
         secret_hash: &str,
         now: i64,
     ) -> Result<i64> {
-        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-        let count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM app_passwords WHERE user_id = ?")
-            .bind(user_id)
-            .fetch_one(&mut *tx)
-            .await?
-            .try_get("n")?;
-        if count >= MAX_APP_PASSWORDS {
-            return Err(StoreError::Limit("too many app passwords"));
-        }
-        let id: i64 = sqlx::query(
-            "INSERT INTO app_passwords (user_id, name, secret_hash, created_at) VALUES (?, ?, ?, ?) RETURNING id",
+        self.observe(
+            async {
+                let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                let count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM app_passwords WHERE user_id = ?")
+                    .bind(user_id)
+                    .fetch_one(&mut *tx)
+                    .await?
+                    .try_get("n")?;
+                if count >= MAX_APP_PASSWORDS {
+                    return Err(StoreError::Limit("too many app passwords"));
+                }
+                let id: i64 = sqlx::query(
+                    "INSERT INTO app_passwords (user_id, name, secret_hash, created_at) VALUES (?, ?, ?, ?) RETURNING id",
+                )
+                .bind(user_id)
+                .bind(name)
+                .bind(secret_hash)
+                .bind(now)
+                .fetch_one(&mut *tx)
+                .await?
+                .try_get("id")?;
+                tx.commit().await?;
+                Ok(id)
+            }
+            .await,
         )
-        .bind(user_id)
-        .bind(name)
-        .bind(secret_hash)
-        .bind(now)
-        .fetch_one(&mut *tx)
-        .await?
-        .try_get("id")?;
-        tx.commit().await?;
-        Ok(id)
     }
 
     pub async fn app_passwords(&self, user_id: i64) -> Result<Vec<AppPassword>> {
@@ -201,12 +226,17 @@ impl Store {
 
     /// Deletes an app password of this user. Returns `false` if not found.
     pub async fn delete_app_password(&self, user_id: i64, id: i64) -> Result<bool> {
-        let result = sqlx::query("DELETE FROM app_passwords WHERE id = ? AND user_id = ?")
-            .bind(id)
-            .bind(user_id)
-            .execute(&self.writer)
-            .await?;
-        Ok(result.rows_affected() == 1)
+        self.observe(
+            async {
+                let result = sqlx::query("DELETE FROM app_passwords WHERE id = ? AND user_id = ?")
+                    .bind(id)
+                    .bind(user_id)
+                    .execute(&self.writer)
+                    .await?;
+                Ok(result.rows_affected() == 1)
+            }
+            .await,
+        )
     }
 
     /// Owner and secret hash of an app password, by id.
@@ -221,16 +251,21 @@ impl Store {
 
     /// Records a use, at most once per hour to avoid a write per request.
     pub async fn touch_app_password(&self, id: i64, now: i64) -> Result<()> {
-        sqlx::query(
-            "UPDATE app_passwords SET last_used_at = ?1 \
-             WHERE id = ?2 AND (last_used_at IS NULL OR last_used_at < ?1 - ?3)",
+        self.observe(
+            async {
+                sqlx::query(
+                    "UPDATE app_passwords SET last_used_at = ?1 \
+                     WHERE id = ?2 AND (last_used_at IS NULL OR last_used_at < ?1 - ?3)",
+                )
+                .bind(now)
+                .bind(id)
+                .bind(LAST_USED_GRANULARITY)
+                .execute(&self.writer)
+                .await?;
+                Ok(())
+            }
+            .await,
         )
-        .bind(now)
-        .bind(id)
-        .bind(LAST_USED_GRANULARITY)
-        .execute(&self.writer)
-        .await?;
-        Ok(())
     }
 
     // --- two-factor authentication --------------------------------------
@@ -254,45 +289,55 @@ impl Store {
 
     /// Stores a new, not yet enabled secret. Fails if 2FA is already enabled.
     pub async fn set_pending_totp(&self, user_id: i64, secret: &[u8]) -> Result<bool> {
-        let result = sqlx::query(
-            "UPDATE users SET totp_secret = ?, totp_last_step = 0 WHERE id = ? AND totp_enabled = 0",
+        self.observe(
+            async {
+                let result = sqlx::query(
+                    "UPDATE users SET totp_secret = ?, totp_last_step = 0 WHERE id = ? AND totp_enabled = 0",
+                )
+                .bind(secret)
+                .bind(user_id)
+                .execute(&self.writer)
+                .await?;
+                Ok(result.rows_affected() == 1)
+            }
+            .await,
         )
-        .bind(secret)
-        .bind(user_id)
-        .execute(&self.writer)
-        .await?;
-        Ok(result.rows_affected() == 1)
     }
 
     /// Enables 2FA and replaces the recovery codes.
     /// Enables 2FA with new recovery codes. Returns `false` (and changes
     /// nothing) if it is already enabled or no secret was set up.
     pub async fn enable_totp(&self, user_id: i64, recovery_hashes: &[String]) -> Result<bool> {
-        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-        let changed = sqlx::query(
-            "UPDATE users SET totp_enabled = 1 \
-             WHERE id = ? AND totp_secret IS NOT NULL AND totp_enabled = 0",
-        )
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-        if changed == 0 {
-            return Ok(false);
-        }
-        sqlx::query("DELETE FROM recovery_codes WHERE user_id = ?")
-            .bind(user_id)
-            .execute(&mut *tx)
-            .await?;
-        for hash in recovery_hashes {
-            sqlx::query("INSERT INTO recovery_codes (user_id, code_hash) VALUES (?, ?)")
+        self.observe(
+            async {
+                let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                let changed = sqlx::query(
+                    "UPDATE users SET totp_enabled = 1 \
+                     WHERE id = ? AND totp_secret IS NOT NULL AND totp_enabled = 0",
+                )
                 .bind(user_id)
-                .bind(hash)
                 .execute(&mut *tx)
-                .await?;
-        }
-        tx.commit().await?;
-        Ok(true)
+                .await?
+                .rows_affected();
+                if changed == 0 {
+                    return Ok(false);
+                }
+                sqlx::query("DELETE FROM recovery_codes WHERE user_id = ?")
+                    .bind(user_id)
+                    .execute(&mut *tx)
+                    .await?;
+                for hash in recovery_hashes {
+                    sqlx::query("INSERT INTO recovery_codes (user_id, code_hash) VALUES (?, ?)")
+                        .bind(user_id)
+                        .bind(hash)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                tx.commit().await?;
+                Ok(true)
+            }
+            .await,
+        )
     }
 
     /// Accepts the time step of a code verified against `secret` and enables
@@ -306,80 +351,101 @@ impl Store {
         step: i64,
         recovery_hashes: &[String],
     ) -> Result<TotpEnableOutcome> {
-        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-        let row = sqlx::query(
-            "SELECT totp_enabled, totp_last_step FROM users WHERE id = ? AND totp_secret = ?",
-        )
-        .bind(user_id)
-        .bind(secret)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let Some(row) = row else {
-            return Ok(TotpEnableOutcome::NotSetUp);
-        };
-        if row.try_get::<bool, _>("totp_enabled")? {
-            return Ok(TotpEnableOutcome::AlreadyEnabled);
-        }
-        if row.try_get::<i64, _>("totp_last_step")? >= step {
-            return Ok(TotpEnableOutcome::StepUsed);
-        }
-        sqlx::query("UPDATE users SET totp_enabled = 1, totp_last_step = ? WHERE id = ?")
-            .bind(step)
-            .bind(user_id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM recovery_codes WHERE user_id = ?")
-            .bind(user_id)
-            .execute(&mut *tx)
-            .await?;
-        for hash in recovery_hashes {
-            sqlx::query("INSERT INTO recovery_codes (user_id, code_hash) VALUES (?, ?)")
+        self.observe(
+            async {
+                let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                let row = sqlx::query(
+                    "SELECT totp_enabled, totp_last_step FROM users WHERE id = ? AND totp_secret = ?",
+                )
                 .bind(user_id)
-                .bind(hash)
-                .execute(&mut *tx)
+                .bind(secret)
+                .fetch_optional(&mut *tx)
                 .await?;
-        }
-        tx.commit().await?;
-        Ok(TotpEnableOutcome::Enabled)
+                let Some(row) = row else {
+                    return Ok(TotpEnableOutcome::NotSetUp);
+                };
+                if row.try_get::<bool, _>("totp_enabled")? {
+                    return Ok(TotpEnableOutcome::AlreadyEnabled);
+                }
+                if row.try_get::<i64, _>("totp_last_step")? >= step {
+                    return Ok(TotpEnableOutcome::StepUsed);
+                }
+                sqlx::query("UPDATE users SET totp_enabled = 1, totp_last_step = ? WHERE id = ?")
+                    .bind(step)
+                    .bind(user_id)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("DELETE FROM recovery_codes WHERE user_id = ?")
+                    .bind(user_id)
+                    .execute(&mut *tx)
+                    .await?;
+                for hash in recovery_hashes {
+                    sqlx::query("INSERT INTO recovery_codes (user_id, code_hash) VALUES (?, ?)")
+                        .bind(user_id)
+                        .bind(hash)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                tx.commit().await?;
+                Ok(TotpEnableOutcome::Enabled)
+            }
+            .await,
+        )
     }
 
     pub async fn disable_totp(&self, user_id: i64) -> Result<()> {
-        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query(
-            "UPDATE users SET totp_secret = NULL, totp_enabled = 0, totp_last_step = 0 WHERE id = ?",
+        self.observe(
+            async {
+                let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                sqlx::query(
+                    "UPDATE users SET totp_secret = NULL, totp_enabled = 0, totp_last_step = 0 WHERE id = ?",
+                )
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query("DELETE FROM recovery_codes WHERE user_id = ?")
+                    .bind(user_id)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                Ok(())
+            }
+            .await,
         )
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query("DELETE FROM recovery_codes WHERE user_id = ?")
-            .bind(user_id)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        Ok(())
     }
 
     /// Accepts a TOTP time step only if it is newer than the last accepted
     /// one. Atomic, so a code cannot be used twice even concurrently.
     pub async fn accept_totp_step(&self, user_id: i64, step: i64) -> Result<bool> {
-        let result = sqlx::query(
-            "UPDATE users SET totp_last_step = ?1 WHERE id = ?2 AND totp_last_step < ?1",
+        self.observe(
+            async {
+                let result = sqlx::query(
+                    "UPDATE users SET totp_last_step = ?1 WHERE id = ?2 AND totp_last_step < ?1",
+                )
+                .bind(step)
+                .bind(user_id)
+                .execute(&self.writer)
+                .await?;
+                Ok(result.rows_affected() == 1)
+            }
+            .await,
         )
-        .bind(step)
-        .bind(user_id)
-        .execute(&self.writer)
-        .await?;
-        Ok(result.rows_affected() == 1)
     }
 
     /// Consumes a recovery code. Returns `false` if it is not valid.
     pub async fn use_recovery_code(&self, user_id: i64, code_hash: &str) -> Result<bool> {
-        let result = sqlx::query("DELETE FROM recovery_codes WHERE user_id = ? AND code_hash = ?")
-            .bind(user_id)
-            .bind(code_hash)
-            .execute(&self.writer)
-            .await?;
-        Ok(result.rows_affected() == 1)
+        self.observe(
+            async {
+                let result =
+                    sqlx::query("DELETE FROM recovery_codes WHERE user_id = ? AND code_hash = ?")
+                        .bind(user_id)
+                        .bind(code_hash)
+                        .execute(&self.writer)
+                        .await?;
+                Ok(result.rows_affected() == 1)
+            }
+            .await,
+        )
     }
 
     pub async fn recovery_codes_left(&self, user_id: i64) -> Result<i64> {

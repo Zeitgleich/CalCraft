@@ -41,6 +41,26 @@ pub struct Me {
     pub display_name: Option<String>,
     pub is_admin: bool,
     pub totp_enabled: bool,
+    /// Link of this account to the configured single sign-on; `None` if
+    /// SSO is not configured. Never contains the IdP subject.
+    #[serde(default)]
+    pub sso: Option<SsoLink>,
+}
+
+/// Whether an account is bound to an identity of the configured OpenID
+/// Connect issuer (`GET /api/v1/me`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SsoLink {
+    /// The account is bound to an identity of `issuer`.
+    pub linked: bool,
+    /// The configured issuer URL (public; the same as in the IdP discovery).
+    pub issuer: String,
+    /// When the identity was bound (Unix seconds).
+    #[serde(default)]
+    pub linked_at: Option<i64>,
+    /// Last SSO login (Unix seconds).
+    #[serde(default)]
+    pub last_login_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +172,9 @@ pub struct AdminUser {
     pub is_admin: bool,
     pub disabled: bool,
     pub totp_enabled: bool,
+    /// The account is bound to an SSO (OpenID Connect) identity.
+    #[serde(default)]
+    pub sso_linked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

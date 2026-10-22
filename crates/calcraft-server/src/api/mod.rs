@@ -73,6 +73,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("get", "/v1/admin/users"),
     ("post", "/v1/admin/users"),
     ("patch", "/v1/admin/users/{username}"),
+    ("delete", "/v1/admin/users/{username}/sso"),
     ("get", "/v1/admin/update"),
 ];
 
@@ -118,6 +119,7 @@ pub fn router() -> Router<AppState> {
         .route("/v1/trash/{id}", delete(trash::delete_entry))
         .route("/v1/admin/users", get(admin::list).post(admin::create))
         .route("/v1/admin/users/{username}", patch(admin::update))
+        .route("/v1/admin/users/{username}/sso", delete(admin::unlink_sso))
         .route("/v1/admin/update", get(admin::update_check));
     // Without the `oidc` feature these paths fall through to 404.
     #[cfg(feature = "oidc")]

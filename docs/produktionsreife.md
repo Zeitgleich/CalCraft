@@ -50,11 +50,11 @@ Legende: ✅ erledigt · 🟡 teilweise · ❌ offen · 👤 braucht reale Gerä
 |---|---|---|
 | Strukturierte Logs ohne Passwörter/sensible Inhalte | 🟡 | JSON-Logs, Trace-Spans ohne Query-String. `tests/log_secrets.rs` prüft Login, Kontosperre, TOTP, Wiederherstellungscodes, App-Passwörter, Cookies, Passwortwechsel, Admin-Anlage, Kalender-/Kontaktinhalte und Query-Strings; `tests/failures.rs` prüft die Fehlerlogs. **Lücke:** OIDC-Ablauf nicht im Log-Test. |
 | Metriken | ❌ | Kein `/metrics` (Prometheus). |
-| Healthchecks | ✅ | `/healthz`, `/readyz` (prüft Datenbank). |
+| Healthchecks | ✅ | `/healthz` (Liveness, ohne Datenbank), `/readyz` (Datenbank lesbar und beschreibbar; 503 mit kurzem Grund und `Retry-After`, Ergebnis 5 s zwischengespeichert). |
 | Alarmierung | ❌ | Keine Doku/Beispielregeln (abhängig von Metriken). |
 | Graceful Shutdown | ✅ | SIGTERM/Ctrl+C, laufende Anfragen werden beendet. |
-| Verhalten bei Datenbankausfällen | 🟡 | Nicht beschreibbar → Start verweigert bzw. 500 ohne Details, Lesen geht weiter; Platte voll → 507 ohne Teilzustand; Erholung ohne Neustart; abgebrochene Uploads ohne Spuren (`tests/failures.rs`). **Lücke:** `/readyz` bleibt 200, solange gelesen werden kann. |
-| Begrenzung von Speicher, CPU, Anfragen, Verbindungen | 🟡 | Globale und Client-Limits (s. P0), Argon2 auf 4 gleichzeitige Berechnungen begrenzt (auch bei Abbruch), systemd-Grenzen (`LimitNOFILE`, `MemoryMax`, `TasksMax`) in `docs/installation.md`. **Lücke:** Keep-alive-Verbindungen nur über `LimitNOFILE` begrenzt. |
+| Verhalten bei Datenbankausfällen | ✅ | Nicht beschreibbar → Start verweigert bzw. 500 ohne Details, Lesen geht weiter; Platte voll → 507 ohne Teilzustand; Erholung ohne Neustart; abgebrochene Uploads ohne Spuren; `/readyz` meldet 503 (`database not writable` / `storage full`), solange nicht geschrieben werden kann, und wird danach von selbst wieder 200 (`tests/failures.rs`). |
+| Begrenzung von Speicher, CPU, Anfragen, Verbindungen | 🟡 | Globale und Client-Limits (s. P0), Argon2 auf 4 gleichzeitige Berechnungen begrenzt (auch bei Abbruch), systemd-Grenzen (`LimitNOFILE`, `MemoryMax`, `TasksMax`) in `contrib/systemd/calcraft.service` (in CI auf echtem systemd getestet). **Lücke:** Keep-alive-Verbindungen nur über `LimitNOFILE` begrenzt. |
 | Dokumentierte Installation, Updates, Wiederherstellung | ✅ | `docs/installation.md`, `docs/backup-and-upgrade.md`, `docs/release-verification.md`; Proxy-Konfigurationen und Restore getestet. |
 
 ## Fahrplan zur Freigabe

@@ -282,22 +282,24 @@ impl Store {
         items: &[FeedItem],
         state: &FeedState<'_>,
     ) -> Result<Collection> {
-        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-        let row = sqlx::query(
-            "SELECT (SELECT COUNT(*) FROM collections WHERE owner_id = ?1) AS collections, \
+        self.observe(
+            async {
+                let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                let row = sqlx::query(
+                    "SELECT (SELECT COUNT(*) FROM collections WHERE owner_id = ?1) AS collections, \
                (SELECT COUNT(*) FROM subscriptions s JOIN collections c ON c.id = s.collection_id \
                 WHERE c.owner_id = ?1) AS subscriptions",
-        )
-        .bind(new.owner_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        if row.try_get::<i64, _>("subscriptions")? >= new.max_per_user {
-            return Err(StoreError::Limit("too many subscriptions"));
-        }
-        if row.try_get::<i64, _>("collections")? >= MAX_COLLECTIONS_PER_USER {
-            return Err(StoreError::Limit("too many collections"));
-        }
-        let result = sqlx::query(
+                )
+                .bind(new.owner_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                if row.try_get::<i64, _>("subscriptions")? >= new.max_per_user {
+                    return Err(StoreError::Limit("too many subscriptions"));
+                }
+                if row.try_get::<i64, _>("collections")? >= MAX_COLLECTIONS_PER_USER {
+                    return Err(StoreError::Limit("too many collections"));
+                }
+                let result = sqlx::query(
             "INSERT INTO collections (owner_id, kind, slug, display_name, color, components, \
                token_salt, read_only) \
              VALUES (?, ?, ?, ?, ?, ?, abs(random()), 1) RETURNING id",
@@ -310,15 +312,15 @@ impl Store {
         .bind(new.components)
         .fetch_one(&mut *tx)
         .await;
-        let collection_id: i64 = match result {
-            Ok(row) => row.try_get("id")?,
-            Err(sqlx::Error::Database(err)) if err.is_unique_violation() => {
-                return Err(StoreError::CollectionExists);
-            }
-            Err(err) => return Err(err.into()),
-        };
-        check_limits(&mut tx, self, new.owner_id, collection_id, items).await?;
-        sqlx::query(
+                let collection_id: i64 = match result {
+                    Ok(row) => row.try_get("id")?,
+                    Err(sqlx::Error::Database(err)) if err.is_unique_violation() => {
+                        return Err(StoreError::CollectionExists);
+                    }
+                    Err(err) => return Err(err.into()),
+                };
+                check_limits(&mut tx, self, new.owner_id, collection_id, items).await?;
+                sqlx::query(
             "INSERT INTO subscriptions (collection_id, source_url, refresh_secs, next_refresh_at, \
                created_at, last_attempt_at) VALUES (?, ?, ?, ?, ?, ?)",
         )
@@ -330,18 +332,21 @@ impl Store {
         .bind(state.now)
         .execute(&mut *tx)
         .await?;
-        replace_items(&mut tx, collection_id, items).await?;
-        record_success(&mut tx, collection_id, state).await?;
-        let collection = sqlx::query(
+                replace_items(&mut tx, collection_id, items).await?;
+                record_success(&mut tx, collection_id, state).await?;
+                let collection = sqlx::query(
             "SELECT id, owner_id, kind, slug, display_name, description, color, sync_revision, \
                components, sync_floor, token_salt, read_only FROM collections WHERE id = ?",
         )
         .bind(collection_id)
         .fetch_one(&mut *tx)
         .await?;
-        let collection = collection_from_row(&collection)?;
-        tx.commit().await?;
-        Ok(collection)
+                let collection = collection_from_row(&collection)?;
+                tx.commit().await?;
+                Ok(collection)
+            }
+            .await,
+        )
     }
 
     /// The subscriptions of a user, by slug.
@@ -405,17 +410,22 @@ impl Store {
         min_gap: i64,
         next_refresh_at: i64,
     ) -> Result<bool> {
-        let result = sqlx::query(
-            "UPDATE subscriptions SET last_attempt_at = ?1, next_refresh_at = ?2 \
+        self.observe(
+            async {
+                let result = sqlx::query(
+                    "UPDATE subscriptions SET last_attempt_at = ?1, next_refresh_at = ?2 \
              WHERE collection_id = ?3 AND (last_attempt_at IS NULL OR last_attempt_at <= ?1 - ?4)",
+                )
+                .bind(now)
+                .bind(next_refresh_at)
+                .bind(collection_id)
+                .bind(min_gap)
+                .execute(&self.writer)
+                .await?;
+                Ok(result.rows_affected() == 1)
+            }
+            .await,
         )
-        .bind(now)
-        .bind(next_refresh_at)
-        .bind(collection_id)
-        .bind(min_gap)
-        .execute(&self.writer)
-        .await?;
-        Ok(result.rows_affected() == 1)
     }
 
     /// Applies a fetched feed: replaces the objects (see [`replace_items`])
@@ -427,8 +437,10 @@ impl Store {
         items: &[FeedItem],
         state: &FeedState<'_>,
     ) -> Result<Option<ReplaceOutcome>> {
-        let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-        let Some(row) = sqlx::query(
+        self.observe(
+            async {
+                let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                let Some(row) = sqlx::query(
             "SELECT c.owner_id FROM subscriptions s JOIN collections c ON c.id = s.collection_id \
              WHERE s.collection_id = ? AND c.read_only = 1",
         )
@@ -438,12 +450,15 @@ impl Store {
         else {
             return Ok(None);
         };
-        let owner_id: i64 = row.try_get("owner_id")?;
-        check_limits(&mut tx, self, owner_id, collection_id, items).await?;
-        let outcome = replace_items(&mut tx, collection_id, items).await?;
-        record_success(&mut tx, collection_id, state).await?;
-        tx.commit().await?;
-        Ok(Some(outcome))
+                let owner_id: i64 = row.try_get("owner_id")?;
+                check_limits(&mut tx, self, owner_id, collection_id, items).await?;
+                let outcome = replace_items(&mut tx, collection_id, items).await?;
+                record_success(&mut tx, collection_id, state).await?;
+                tx.commit().await?;
+                Ok(Some(outcome))
+            }
+            .await,
+        )
     }
 
     /// Records a refresh that found the feed unchanged (`304`, or the same
@@ -454,7 +469,9 @@ impl Store {
         now: i64,
         next_refresh_at: i64,
     ) -> Result<()> {
-        sqlx::query(
+        self.observe(
+            async {
+                sqlx::query(
             "UPDATE subscriptions SET last_success_at = ?, next_refresh_at = ?, failures = 0, \
                last_error = NULL, last_error_detail = NULL WHERE collection_id = ?",
         )
@@ -463,7 +480,10 @@ impl Store {
         .bind(collection_id)
         .execute(&self.writer)
         .await?;
-        Ok(())
+                Ok(())
+            }
+            .await,
+        )
     }
 
     /// Records a failed refresh; the objects stay as they are.
@@ -472,17 +492,22 @@ impl Store {
         collection_id: i64,
         failure: &SubscriptionFailure<'_>,
     ) -> Result<()> {
-        sqlx::query(
-            "UPDATE subscriptions SET last_error = ?, last_error_detail = ?, \
+        self.observe(
+            async {
+                sqlx::query(
+                    "UPDATE subscriptions SET last_error = ?, last_error_detail = ?, \
                failures = failures + 1, next_refresh_at = ? WHERE collection_id = ?",
+                )
+                .bind(failure.code)
+                .bind(failure.detail)
+                .bind(failure.next_refresh_at)
+                .bind(collection_id)
+                .execute(&self.writer)
+                .await?;
+                Ok(())
+            }
+            .await,
         )
-        .bind(failure.code)
-        .bind(failure.detail)
-        .bind(failure.next_refresh_at)
-        .bind(collection_id)
-        .execute(&self.writer)
-        .await?;
-        Ok(())
     }
 
     /// Changes the refresh interval chosen by the owner (`Some(None)`:
@@ -493,6 +518,8 @@ impl Store {
         refresh_secs: Option<i64>,
         next_refresh_at: i64,
     ) -> Result<()> {
+        self.observe(
+            async {
         sqlx::query(
             "UPDATE subscriptions SET refresh_secs = ?, next_refresh_at = ? WHERE collection_id = ?",
         )
@@ -502,6 +529,9 @@ impl Store {
         .execute(&self.writer)
         .await?;
         Ok(())
+            }
+            .await,
+        )
     }
 
     /// Number of subscriptions of a user.

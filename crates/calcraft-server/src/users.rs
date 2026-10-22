@@ -42,7 +42,8 @@ pub enum UserCommand {
         revoke: bool,
     },
     /// Remove the SSO (OIDC) identity bound to a user, e.g. after the IdP
-    /// account was recreated. The next SSO login binds the new identity.
+    /// account was recreated. Ends the user's sessions; linking again needs
+    /// a new `allow-sso-link` approval.
     UnbindSso { username: String },
     /// Allow the IdP account with this subject (user ID in the IdP admin
     /// console) to bind the existing account on its next SSO login (single
@@ -150,8 +151,8 @@ pub async fn run(store: &Store, config: &Config, command: UserCommand) -> anyhow
             let Some(record) = store.user_credentials(&username).await? else {
                 bail!("user {username} does not exist");
             };
+            // Also ends the user's sessions, in the same transaction.
             let removed = store.unbind_oidc_identities(record.user.id).await?;
-            store.delete_sessions_of(record.user.id).await?;
             println!("removed {removed} SSO identities of {username}");
         }
         UserCommand::AllowSsoLink {

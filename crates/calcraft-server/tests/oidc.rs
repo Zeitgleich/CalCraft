@@ -897,3 +897,148 @@ async fn password_login_can_be_disabled() {
     );
     assert_eq!(dav(app_password).await.as_u16(), 207);
 }
+
+#[tokio::test]
+async fn sso_link_status_is_shown_to_the_owner_and_admins() {
+    let idp = Idp::start().await;
+    let Setup { app, store, .. } = build(&idp, |_| {}, Duration::from_secs(60)).await;
+    approve(&store, &idp, "alice", ALICE_SUB, 3600).await;
+    let alice = login(&app, &idp, "alice", ALICE_SUB)
+        .await
+        .cookie("calcraft_session")
+        .unwrap();
+    let admin = call(
+        &app,
+        Method::POST,
+        "/api/v1/auth/login",
+        None,
+        Some(json!({"username": "admin", "password": "alice password 123"})),
+    )
+    .await;
+    assert_eq!(admin.status, StatusCode::OK);
+    // The login answer carries the status too.
+    assert_eq!(admin.json["sso"]["linked"], false);
+    let admin = admin.cookie("calcraft_session").unwrap();
+
+    // Each user sees only their own link, never the subject.
+    let me = call(&app, Method::GET, "/api/v1/me", Some(&alice), None).await;
+    assert_eq!(me.json["sso"]["linked"], true);
+    assert_eq!(me.json["sso"]["issuer"], idp.issuer.as_str());
+    assert!(me.json["sso"]["linked_at"].as_i64().unwrap() > 0);
+    assert!(me.json["sso"]["last_login_at"].as_i64().unwrap() > 0);
+    assert!(!me.json.to_string().contains(ALICE_SUB));
+    let me = call(&app, Method::GET, "/api/v1/me", Some(&admin), None).await;
+    assert_eq!(
+        me.json["sso"],
+        json!({"linked": false, "issuer": idp.issuer, "linked_at": null, "last_login_at": null})
+    );
+
+    // Admin list: a flag per user, no identity details.
+    let list = |cookie: String| {
+        let app = app.clone();
+        async move {
+            call(
+                &app,
+                Method::GET,
+                "/api/v1/admin/users",
+                Some(&cookie),
+                None,
+            )
+            .await
+        }
+    };
+    let flags = |reply: &Reply| -> Vec<(String, bool)> {
+        reply
+            .json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| {
+                (
+                    u["username"].as_str().unwrap().to_owned(),
+                    u["sso_linked"].as_bool().unwrap(),
+                )
+            })
+            .collect()
+    };
+    let users = list(admin.clone()).await;
+    assert_eq!(
+        flags(&users),
+        [("admin".to_owned(), false), ("alice".to_owned(), true)]
+    );
+    assert!(!users.json.to_string().contains(ALICE_SUB));
+    assert_eq!(list(alice.clone()).await.status, StatusCode::FORBIDDEN);
+
+    // Unlinking: admins only, CSRF header required, not for themselves.
+    let unlink = |cookie: &str, csrf: bool, user: &str| {
+        let mut builder = Request::builder()
+            .method(Method::DELETE)
+            .uri(format!("/api/v1/admin/users/{user}/sso"))
+            .header(header::COOKIE, cookie);
+        if csrf {
+            builder = builder.header("x-calcraft-request", "1");
+        }
+        let app = app.clone();
+        let request = builder.body(Body::empty()).unwrap();
+        async move { app.oneshot(request).await.unwrap().status() }
+    };
+    let alice_id = user_id(&store, "alice").await;
+    assert_eq!(unlink(&alice, true, "alice").await, StatusCode::FORBIDDEN);
+    assert_eq!(unlink(&admin, false, "alice").await, StatusCode::FORBIDDEN);
+    assert_eq!(unlink(&admin, true, "admin").await, StatusCode::CONFLICT);
+    assert_eq!(unlink(&admin, true, "nobody").await, StatusCode::NOT_FOUND);
+    assert!(
+        store
+            .has_oidc_identity(alice_id, &idp.issuer)
+            .await
+            .unwrap()
+    );
+
+    assert_eq!(unlink(&admin, true, "alice").await, StatusCode::NO_CONTENT);
+    // The user's sessions ended, the flag is gone, and SSO needs a new
+    // operator approval.
+    assert!(
+        !store
+            .has_oidc_identity(alice_id, &idp.issuer)
+            .await
+            .unwrap()
+    );
+    let me = call(&app, Method::GET, "/api/v1/me", Some(&alice), None).await;
+    assert_eq!(me.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        flags(&list(admin.clone()).await),
+        [("admin".to_owned(), false), ("alice".to_owned(), false)]
+    );
+    assert_failed(
+        &login(&app, &idp, "alice", ALICE_SUB).await,
+        "account_exists",
+    );
+    // Idempotent.
+    assert_eq!(unlink(&admin, true, "alice").await, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn me_has_no_sso_status_without_sso() {
+    let store = Store::in_memory().await.unwrap();
+    let hash = hash_password("alice password 123").unwrap();
+    let alice = store
+        .create_user(&"alice".parse().unwrap(), &hash, None)
+        .await
+        .unwrap();
+    // A stale binding from an earlier configuration.
+    store
+        .bind_oidc_identity(alice.id, "https://old.example", "s", 1)
+        .await
+        .unwrap();
+    let app = router(&Config::default(), AppState::new(store).unwrap());
+    let reply = call(
+        &app,
+        Method::POST,
+        "/api/v1/auth/login",
+        None,
+        Some(json!({"username": "alice", "password": "alice password 123"})),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.json["sso"], Value::Null);
+}
