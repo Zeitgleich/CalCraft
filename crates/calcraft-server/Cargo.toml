@@ -13,7 +13,7 @@ name = "calcraft"
 path = "src/main.rs"
 
 [features]
-default = ["web-ui", "api", "oidc", "update-check"]
+default = ["web-ui", "api", "oidc", "update-check", "subscriptions"]
 web-ui = ["dep:calcraft-web"]
 api = ["dep:futures-core"]
 # Single sign-on via OpenID Connect (outbound HTTPS client and JWT verification).
@@ -21,7 +21,11 @@ oidc = ["api", "https-client", "dep:ring"]
 # Optional update notice for administrators (`[updates] check`, off by
 # default): fetches the latest release from GitHub.
 update-check = ["api", "https-client"]
-# Outbound HTTPS client used by `oidc` and `update-check`; not useful alone.
+# Calendar subscriptions (webcal/ICS feeds fetched by the server, `[subscriptions]`,
+# off by default in the configuration).
+subscriptions = ["api", "https-client"]
+# Outbound HTTPS client used by `oidc`, `update-check` and `subscriptions`; not
+# useful alone.
 https-client = [
     "dep:http-body-util",
     "dep:hyper-util",

@@ -10,6 +10,8 @@ mod admin;
 mod collections;
 #[cfg(feature = "oidc")]
 mod oidc;
+#[cfg(feature = "subscriptions")]
+mod subscriptions;
 mod transfer;
 mod trash;
 
@@ -59,6 +61,11 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("delete", "/v1/collections/{kind}/{slug}"),
     ("get", "/v1/collections/{kind}/{slug}/export"),
     ("post", "/v1/collections/{kind}/{slug}/import"),
+    ("get", "/v1/subscriptions"),
+    ("post", "/v1/subscriptions"),
+    ("patch", "/v1/subscriptions/{slug}"),
+    ("delete", "/v1/subscriptions/{slug}"),
+    ("post", "/v1/subscriptions/{slug}/refresh"),
     ("get", "/v1/trash"),
     ("delete", "/v1/trash"),
     ("post", "/v1/trash/{id}/restore"),
@@ -117,6 +124,21 @@ pub fn router() -> Router<AppState> {
     let router = router
         .route("/v1/auth/oidc/login", get(oidc::login))
         .route("/v1/auth/oidc/callback", get(oidc::callback));
+    // Without the `subscriptions` feature these paths fall through to 404.
+    #[cfg(feature = "subscriptions")]
+    let router = router
+        .route(
+            "/v1/subscriptions",
+            get(subscriptions::list).post(subscriptions::create),
+        )
+        .route(
+            "/v1/subscriptions/{slug}",
+            patch(subscriptions::update).delete(subscriptions::delete),
+        )
+        .route(
+            "/v1/subscriptions/{slug}/refresh",
+            post(subscriptions::refresh),
+        );
     router
         .fallback(|| async { ApiError::NotFound })
         .layer(middleware::from_fn(require_csrf_header))
@@ -174,6 +196,11 @@ pub enum ApiError {
     /// A trash entry cannot be restored; the code says why.
     RestoreConflict(calcraft_store::TrashConflict),
     Limit(&'static str),
+    /// The collection is a subscription: its content is read-only.
+    ReadOnly,
+    /// A feed could not be subscribed to: code and message.
+    #[cfg_attr(not(feature = "subscriptions"), allow(dead_code))]
+    Subscription(StatusCode, &'static str, String),
     TooLarge,
     /// An uploaded file that cannot be used, with the reason.
     InvalidData(String),
@@ -184,7 +211,14 @@ pub enum ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let retry = matches!(self, Self::Unavailable);
+        let retry = match &self {
+            Self::Unavailable => Some("1"),
+            // "Refresh now" is allowed once a minute.
+            Self::Subscription(status, ..) if *status == StatusCode::TOO_MANY_REQUESTS => {
+                Some("60")
+            }
+            _ => None,
+        };
         let (status, code, message) = match self {
             Self::BadRequest(message) => {
                 (StatusCode::BAD_REQUEST, "bad_request", message.to_owned())
@@ -228,6 +262,12 @@ impl IntoResponse for ApiError {
                 "limit",
                 message.to_owned(),
             ),
+            Self::ReadOnly => (
+                StatusCode::FORBIDDEN,
+                "read_only",
+                "the collection is a subscription; its content is read-only".to_owned(),
+            ),
+            Self::Subscription(status, code, message) => (status, code, message),
             Self::TooLarge => (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "too_large",
@@ -250,10 +290,10 @@ impl IntoResponse for ApiError {
             message,
         };
         let mut response = (status, Json(body)).into_response();
-        if retry {
+        if let Some(seconds) = retry {
             response.headers_mut().insert(
                 header::RETRY_AFTER,
-                axum::http::HeaderValue::from_static("1"),
+                axum::http::HeaderValue::from_static(seconds),
             );
         }
         response
@@ -269,6 +309,7 @@ impl From<StoreError> for ApiError {
                 Self::Limit("storage is full")
             }
             StoreError::CollectionExists => Self::Conflict("collection already exists"),
+            StoreError::ReadOnly => Self::ReadOnly,
             StoreError::TrashConflict(conflict) => Self::RestoreConflict(conflict),
             StoreError::UserExists(_) => Self::Conflict("user already exists"),
             StoreError::Busy => {

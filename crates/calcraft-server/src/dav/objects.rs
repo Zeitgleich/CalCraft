@@ -16,7 +16,7 @@ use calcraft_store::{Collection, NewItem, Precondition, PutOutcome, StoreError};
 use crate::auth::now;
 
 use super::{
-    Ctx, dav_error, method_not_allowed, not_found,
+    Ctx, dav_error, method_not_allowed, need_privileges, not_found,
     paths::{Resource, item_href},
     props::{components, content_type},
     read_body, store_error,
@@ -223,6 +223,10 @@ pub async fn put(ctx: Ctx<'_>, resource: Resource, request: Request) -> Response
     let Resource::Item(collection, name) = resource else {
         return method_not_allowed();
     };
+    if collection.read_only {
+        let href = item_href(&collection, &ctx.user.username, &name);
+        return need_privileges(Some(&href), "write-content");
+    }
     let kind = collection.kind;
     let headers = request.headers().clone();
     let (expected_type, unsupported) = match kind {
@@ -293,6 +297,10 @@ pub async fn delete(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
         Err(err) => return err.into_response(),
     };
     match resource {
+        Resource::Item(collection, _) if collection.read_only => {
+            let href = super::paths::collection_href(&collection, &ctx.user.username);
+            need_privileges(Some(&href), "unbind")
+        }
         Resource::Item(collection, name) => {
             // Into the trash (unless disabled); for sync clients it is
             // deleted either way.

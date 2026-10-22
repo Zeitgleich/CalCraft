@@ -35,6 +35,9 @@ pub struct AppState {
     /// Update check, if enabled (`[updates] check`).
     #[cfg(feature = "update-check")]
     pub updates: Option<Arc<crate::updates::UpdateCheck>>,
+    /// Calendar subscriptions, if enabled (`[subscriptions] enabled`).
+    #[cfg(feature = "subscriptions")]
+    pub subscriptions: Option<Arc<crate::subscriptions::Subscriptions>>,
     /// Largest accepted vCard; [`router`] sets it from `storage.max_vcard_bytes`.
     pub max_vcard_bytes: usize,
     /// Bounds concurrent recurrence checks of calendar-query (CPU work on
@@ -52,6 +55,8 @@ impl AppState {
             oidc: None,
             #[cfg(feature = "update-check")]
             updates: None,
+            #[cfg(feature = "subscriptions")]
+            subscriptions: None,
             max_vcard_bytes: crate::config::DEFAULT_MAX_VCARD_BYTES,
             expansion: Arc::new(tokio::sync::Semaphore::new(expansion_permits())),
         })

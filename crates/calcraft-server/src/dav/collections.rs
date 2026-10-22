@@ -20,7 +20,7 @@ use calcraft_ical::ComponentKind;
 use crate::validate::{MAX_DESCRIPTION, MAX_DISPLAY_NAME, clean_color, clean_text};
 
 use super::{
-    Ctx, bad_request, dav_error, method_not_allowed, multistatus,
+    Ctx, bad_request, dav_error, method_not_allowed, multistatus, need_privileges,
     paths::{Resource, href_of},
     props::WRITABLE,
     read_body, store_error,
@@ -74,6 +74,11 @@ pub async fn proppatch(ctx: Ctx<'_>, resource: Resource, request: Request) -> Re
     let Resource::Collection(collection) = &resource else {
         return method_not_allowed();
     };
+    // Subscriptions are renamed and recoloured in the web UI only.
+    if collection.read_only {
+        let href = href_of(&resource, &ctx.user.username);
+        return need_privileges(Some(&href), "write-properties");
+    }
     let body = match read_body(request, MAX_PROPPATCH_BODY).await {
         Ok(body) => body,
         Err(err) => return err.into_response(),

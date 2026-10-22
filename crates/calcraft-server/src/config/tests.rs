@@ -231,6 +231,51 @@ fn update_check_is_off_by_default_and_bounded() {
 }
 
 #[test]
+fn subscriptions_are_off_by_default_and_bounded() {
+    let config = Config::default();
+    let subs = &config.subscriptions;
+    assert!(!subs.enabled);
+    assert!(!subs.allow_http);
+    assert_eq!(subs.ports(), vec![443]);
+    assert_eq!(subs.max_bytes, 10 * 1024 * 1024);
+    assert_eq!(subs.max_per_user, 20);
+    assert_eq!(subs.default_refresh_secs(), 6 * 3600);
+    assert_eq!(subs.max_concurrent_fetches, 2);
+    assert_eq!(subs.max_redirects, 3);
+    let config = from_toml(
+        "[subscriptions]\nenabled = true\nallow_http = true\nallowed_hosts = [\"*.example.com\"]\n\
+         denied_hosts = [\"bad.example.com\"]\n",
+    )
+    .unwrap();
+    assert!(config.subscriptions.enabled);
+    assert_eq!(config.subscriptions.ports(), vec![443, 80]);
+    for bad in [
+        "max_bytes = 1000",
+        "max_bytes = 20971521",
+        "max_per_user = 0",
+        "max_per_user = 101",
+        "default_refresh_minutes = 14",
+        "default_refresh_minutes = 10081",
+        "max_concurrent_fetches = 0",
+        "max_concurrent_fetches = 17",
+        "timeout_secs = 4",
+        "timeout_secs = 121",
+        "max_redirects = 6",
+        "allowed_ports = [0]",
+        "allowed_hosts = [\"Example.com\"]",
+        "allowed_hosts = [\"https://example.com\"]",
+        "denied_hosts = [\"exa mple.com\"]",
+        "denied_hosts = [\"\"]",
+        "allowed_networks = [\"10.0.0.0/8\"]",
+    ] {
+        assert!(
+            from_toml(&format!("[subscriptions]\n{bad}\n")).is_err(),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
 fn missing_file_is_an_error() {
     let result = Config::load(Some(Path::new("does-not-exist.toml")));
     assert!(matches!(result, Err(ConfigError::FileNotFound(_))));

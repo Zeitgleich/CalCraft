@@ -912,3 +912,48 @@ impl Exporter {
         }
     }
 }
+
+/// Largest prefix of a feed searched by [`feed_refresh_interval`].
+const MAX_FEED_HEADER: usize = 64 * 1024;
+
+/// The refresh interval a published calendar asks for, in seconds:
+/// `REFRESH-INTERVAL` (RFC 7986) or the older `X-PUBLISHED-TTL`, both
+/// DURATION values. Only properties of the top-level `VCALENDAR` before
+/// its first component (within the first 64 KiB) are considered. `None` if
+/// absent, unparsable or not positive; callers clamp the value.
+pub fn feed_refresh_interval(data: &[u8]) -> Option<i64> {
+    let head = &data[..data.len().min(MAX_FEED_HEADER)];
+    let text = String::from_utf8_lossy(head);
+    let mut lines: Vec<String> = Vec::new();
+    for raw in text.split('\n') {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        match (line.strip_prefix([' ', '\t']), lines.last_mut()) {
+            (Some(rest), Some(last)) => last.push_str(rest),
+            _ => lines.push(line.to_owned()),
+        }
+    }
+    let mut in_calendar = false;
+    let mut vendor: Option<i64> = None;
+    for line in lines {
+        let Some((head, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = head.split(';').next().unwrap_or_default();
+        let name = name.trim().trim_start_matches('\u{feff}');
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("BEGIN") {
+            if in_calendar || !value.eq_ignore_ascii_case("VCALENDAR") {
+                break;
+            }
+            in_calendar = true;
+        } else if !in_calendar || name.eq_ignore_ascii_case("END") {
+            break;
+        } else if name.eq_ignore_ascii_case("REFRESH-INTERVAL") {
+            // The standard property wins over the vendor one.
+            return parse_duration(value).ok().filter(|s| *s > 0);
+        } else if name.eq_ignore_ascii_case("X-PUBLISHED-TTL") && vendor.is_none() {
+            vendor = parse_duration(value).ok().filter(|s| *s > 0);
+        }
+    }
+    vendor
+}

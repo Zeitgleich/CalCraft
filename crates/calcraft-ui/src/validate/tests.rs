@@ -25,6 +25,30 @@ fn colors() {
 }
 
 #[test]
+fn feed_urls() {
+    for good in [
+        "https://example.org/cal.ics",
+        "webcal://example.org/cal.ics?token=x",
+        "WEBCAL://example.org",
+        "http://example.org/feed",
+    ] {
+        assert!(check_feed_url(good).is_ok(), "{good}");
+    }
+    let long = format!("https://example.org/{}", "a".repeat(MAX_FEED_URL));
+    for bad in [
+        "",
+        "https://",
+        "example.org/cal.ics",
+        "ftp://example.org/cal.ics",
+        "javascript:alert(1)",
+        "https://exa mple.org/",
+        long.as_str(),
+    ] {
+        assert!(check_feed_url(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
 fn slugs_and_usernames() {
     assert!(check_slug("work-2026").is_ok());
     assert!(check_slug("Work").is_err());

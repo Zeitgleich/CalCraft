@@ -186,6 +186,78 @@ fn convert(
         .collect())
 }
 
+/// Name of an imported object: derived from its UID, so the same UID gets
+/// the same name in every import and every feed refresh.
+fn object_name(uid: &str, kind: CollectionKind) -> String {
+    let extension = match kind {
+        CollectionKind::Calendar => "ics",
+        CollectionKind::Addressbook => "vcf",
+    };
+    format!(
+        "{}.{extension}",
+        &blake3::hash(uid.as_bytes()).to_hex()[..32]
+    )
+}
+
+/// The objects of a subscription feed, ready for
+/// [`Store::apply_subscription_feed`].
+#[derive(Debug)]
+pub struct FeedObjects {
+    pub items: Vec<calcraft_store::FeedItem>,
+    /// Objects left out because they failed validation (or use a component
+    /// type the calendar does not accept).
+    pub skipped: i64,
+}
+
+/// Converts an iCalendar feed for a subscription calendar. Same parser,
+/// splitting and validation as an import. Unlike an import, objects
+/// without UID get a UID derived from their position (not a random one),
+/// so an unchanged feed converts to identical objects.
+pub fn feed_objects(collection: &Collection, data: &[u8]) -> Result<FeedObjects, TransferError> {
+    // Only CSV imports use the time stamp; feeds are iCalendar.
+    let stamp = "19700101T000000Z";
+    let mut counter = 0u64;
+    let mut uids = || {
+        counter += 1;
+        format!("calcraft-feed-{}-{counter}", collection.id)
+    };
+    let mut ctx = ImportContext {
+        dtstamp: stamp,
+        new_uid: &mut uids,
+    };
+    let objects =
+        transfer::import(data, Format::ICalendar, Target::Calendar, &mut ctx).map_err(|err| {
+            match err {
+                IcalError::TooLarge => TransferError::TooLarge,
+                err => TransferError::Invalid(err.to_string()),
+            }
+        })?;
+    let mut items = Vec::with_capacity(objects.len());
+    let mut skipped = 0i64;
+    for object in objects {
+        let Ok(bytes) = object.data else {
+            skipped += 1;
+            continue;
+        };
+        // vCards never occur in a calendar; the vCard limit is irrelevant.
+        match check_object(collection, &bytes, 0) {
+            Ok(validated) => items.push(calcraft_store::FeedItem {
+                name: object_name(&validated.uid, collection.kind),
+                etag: etag(&bytes),
+                uid: validated.uid,
+                component: validated.component.to_owned(),
+                range_start: validated.range_start,
+                range_end: validated.range_end,
+                recurring: validated.recurring,
+                index_version: INDEX_VERSION,
+                content: bytes,
+            }),
+            Err(_) => skipped += 1,
+        }
+    }
+    Ok(FeedObjects { items, skipped })
+}
+
 /// Replaces control and bidirectional formatting characters, so that
 /// reported UIDs and reasons are safe to print on a terminal or in logs.
 pub fn printable(text: &str) -> String {
@@ -243,10 +315,6 @@ pub async fn import(
             .await
             .map_err(|_| TransferError::Invalid("import failed".to_owned()))??;
 
-    let extension = match collection.kind {
-        CollectionKind::Calendar => "ics",
-        CollectionKind::Addressbook => "vcf",
-    };
     let mut report = ImportReport::default();
     let mut limit: Option<&'static str> = None;
     for object in prepared {
@@ -270,10 +338,7 @@ pub async fn import(
             }
             (Some(name), OnConflict::Replace) => (name, Precondition::MustExist),
             (None, _) => (
-                format!(
-                    "{}.{extension}",
-                    &blake3::hash(uid.as_bytes()).to_hex()[..32]
-                ),
+                object_name(&uid, collection.kind),
                 Precondition::MustNotExist,
             ),
         };

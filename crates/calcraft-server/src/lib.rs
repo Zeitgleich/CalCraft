@@ -15,6 +15,8 @@ pub mod oidc;
 pub mod reindex;
 pub mod secrets;
 pub mod security;
+#[cfg(feature = "subscriptions")]
+pub mod subscriptions;
 pub mod telemetry;
 pub mod transfer;
 pub mod trash;
@@ -36,3 +38,6 @@ pub const OIDC_COMPILED: bool = cfg!(feature = "oidc");
 
 /// Whether the optional update check is compiled into this binary.
 pub const UPDATE_CHECK_COMPILED: bool = cfg!(feature = "update-check");
+
+/// Whether calendar subscriptions are compiled into this binary.
+pub const SUBSCRIPTIONS_COMPILED: bool = cfg!(feature = "subscriptions");

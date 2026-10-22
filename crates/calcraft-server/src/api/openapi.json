@@ -1293,6 +1293,219 @@
           }
         }
       }
+    },
+    "/v1/subscriptions": {
+      "get": {
+        "summary": "List calendar subscriptions",
+        "description": "Feed URLs may contain secret tokens; they are only ever returned to their owner. 404 while subscriptions are disabled ([subscriptions] enabled = false).",
+        "tags": [
+          "subscriptions"
+        ],
+        "responses": {
+          "200": {
+            "description": "Subscriptions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SubscriptionInfo"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Subscribe to a calendar feed",
+        "description": "Checks the URL (https or webcal; http only if allowed by the administrator), fetches the feed once and creates a read-only calendar with its events. DAV clients see it like any other calendar but cannot change it. Errors: 400 invalid_url (not https/webcal, user info, port, length, …) or blocked_address (the host or one of its addresses is private, loopback, link-local, a cloud metadata service or otherwise not public, or excluded by subscriptions.allowed_hosts/denied_hosts); 502 fetch_failed; 422 not_icalendar or too_large; 409 limit_reached (subscriptions per user, quota, objects) or collection exists. 404 while subscriptions are disabled.",
+        "tags": [
+          "subscriptions"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSubscription"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriptionInfo"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/subscriptions/{slug}": {
+      "patch": {
+        "summary": "Rename, recolour or change the refresh interval",
+        "tags": [
+          "subscriptions"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "description": "Slug of the subscription calendar. Subscriptions of other users are answered like unknown ones.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSubscription"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriptionInfo"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Unsubscribe",
+        "description": "Deletes the subscription and its calendar permanently (not into the trash; subscribing again restores the content).",
+        "tags": [
+          "subscriptions"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "description": "Slug of the subscription calendar. Subscriptions of other users are answered like unknown ones.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/subscriptions/{slug}/refresh": {
+      "post": {
+        "summary": "Refresh a subscription now",
+        "description": "At most once a minute per subscription (429 rate_limited with Retry-After otherwise). A failed fetch is not an error of this request: the result has last_error set and the last good content stays.",
+        "tags": [
+          "subscriptions"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "description": "Slug of the subscription calendar. Subscriptions of other users are answered like unknown ones.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Refreshed (or failed, see last_error)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriptionInfo"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1572,6 +1785,10 @@
           },
           "href": {
             "type": "string"
+          },
+          "read_only": {
+            "type": "boolean",
+            "description": "A calendar subscription: its objects come from a feed and cannot be changed."
           }
         },
         "required": [
@@ -1995,6 +2212,167 @@
           "collection",
           "href"
         ]
+      },
+      "SubscriptionInfo": {
+        "type": "object",
+        "properties": {
+          "slug": {
+            "type": "string"
+          },
+          "href": {
+            "type": "string",
+            "description": "DAV URL of the read-only calendar"
+          },
+          "url": {
+            "type": "string",
+            "description": "Feed URL (may contain a secret token)"
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "refresh_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Chosen interval; null: automatic (the feed's REFRESH-INTERVAL/X-PUBLISHED-TTL, else the server default)"
+          },
+          "effective_refresh_minutes": {
+            "type": "integer",
+            "description": "Interval in effect (15 to 10080)"
+          },
+          "objects": {
+            "type": "integer"
+          },
+          "skipped": {
+            "type": "integer",
+            "description": "Invalid objects of the last good feed that were left out"
+          },
+          "last_attempt_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Unix seconds"
+          },
+          "last_success_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Unix seconds"
+          },
+          "next_refresh_at": {
+            "type": "integer",
+            "description": "Unix seconds"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "invalid_url",
+              "blocked_address",
+              "fetch_failed",
+              "not_icalendar",
+              "too_large",
+              "limit_reached",
+              null
+            ],
+            "description": "Error of the last refresh; null after a success"
+          },
+          "last_error_message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "slug",
+          "href",
+          "url",
+          "effective_refresh_minutes",
+          "objects",
+          "skipped",
+          "next_refresh_at"
+        ]
+      },
+      "CreateSubscription": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "https:// or webcal:// URL of an iCalendar feed (at most 2048 characters)"
+          },
+          "slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Slug of the new calendar; random if absent"
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "#RRGGBB or #RRGGBBAA"
+          },
+          "refresh_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "15 to 10080; null or 0: automatic"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "additionalProperties": false
+      },
+      "UpdateSubscription": {
+        "type": "object",
+        "description": "Fields that are present are changed; an empty string clears a value.",
+        "properties": {
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "refresh_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "15 to 10080; 0: automatic"
+          }
+        },
+        "additionalProperties": false
       }
     }
   }

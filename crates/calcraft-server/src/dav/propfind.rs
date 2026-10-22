@@ -38,8 +38,7 @@ pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
         Resource::Unmapped(..) => return not_found(),
         Resource::Item(collection, name) => match ctx.state.store.item(collection.id, name).await {
             Ok(Some(item)) => {
-                let props =
-                    item_properties(user, collection.kind, &item.etag, item.content.len(), None);
+                let props = item_properties(user, collection, &item.etag, item.content.len(), None);
                 responses.push(respond(&href_of(&resource, username), &props, &query));
             }
             Ok(None) => return not_found(),
@@ -71,7 +70,7 @@ pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
                 Ok(items) => {
                     for item in items {
                         let size = usize::try_from(item.size).unwrap_or(0);
-                        let props = item_properties(user, collection.kind, &item.etag, size, None);
+                        let props = item_properties(user, collection, &item.etag, size, None);
                         responses.push(respond(
                             &item_href(collection, username, &item.name),
                             &props,

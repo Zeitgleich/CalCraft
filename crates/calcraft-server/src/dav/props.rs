@@ -90,31 +90,44 @@ fn resourcetype(types: &[(&'static str, &'static str)]) -> (PropName, PropValue)
 }
 
 /// Privileges of the owner on their own resources.
-fn owner_privileges() -> PropValue {
+const OWNER_PRIVILEGES: [&str; 7] = [
+    "read",
+    "write",
+    "write-properties",
+    "write-content",
+    "bind",
+    "unbind",
+    "read-current-user-privilege-set",
+];
+/// Privileges of the owner on a subscription and its objects: only the
+/// server's feed refresher changes them (the subscription itself can be
+/// deleted, which is the home's `unbind`).
+const READ_ONLY_PRIVILEGES: [&str; 2] = ["read", "read-current-user-privilege-set"];
+
+fn privileges(read_only: bool) -> PropValue {
+    let names: &[&str] = if read_only {
+        &READ_ONLY_PRIVILEGES
+    } else {
+        &OWNER_PRIVILEGES
+    };
     PropValue::Elements(
-        [
-            "read",
-            "write",
-            "write-properties",
-            "write-content",
-            "bind",
-            "unbind",
-            "read-current-user-privilege-set",
-        ]
-        .into_iter()
-        .map(|privilege| Element::new(NS_DAV, "privilege").child(Element::new(NS_DAV, privilege)))
-        .collect(),
+        names
+            .iter()
+            .map(|privilege| {
+                Element::new(NS_DAV, "privilege").child(Element::new(NS_DAV, privilege))
+            })
+            .collect(),
     )
 }
 
-fn common(user: &User) -> Vec<(PropName, PropValue)> {
+fn common(user: &User, read_only: bool) -> Vec<(PropName, PropValue)> {
     vec![
         prop(
             NS_DAV,
             "current-user-principal",
             PropValue::Href(principal_href(&user.username)),
         ),
-        prop(NS_DAV, "current-user-privilege-set", owner_privileges()),
+        prop(NS_DAV, "current-user-privilege-set", privileges(read_only)),
     ]
 }
 
@@ -136,7 +149,8 @@ pub fn properties(
 ) -> Vec<(PropName, PropValue)> {
     let username = &user.username;
     let principal = principal_href(username);
-    let mut props = common(user);
+    let read_only = matches!(resource, Resource::Collection(c) if c.read_only);
+    let mut props = common(user, read_only);
     match resource {
         Resource::Root => props.push(resourcetype(&[(NS_DAV, "collection")])),
         Resource::Principal => {
@@ -295,12 +309,13 @@ fn collection_properties(
 /// `calendar-data` / `address-data`.
 pub fn item_properties(
     user: &User,
-    kind: CollectionKind,
+    collection: &Collection,
     etag: &str,
     size: usize,
     content: Option<&[u8]>,
 ) -> Vec<(PropName, PropValue)> {
-    let mut props = common(user);
+    let kind = collection.kind;
+    let mut props = common(user, collection.read_only);
     props.extend([
         resourcetype(&[]),
         prop(NS_DAV, "getetag", PropValue::Text(etag.to_owned())),

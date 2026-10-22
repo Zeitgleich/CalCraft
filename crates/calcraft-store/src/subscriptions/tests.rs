@@ -246,7 +246,7 @@ async fn limits_keep_last_good_content() {
     };
     assert!(matches!(
         store
-            .apply_subscription_feed(collection.id, &[big.clone()], &state(200))
+            .apply_subscription_feed(collection.id, std::slice::from_ref(&big), &state(200))
             .await,
         Err(StoreError::Limit("storage quota exceeded"))
     ));

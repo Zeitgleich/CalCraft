@@ -98,6 +98,9 @@ pub async fn import(
 ) -> Result<Json<ImportReport>, ApiError> {
     let Query(query) = query.map_err(|_| ApiError::BadRequest("invalid query"))?;
     let collection = own_collection(&state, &session.user, &kind, &slug).await?;
+    if collection.read_only {
+        return Err(ApiError::ReadOnly);
+    }
     let format = transfer::format_for(collection.kind, query.format.as_deref())?;
     let on_conflict = match query.on_conflict.as_deref() {
         None => OnConflict::default(),
