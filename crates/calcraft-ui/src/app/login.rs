@@ -1,13 +1,64 @@
-//! Login form with optional second factor.
+//! Login page: single sign-on button and/or password form with optional
+//! second factor, depending on what the server offers.
 
-use calcraft_core::api::{LoginRequest, Me};
-use calcraft_ui::{text as t, validate::clean_code};
-use leptos::prelude::*;
+use calcraft_core::api::{AuthMethods, LoginRequest, Me};
+use calcraft_ui::{sso, text as t, validate::clean_code};
+use leptos::{prelude::*, task::spawn_local};
 
 use super::{Ctx, ErrorText, Session, api, submit};
 
 #[component]
 pub fn Login() -> impl IntoView {
+    let ctx = Ctx::get();
+    // `None` while loading. If the methods cannot be loaded, the password
+    // form is shown; the server stays authoritative anyway.
+    let methods = RwSignal::new(None::<AuthMethods>);
+    spawn_local(async move {
+        let loaded = api::get::<AuthMethods>("/v1/auth/methods")
+            .await
+            .unwrap_or(AuthMethods {
+                password: true,
+                oidc: None,
+            });
+        methods.try_set(Some(loaded));
+    });
+
+    view! {
+        <main class="narrow">
+            <h1>{t::LOGIN_TITLE}</h1>
+            {move || ctx.notice.get().map(|notice| view! { <p class="success" role="status">{notice}</p> })}
+            {move || ctx.sso_error.get().map(|message| view! { <p class="error" role="alert">{message}</p> })}
+            {move || match methods.get() {
+                None => view! { <p>{t::LOADING}</p> }.into_any(),
+                Some(methods) => {
+                    let sso_button = methods.oidc.map(|oidc| {
+                        let href = sso::login_url(&oidc.login_url).to_owned();
+                        view! {
+                            <div class="card">
+                                <a class="button" href=href>
+                                    {sso::button_label(&oidc.label)}
+                                </a>
+                            </div>
+                        }
+                    });
+                    let both = sso_button.is_some() && methods.password;
+                    let nothing = sso_button.is_none() && !methods.password;
+                    view! {
+                        {sso_button}
+                        {both.then(|| view! { <p class="muted separator">{t::LOGIN_OR_PASSWORD}</p> })}
+                        {methods.password.then(|| view! { <PasswordForm /> })}
+                        {nothing.then(|| view! { <p class="error" role="alert">{t::LOGIN_NO_METHOD}</p> })}
+                    }
+                        .into_any()
+                }
+            }}
+        </main>
+    }
+}
+
+/// Username and password, then the second factor if the server asks.
+#[component]
+fn PasswordForm() -> impl IntoView {
     let ctx = Ctx::get();
     let username = RwSignal::new(String::new());
     let password = RwSignal::new(String::new());
@@ -42,6 +93,7 @@ pub fn Login() -> impl IntoView {
                 match api::send::<_, Me>("POST", "/v1/auth/login", &request).await {
                     Ok(me) => {
                         ctx.notice.set(None);
+                        ctx.sso_error.set(None);
                         ctx.session.set(Session::LoggedIn(me));
                         Ok(())
                     }
@@ -59,9 +111,6 @@ pub fn Login() -> impl IntoView {
     };
 
     view! {
-        <main class="narrow">
-            <h1>{t::LOGIN_TITLE}</h1>
-            {move || ctx.notice.get().map(|notice| view! { <p class="success" role="status">{notice}</p> })}
             <form class="card" on:submit=on_submit>
                 <label>
                     {t::USERNAME}
@@ -105,6 +154,5 @@ pub fn Login() -> impl IntoView {
                     {t::LOGIN}
                 </button>
             </form>
-        </main>
     }
 }
