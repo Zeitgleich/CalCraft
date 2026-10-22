@@ -48,6 +48,7 @@ Cargo features of `calcraft-server`:
 | `api` | yes | REST API |
 | `oidc` | yes | Single sign-on via OpenID Connect (implies `api`; adds an HTTPS client: rustls/ring) |
 | `update-check` | yes | Optional update notice for administrators (implies `api`; same HTTPS client; off unless `[updates] check = true`) |
+| `migrate` | yes | `calcraft migrate` from another CalDAV/CardDAV server (same HTTPS client) |
 
 CalCraft runs on Linux, macOS and Windows.
 
@@ -342,6 +343,63 @@ CSV columns are `summary,start,end,all_day,location,description,uid` for events 
 exports hold events only (the master of a recurring event, without its rule), and
 cells starting with `=`, `+`, `-`, `@`, TAB or CR are prefixed with `'` so that
 spreadsheets do not evaluate them; the import removes this prefix again.
+
+### Migrating from another server
+
+`calcraft migrate` copies all calendars, task lists and address books of one
+account on another CalDAV/CardDAV server into a CalCraft user. It finds them via
+`.well-known`, `current-user-principal` and the home sets, keeps name, color,
+description and component set (VEVENT/VTODO/VJOURNAL) of each collection, and
+imports every object through the same validation as `calcraft import`, keeping
+its UID. Valid objects are stored byte for byte; a resource with several UIDs is
+split, one without UID gets a UID derived from its source name.
+
+```sh
+calcraft migrate --from https://nas.example.com:5001/caldav/ \
+    --carddav-from https://nas.example.com:5001/carddav/ \
+    --source-user alice --user alice --dry-run
+```
+
+| Source | `--from` (placeholders) | Notes |
+|---|---|---|
+| Synology Calendar / Contacts | `https://<nas>:5001/caldav/` plus `--carddav-from https://<nas>:5001/carddav/` | Self-signed certificate: export it (or your own CA) as PEM and pass `--ca-file nas.pem`. |
+| Radicale | `https://<host>:5232/` | |
+| Baïkal | `https://<host>/dav.php/` | |
+| Nextcloud | `https://<host>/remote.php/dav/` | Use an app password; shared calendars only with `--include-shared`. |
+
+- **Password:** prompted for, or the first line of `--password-file <file>`
+  (mode `600`), or `CALCRAFT_MIGRATE_PASSWORD`; never on the command line, never
+  in the URL, never printed or logged. It is sent as HTTP Basic, only to the
+  origin of `--from`.
+- **Options:** `--dry-run` (discover, fetch and validate, write nothing),
+  `--only calendars|addressbooks`, `--map source-slug=target-slug` (repeatable;
+  otherwise the slug comes from the last path segment of the source, made safe),
+  `--on-conflict skip|replace` (UIDs already in the target collection; default
+  `skip`), `--include-shared`, `--batch-size` (multiget, default 50),
+  `--max-response-mib` (default 32), `--timeout` (seconds per request, default 60),
+  `--delay-ms` (pause before each request).
+- **Idempotent:** existing target collections are reused (their properties are
+  not changed), and with `skip` a second run copies only what is new, so an
+  interrupted run can simply be repeated.
+- Objects come via `calendar-multiget`/`addressbook-multiget` in batches, or one
+  by one with `GET` if the server has no multiget. Scheduling inboxes/outboxes,
+  notifications and webcal subscriptions are skipped; `calendar-timezone` is not
+  stored (objects carry their own `VTIMEZONE`). The report lists per collection
+  how many objects were created, replaced, skipped and rejected, with reasons
+  but without contents; the exit code is non-zero if a collection could not be
+  copied completely.
+- **Network rules:** HTTPS only, with the system trust store plus `--ca-file`;
+  there is no switch to disable certificate checks. `--allow-http` permits plain
+  HTTP with a warning (password and data unencrypted). Redirects are followed only
+  within the origin, or from `http` to `https` on the same host (Synology's
+  5000 → 5001); hrefs pointing elsewhere are ignored. Private and loopback
+  addresses are allowed: unlike server-side fetches such as webcal subscriptions,
+  where users choose URLs and SSRF rules keep the server out of its own network,
+  this command is run by the administrator against a server they name – usually
+  a NAS on the local network.
+- Limits: responses up to `--max-response-mib`, objects up to the object size limit
+  (1 MiB, vCards `storage.max_vcard_bytes`), at most 100 000 objects per
+  collection; quota and limits of the target user apply.
 
 See [`calcraft.example.toml`](calcraft.example.toml). Every setting can be overridden via
 environment variables with the prefix `CALCRAFT_` and `__` as separator,

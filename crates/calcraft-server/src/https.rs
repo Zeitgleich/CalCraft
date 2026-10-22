@@ -1,5 +1,5 @@
-//! Outbound HTTPS client, shared by single sign-on (`oidc`) and the
-//! optional update check (`update-check`).
+//! Outbound HTTPS client, shared by single sign-on (`oidc`), the optional
+//! update check (`update-check`) and `calcraft migrate` (`migrate`).
 //!
 //! Redirects are not followed, every request has a deadline and a response
 //! size limit, and no cookies or credentials are kept between requests (the
@@ -10,7 +10,7 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
 use axum::http::{
-    HeaderValue, Method, Request, StatusCode, Uri,
+    HeaderMap, HeaderValue, Method, Request, StatusCode, Uri,
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT},
 };
 use bytes::Bytes;
@@ -43,6 +43,23 @@ pub enum HttpError {
     Status(StatusCode),
     #[error("response too large or unreadable")]
     Body,
+}
+
+/// A complete response of [`HttpClient::request`].
+#[derive(Debug)]
+#[cfg_attr(not(feature = "migrate"), allow(dead_code))]
+pub struct Response {
+    pub status: StatusCode,
+    pub headers: HeaderMap,
+    pub body: Bytes,
+}
+
+/// Deadline and size limit of one [`HttpClient::request`].
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(feature = "migrate"), allow(dead_code))]
+pub struct Limits {
+    pub timeout: Duration,
+    pub max_body: usize,
 }
 
 /// HTTP(S) client with deadline and size limit.
@@ -87,7 +104,7 @@ impl HttpClient {
         }
         if roots.is_empty() && !allow_http {
             anyhow::bail!(
-                "no trusted CA certificates found in the system trust store (for OIDC: set oidc.ca_file)"
+                "no trusted CA certificates found in the system trust store (set oidc.ca_file or --ca-file)"
             );
         }
         let tls =
@@ -149,7 +166,47 @@ impl HttpClient {
         self.send(request).await
     }
 
+    /// Any method with caller-supplied headers (e.g. WebDAV `PROPFIND`
+    /// with `Depth`); returns status, headers and body of any response.
+    /// Redirects are returned, not followed. `Authorization` headers should
+    /// be marked sensitive by the caller.
+    #[cfg_attr(not(feature = "migrate"), allow(dead_code))]
+    pub async fn request(
+        &self,
+        method: Method,
+        uri: &Uri,
+        headers: HeaderMap,
+        body: Bytes,
+        limits: Limits,
+    ) -> Result<Response, HttpError> {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(uri.clone())
+            .header(
+                USER_AGENT,
+                HeaderValue::from_static(concat!("calcraft/", env!("CARGO_PKG_VERSION"))),
+            )
+            .body(Full::new(body))
+            .map_err(|err| HttpError::Transport(err.to_string()))?;
+        request.headers_mut().extend(headers);
+        self.exchange(request, limits).await
+    }
+
     async fn send(&self, request: Request<Full<Bytes>>) -> Result<(StatusCode, Bytes), HttpError> {
+        let limits = Limits {
+            timeout: REQUEST_TIMEOUT,
+            max_body: MAX_RESPONSE,
+        };
+        self.exchange(request, limits)
+            .await
+            .map(|response| (response.status, response.body))
+    }
+
+    async fn exchange(
+        &self,
+        request: Request<Full<Bytes>>,
+        limits: Limits,
+    ) -> Result<Response, HttpError> {
         let exchange = async {
             let response = self
                 .client
@@ -157,14 +214,19 @@ impl HttpClient {
                 .await
                 .map_err(|err| HttpError::Transport(error_chain(&err)))?;
             let status = response.status();
-            let body = Limited::new(response.into_body(), MAX_RESPONSE)
+            let (parts, body) = response.into_parts();
+            let body = Limited::new(body, limits.max_body)
                 .collect()
                 .await
                 .map_err(|_| HttpError::Body)?
                 .to_bytes();
-            Ok((status, body))
+            Ok(Response {
+                status,
+                headers: parts.headers,
+                body,
+            })
         };
-        tokio::time::timeout(REQUEST_TIMEOUT, exchange)
+        tokio::time::timeout(limits.timeout, exchange)
             .await
             .map_err(|_| HttpError::Timeout)?
     }

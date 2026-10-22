@@ -10,7 +10,7 @@
 //! time and converted chunks are sent through a bounded channel, so memory
 //! use does not grow with the size of the collection.
 
-use std::sync::LazyLock;
+use std::{collections::HashSet, sync::LazyLock};
 
 use bytes::Bytes;
 use calcraft_core::{
@@ -142,7 +142,7 @@ fn dtstamp() -> String {
 }
 
 /// An object ready for storage, or why it was rejected.
-struct Prepared {
+pub(crate) struct Prepared {
     uid: Option<String>,
     result: Result<(Validated, Vec<u8>), String>,
 }
@@ -243,30 +243,84 @@ pub async fn import(
             .await
             .map_err(|_| TransferError::Invalid("import failed".to_owned()))??;
 
-    let extension = match collection.kind {
-        CollectionKind::Calendar => "ics",
-        CollectionKind::Addressbook => "vcf",
-    };
-    let mut report = ImportReport::default();
-    let mut limit: Option<&'static str> = None;
+    let mut writer = Writer::new(store, collection, on_conflict, false);
     for object in prepared {
+        writer.store(object).await?;
+    }
+    Ok(writer.report)
+}
+
+/// Stores prepared objects one by one and counts the outcome. With
+/// `dry_run`, nothing is written: the report says what would happen.
+pub(crate) struct Writer<'a> {
+    store: &'a Store,
+    collection: &'a Collection,
+    on_conflict: OnConflict,
+    dry_run: bool,
+    /// Set once the quota or the object limit is reached.
+    limit: Option<&'static str>,
+    /// UIDs counted in a dry run, which writes nothing to look them up in.
+    seen: HashSet<String>,
+    pub(crate) report: ImportReport,
+}
+
+impl<'a> Writer<'a> {
+    pub(crate) fn new(
+        store: &'a Store,
+        collection: &'a Collection,
+        on_conflict: OnConflict,
+        dry_run: bool,
+    ) -> Self {
+        Self {
+            store,
+            collection,
+            on_conflict,
+            dry_run,
+            limit: None,
+            seen: HashSet::new(),
+            report: ImportReport::default(),
+        }
+    }
+
+    #[cfg_attr(not(feature = "migrate"), allow(dead_code))]
+    pub(crate) fn reject(&mut self, uid: Option<&str>, reason: &str) {
+        reject(&mut self.report, uid, reason);
+    }
+
+    pub(crate) async fn store(&mut self, object: Prepared) -> Result<(), TransferError> {
         let (validated, bytes) = match object.result {
             Ok(ok) => ok,
             Err(reason) => {
-                reject(&mut report, object.uid.as_deref(), &reason);
-                continue;
+                reject(&mut self.report, object.uid.as_deref(), &reason);
+                return Ok(());
             }
         };
         let uid = validated.uid;
-        if let Some(reason) = limit {
-            reject(&mut report, Some(&uid), reason);
-            continue;
+        if let Some(reason) = self.limit {
+            reject(&mut self.report, Some(&uid), reason);
+            return Ok(());
         }
-        let existing = store.item_name_by_uid(collection.id, &uid).await?;
-        let (name, precondition) = match (existing, on_conflict) {
+        let existing = self
+            .store
+            .item_name_by_uid(self.collection.id, &uid)
+            .await?;
+        if self.dry_run {
+            let exists = existing.is_some() || !self.seen.insert(uid);
+            match (exists, self.on_conflict) {
+                (true, OnConflict::Skip) => self.report.skipped += 1,
+                (true, OnConflict::Replace) => self.report.replaced += 1,
+                (false, _) => self.report.created += 1,
+            }
+            return Ok(());
+        }
+        let extension = match self.collection.kind {
+            CollectionKind::Calendar => "ics",
+            CollectionKind::Addressbook => "vcf",
+        };
+        let (name, precondition) = match (existing, self.on_conflict) {
             (Some(_), OnConflict::Skip) => {
-                report.skipped += 1;
-                continue;
+                self.report.skipped += 1;
+                return Ok(());
             }
             (Some(name), OnConflict::Replace) => (name, Precondition::MustExist),
             (None, _) => (
@@ -288,25 +342,111 @@ pub async fn import(
             etag: &etag,
             content: &bytes,
         };
-        match store
-            .put_item(collection.id, &name, &item, &precondition)
+        match self
+            .store
+            .put_item(self.collection.id, &name, &item, &precondition)
             .await
         {
-            Ok(PutOutcome::Created) => report.created += 1,
-            Ok(PutOutcome::Updated) => report.replaced += 1,
+            Ok(PutOutcome::Created) => self.report.created += 1,
+            Ok(PutOutcome::Updated) => self.report.replaced += 1,
             // Changed concurrently, or the generated name is taken.
             Err(StoreError::PreconditionFailed | StoreError::UidConflict(_)) => {
-                reject(&mut report, Some(&uid), "conflicts with an existing object");
+                reject(
+                    &mut self.report,
+                    Some(&uid),
+                    "conflicts with an existing object",
+                );
             }
             Err(StoreError::Limit(reason)) => {
                 // Quota or object limit: nothing further can be stored.
-                reject(&mut report, Some(&uid), reason);
-                limit = Some(reason);
+                reject(&mut self.report, Some(&uid), reason);
+                self.limit = Some(reason);
             }
             Err(err) => return Err(err.into()),
         }
+        Ok(())
     }
-    Ok(report)
+}
+
+/// Validates one object fetched from another server (`calcraft migrate`).
+/// An object that passes the DAV PUT check is kept byte for byte. One that
+/// does not is converted like an imported `.ics`/`.vcf` file (one object
+/// per UID, `METHOD` removed, missing UIDs added) and every result is
+/// checked again; if that does not help, the original reason is reported.
+/// `name` identifies the source object in reasons and derives the UIDs of
+/// objects that have none, so that a second run finds them again.
+#[cfg(feature = "migrate")]
+pub(crate) fn prepare_fetched(
+    collection: &Collection,
+    name: &str,
+    data: Vec<u8>,
+    max_vcard_bytes: usize,
+) -> Vec<Prepared> {
+    let label = |reason: &dyn std::fmt::Display| format!("{}: {reason}", printable(name));
+    let error = match check_object(collection, &data, max_vcard_bytes) {
+        Ok(validated) => {
+            return vec![Prepared {
+                uid: Some(validated.uid.clone()),
+                result: Ok((validated, data)),
+            }];
+        }
+        Err(Rejection::Invalid(err)) => err,
+        Err(rejection) => {
+            return vec![Prepared {
+                uid: None,
+                result: Err(label(&rejection)),
+            }];
+        }
+    };
+    let stamp = dtstamp();
+    let mut counter = 0u32;
+    let mut uids = || {
+        counter += 1;
+        derived_uid(name, counter)
+    };
+    let mut ctx = ImportContext {
+        dtstamp: &stamp,
+        new_uid: &mut uids,
+    };
+    let kind = target(collection.kind);
+    let converted = transfer::import(&data, Format::default_for(kind), kind, &mut ctx)
+        .ok()
+        .filter(|objects| !objects.is_empty())
+        .and_then(|objects| {
+            objects
+                .into_iter()
+                .map(|object| {
+                    let bytes = object.data.ok()?;
+                    let validated = check_object(collection, &bytes, max_vcard_bytes).ok()?;
+                    Some(Prepared {
+                        uid: Some(validated.uid.clone()),
+                        result: Ok((validated, bytes)),
+                    })
+                })
+                .collect::<Option<Vec<_>>>()
+        });
+    converted.unwrap_or_else(|| {
+        vec![Prepared {
+            uid: None,
+            result: Err(label(&error)),
+        }]
+    })
+}
+
+/// A UUID-shaped UID derived from the source object name, stable across
+/// runs.
+#[cfg(feature = "migrate")]
+fn derived_uid(name: &str, counter: u32) -> String {
+    let hash = blake3::hash(format!("calcraft-migrate\0{name}\0{counter}").as_bytes());
+    let hex = hash.to_hex();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
 }
 
 async fn send(

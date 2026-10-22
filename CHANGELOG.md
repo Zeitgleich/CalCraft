@@ -7,6 +7,21 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 
 ## [Unreleased]
 
+### Added
+
+- `calcraft migrate`: copies calendars, task lists and address books of one
+  account from another CalDAV/CardDAV server (Synology Calendar/Contacts,
+  Radicale, Baïkal, Nextcloud, …) into a local user. Discovery via
+  `.well-known`, `current-user-principal` and home sets; collections keep name,
+  color, description and component set; objects are fetched with multiget in
+  batches (GET fallback) and validated like `calcraft import`, keeping UIDs.
+  `--dry-run`, `--only`, `--map`, `--on-conflict skip|replace`,
+  `--include-shared`; idempotent with `skip`. Password from a prompt,
+  `--password-file` (mode 600) or `CALCRAFT_MIGRATE_PASSWORD`, never from the
+  command line. HTTPS only (`--ca-file` for self-signed certificates,
+  `--allow-http` with a warning), redirects only within the origin or from
+  http to https on the same host. New Cargo feature `migrate` (default on).
+
 ## [0.1.0-alpha.1] – 2026-10-22
 
 First pre-release, for testing only – not for production use (open points:

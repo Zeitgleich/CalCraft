@@ -76,7 +76,7 @@ Grundsätze:
 
 | Ebene | Schalter |
 |---|---|
-| Compile-Zeit (Cargo) | `web-ui`, `api`, `oidc`, `update-check`, `swagger-ui`, `postgres` |
+| Compile-Zeit (Cargo) | `web-ui`, `api`, `oidc`, `update-check`, `migrate`, `swagger-ui`, `postgres` |
 | Laufzeit (Config/ENV/CLI) | `web_ui.enabled`, `api.enabled`, `api.swagger_ui`, `updates.check` |
 
 Ohne Feature ist der Code nicht im Binary (kleinere Angriffsfläche).
@@ -237,7 +237,7 @@ Der Client-Track startet nach M4 (wenn Web-UI-Komponenten existieren).
 | **M3** ✅ | sync-collection, CardDAV · aus Phase 3 erledigt: Kontaktfotos (`storage.max_vcard_bytes`) und Gruppen (Apple, vCard 4.0), `MOVE`/`COPY` zwischen eigenen Collections, Papierkorb, exakte RRULE-Expansion mit Budgets und eingebetteten VTIMEZONEs (`docs/caldav.md`; `expand` und Zeitzonen-Datenbank offen) |
 | **M4** | **M4a** ✅ REST-API + OpenAPI, Sessions, 2FA (TOTP + Wiederherstellungscodes), App-Passwörter, Admin · **M4b** ✅ Web-UI Stufe 1 · **M4c** 🟡 SSO-Login in der Web-UI ✅, Logo/Favicon/Design-System ✅, Termin- und Kontaktansichten offen |
 | **M5** | **M5a** ✅ OIDC/SSO (Keycloak & Co.) · Freigaben, Gruppen, Erinnerungen (SMTP), Web-UI Stufe 3–4 |
-| **M6** | **M6a** ✅ Import/Export aller Formate (REST + CLI) · Backup/Restore + Pre-Migration-Backups ✅ · **M6b** Webcal mit SSRF-Schutz · Migration aus Radicale/Baïkal |
+| **M6** | **M6a** ✅ Import/Export aller Formate (REST + CLI) · Backup/Restore + Pre-Migration-Backups ✅ · **M6b** Webcal mit SSRF-Schutz · Migration aus Radicale/Baïkal/Synology/Nextcloud ✅ (`calcraft migrate`: Discovery, Multiget mit GET-Fallback, Validierung wie Import, `--dry-run`, idempotent; getestet gegen einen Fake-Server, noch nicht gegen echte Instanzen) |
 | **M7** | Release-Pipeline 🟡 (Sigstore-Attestierung, Provenance, GHCR; Probelauf grün, echter Tag-Lauf offen), Update-Hinweis ✅ · externes Security-Review, Release v1.0 |
 
 ## 10. Weitere Anforderungen

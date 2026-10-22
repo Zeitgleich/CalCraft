@@ -9,6 +9,8 @@ pub mod dav;
 #[cfg(feature = "https-client")]
 pub mod https;
 pub mod limits;
+#[cfg(feature = "migrate")]
+pub mod migrate;
 pub mod net;
 #[cfg(feature = "oidc")]
 pub mod oidc;
