@@ -24,6 +24,7 @@ mod accounts;
 mod backup;
 mod items;
 mod oidc;
+mod subscriptions;
 mod test_hooks;
 mod trash;
 
@@ -40,6 +41,9 @@ pub use items::{
 };
 pub use items::{MAX_BYTES_PER_USER, MAX_ITEMS_PER_COLLECTION};
 pub use oidc::{ApprovedBinding, OidcBinding};
+pub use subscriptions::{
+    FeedItem, FeedState, NewSubscription, ReplaceOutcome, Subscription, SubscriptionFailure,
+};
 #[cfg(feature = "test-hooks")]
 pub use test_hooks::SimulatedFailure;
 pub use trash::{
@@ -93,6 +97,9 @@ pub enum StoreError {
     UnsupportedComponent,
     #[error("limit reached: {0}")]
     Limit(&'static str),
+    /// The collection is a subscription: its objects cannot be changed.
+    #[error("collection is read-only")]
+    ReadOnly,
     /// A trash entry cannot be restored (see [`TrashConflict`]).
     #[error("cannot restore: {0}")]
     TrashConflict(TrashConflict),
@@ -206,6 +213,9 @@ pub struct Collection {
     pub sync_floor: i64,
     /// Random value bound into sync tokens.
     pub token_salt: i64,
+    /// A calendar subscription: only the server's feed refresher changes
+    /// its objects; DAV and API writes are refused.
+    pub read_only: bool,
 }
 
 /// Handle to the database. Cheap to clone.
@@ -492,7 +502,7 @@ impl Store {
         kind: CollectionKind,
     ) -> Result<Vec<Collection>> {
         let rows = sqlx::query(
-            "SELECT id, owner_id, kind, slug, display_name, description, color, sync_revision, components, sync_floor, token_salt \
+            "SELECT id, owner_id, kind, slug, display_name, description, color, sync_revision, components, sync_floor, token_salt, read_only \
              FROM collections WHERE owner_id = ? AND kind = ? ORDER BY slug",
         )
         .bind(owner_id)
@@ -510,7 +520,7 @@ impl Store {
         slug: &Slug,
     ) -> Result<Option<Collection>> {
         let row = sqlx::query(
-            "SELECT id, owner_id, kind, slug, display_name, description, color, sync_revision, components, sync_floor, token_salt \
+            "SELECT id, owner_id, kind, slug, display_name, description, color, sync_revision, components, sync_floor, token_salt, read_only \
              FROM collections WHERE owner_id = ? AND kind = ? AND slug = ?",
         )
         .bind(owner_id)
@@ -555,6 +565,7 @@ pub(crate) fn collection_from_row(row: &SqliteRow) -> Result<Collection> {
         components: row.try_get("components")?,
         sync_floor: row.try_get("sync_floor")?,
         token_salt: row.try_get("token_salt")?,
+        read_only: row.try_get("read_only")?,
     })
 }
 

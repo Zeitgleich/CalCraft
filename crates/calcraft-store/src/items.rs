@@ -189,7 +189,7 @@ impl Store {
         let result = sqlx::query(
             "INSERT INTO collections (owner_id, kind, slug, display_name, description, color, components, token_salt) \
              VALUES (?, ?, ?, ?, ?, ?, ?, abs(random())) \
-             RETURNING id, owner_id, kind, slug, display_name, description, color, sync_revision, components, sync_floor, token_salt",
+             RETURNING id, owner_id, kind, slug, display_name, description, color, sync_revision, components, sync_floor, token_salt, read_only",
         )
         .bind(owner_id)
         .bind(kind.as_str())
@@ -431,6 +431,7 @@ impl Store {
         // IMMEDIATE takes the write lock up front, so the checks below and
         // the write are atomic and concurrent writers wait instead of failing.
         let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+        ensure_writable(&mut tx, collection_id).await?;
         let existing: Option<String> =
             sqlx::query("SELECT etag FROM items WHERE collection_id = ? AND name = ?")
                 .bind(collection_id)
@@ -536,6 +537,7 @@ impl Store {
         precondition: &Precondition,
     ) -> Result<bool> {
         let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+        ensure_writable(&mut tx, collection_id).await?;
         let existing: Option<String> =
             sqlx::query("SELECT etag FROM items WHERE collection_id = ? AND name = ?")
                 .bind(collection_id)
@@ -611,9 +613,11 @@ impl Store {
         // caller resolved them for the owner already; this keeps the queries
         // scoped and covers collections deleted in the meantime.
         let collection = |id: i64| {
-            sqlx::query("SELECT kind, components FROM collections WHERE id = ? AND owner_id = ?")
-                .bind(id)
-                .bind(owner_id)
+            sqlx::query(
+                "SELECT kind, components, read_only FROM collections WHERE id = ? AND owner_id = ?",
+            )
+            .bind(id)
+            .bind(owner_id)
         };
         let Some(source) = collection(source_collection)
             .fetch_optional(&mut *tx)
@@ -627,6 +631,12 @@ impl Store {
         else {
             return Err(StoreError::MissingDestination);
         };
+        // Nothing is copied or moved into a subscription, nor moved out of one.
+        if destination.try_get::<bool, _>("read_only")?
+            || (remove_source && source.try_get::<bool, _>("read_only")?)
+        {
+            return Err(StoreError::ReadOnly);
+        }
         let kind: String = destination.try_get("kind")?;
         if source.try_get::<String, _>("kind")? != kind {
             return Err(StoreError::MissingDestination);
@@ -850,7 +860,25 @@ impl Store {
     }
 }
 
-async fn bump_revision(
+/// Refuses changes to the objects of a read-only collection (a
+/// subscription); only [`Store::apply_subscription_feed`] writes there.
+pub(crate) async fn ensure_writable(
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    collection_id: i64,
+) -> Result<()> {
+    let read_only = sqlx::query("SELECT read_only FROM collections WHERE id = ?")
+        .bind(collection_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .map(|row| row.try_get::<bool, _>("read_only"))
+        .transpose()?;
+    if read_only == Some(true) {
+        return Err(StoreError::ReadOnly);
+    }
+    Ok(())
+}
+
+pub(crate) async fn bump_revision(
     tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
     collection_id: i64,
 ) -> Result<i64> {
