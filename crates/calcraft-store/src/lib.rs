@@ -244,6 +244,13 @@ impl Store {
         self.simulation.set(failure);
     }
 
+    /// Lowers the storage quota per user to `bytes` (0: the real quota),
+    /// so quota tests need not write 512 MiB (feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    pub fn set_quota_for_tests(&self, bytes: i64) {
+        self.simulation.set_quota(bytes);
+    }
+
     /// Creates a user with a default calendar and address book.
     pub async fn create_user(
         &self,

@@ -86,7 +86,7 @@ pub async fn export(store: &Store, args: ExportArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn import(store: &Store, args: ImportArgs) -> anyhow::Result<()> {
+pub async fn import(store: &Store, args: ImportArgs, max_vcard_bytes: usize) -> anyhow::Result<()> {
     let collection = resolve(store, &args.target).await?;
     let format = transfer::format_for(collection.kind, args.target.format.as_deref())?;
     let Some(on_conflict) = OnConflict::from_name(&args.on_conflict) else {
@@ -107,8 +107,16 @@ pub async fn import(store: &Store, args: ImportArgs) -> anyhow::Result<()> {
         bail!("file too large (at most {MAX_IMPORT_SIZE} bytes)");
     }
     let slot = transfer::import_slot().await?;
-    let report =
-        transfer::import(store, &collection, format, data.into(), on_conflict, slot).await?;
+    let report = transfer::import(
+        store,
+        &collection,
+        format,
+        data.into(),
+        on_conflict,
+        max_vcard_bytes,
+        slot,
+    )
+    .await?;
     println!(
         "created {}, replaced {}, skipped {}, rejected {}",
         report.created, report.replaced, report.skipped, report.rejected

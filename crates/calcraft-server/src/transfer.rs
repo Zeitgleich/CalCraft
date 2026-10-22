@@ -151,6 +151,7 @@ fn convert(
     collection: &Collection,
     data: &[u8],
     format: Format,
+    max_vcard_bytes: usize,
 ) -> Result<Vec<Prepared>, TransferError> {
     let stamp = dtstamp();
     let mut uids = new_uid;
@@ -170,11 +171,13 @@ fn convert(
             let result = object
                 .data
                 .map_err(|err| err.to_string())
-                .and_then(|bytes| match check_object(collection, &bytes) {
-                    Ok(validated) => Ok((validated, bytes)),
-                    Err(Rejection::Invalid(err)) => Err(err.to_string()),
-                    Err(rejection) => Err(rejection.to_string()),
-                });
+                .and_then(
+                    |bytes| match check_object(collection, &bytes, max_vcard_bytes) {
+                        Ok(validated) => Ok((validated, bytes)),
+                        Err(Rejection::Invalid(err)) => Err(err.to_string()),
+                        Err(rejection) => Err(rejection.to_string()),
+                    },
+                );
             Prepared {
                 uid: object.uid,
                 result,
@@ -220,22 +223,25 @@ pub async fn import_slot() -> Result<ImportSlot, TransferError> {
 }
 
 /// Imports `data` into a collection the caller has already resolved for
-/// its owner. UIDs are only ever matched within this collection.
+/// its owner. UIDs are only ever matched within this collection. vCards
+/// may be up to `max_vcard_bytes` (`storage.max_vcard_bytes`) large.
 pub async fn import(
     store: &Store,
     collection: &Collection,
     format: Format,
     data: Bytes,
     on_conflict: OnConflict,
+    max_vcard_bytes: usize,
     _slot: ImportSlot,
 ) -> Result<ImportReport, TransferError> {
     if data.len() > MAX_IMPORT_SIZE {
         return Err(TransferError::TooLarge);
     }
     let owned = collection.clone();
-    let prepared = tokio::task::spawn_blocking(move || convert(&owned, &data, format))
-        .await
-        .map_err(|_| TransferError::Invalid("import failed".to_owned()))??;
+    let prepared =
+        tokio::task::spawn_blocking(move || convert(&owned, &data, format, max_vcard_bytes))
+            .await
+            .map_err(|_| TransferError::Invalid("import failed".to_owned()))??;
 
     let extension = match collection.kind {
         CollectionKind::Calendar => "ics",

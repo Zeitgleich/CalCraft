@@ -127,8 +127,13 @@ pub fn components(collection: &Collection) -> Vec<&str> {
         .collect()
 }
 
-/// All live properties of a collection-level resource.
-pub fn properties(resource: &Resource, user: &User) -> Vec<(PropName, PropValue)> {
+/// All live properties of a collection-level resource; `max_vcard_bytes`
+/// is reported as the address books' `CARDDAV:max-resource-size`.
+pub fn properties(
+    resource: &Resource,
+    user: &User,
+    max_vcard_bytes: usize,
+) -> Vec<(PropName, PropValue)> {
     let username = &user.username;
     let principal = principal_href(username);
     let mut props = common(user);
@@ -166,7 +171,11 @@ pub fn properties(resource: &Resource, user: &User) -> Vec<(PropName, PropValue)
             ]);
         }
         Resource::Collection(collection) => {
-            props.extend(collection_properties(collection, principal));
+            props.extend(collection_properties(
+                collection,
+                principal,
+                max_vcard_bytes,
+            ));
         }
         // Unmapped paths and items are handled elsewhere.
         Resource::Unmapped(..) | Resource::Item(..) => {}
@@ -174,7 +183,11 @@ pub fn properties(resource: &Resource, user: &User) -> Vec<(PropName, PropValue)
     props
 }
 
-fn collection_properties(collection: &Collection, principal: String) -> Vec<(PropName, PropValue)> {
+fn collection_properties(
+    collection: &Collection,
+    principal: String,
+    max_vcard_bytes: usize,
+) -> Vec<(PropName, PropValue)> {
     let (kind_ns, kind_name, description_ns, description_name) = match collection.kind {
         CollectionKind::Calendar => (NS_CALDAV, "calendar", NS_CALDAV, "calendar-description"),
         CollectionKind::Addressbook => (
@@ -257,7 +270,7 @@ fn collection_properties(collection: &Collection, principal: String) -> Vec<(Pro
             prop(
                 NS_CARDDAV,
                 "max-resource-size",
-                PropValue::Text(MAX_OBJECT_SIZE.to_string()),
+                PropValue::Text(max_vcard_bytes.to_string()),
             ),
             prop(
                 NS_CARDDAV,

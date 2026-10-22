@@ -39,7 +39,13 @@ jobs:
           rustup toolchain install nightly --profile minimal
           cargo +nightly install cargo-fuzz --locked --version 0.13.2
       - name: Fuzz for 20 minutes
-        run: cargo +nightly fuzz run "${{ matrix.target }}" -- -max_total_time=1200 -rss_limit_mb=1024
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          # Checked-in seeds (fuzz/seeds/<target>) start the corpus.
+          mkdir -p "fuzz/corpus/$TARGET"
+          if [ -d "fuzz/seeds/$TARGET" ]; then cp fuzz/seeds/"$TARGET"/* "fuzz/corpus/$TARGET/"; fi
+          cargo +nightly fuzz run "$TARGET" -- -max_total_time=1200 -rss_limit_mb=1024
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
