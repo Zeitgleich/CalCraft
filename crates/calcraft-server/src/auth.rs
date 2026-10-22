@@ -201,6 +201,8 @@ pub struct Authenticator {
     store: Store,
     cache_key: [u8; 32],
     dummy_hash: String,
+    /// Random input for the dummy verification of locked accounts.
+    dummy_guess: String,
     /// Bounds concurrent Argon2 runs. Owned permits move into the blocking
     /// task, so a cancelled request keeps its permit until hashing ends.
     hashing: Arc<Semaphore>,
@@ -242,10 +244,14 @@ impl Authenticator {
         getrandom::fill(&mut dummy)
             .map_err(|err| anyhow::anyhow!("no secure random source: {err}"))?;
         let dummy_hash = hash_password(&STANDARD.encode(dummy))?;
+        getrandom::fill(&mut dummy)
+            .map_err(|err| anyhow::anyhow!("no secure random source: {err}"))?;
+        let dummy_guess = STANDARD.encode(dummy);
         Ok(Arc::new(Self {
             store,
             cache_key,
             dummy_hash,
+            dummy_guess,
             hashing: Arc::new(Semaphore::new(MAX_CONCURRENT_HASHES)),
             cache: Mutex::new(HashMap::new()),
             failures: Mutex::new(HashMap::new()),
@@ -401,10 +407,11 @@ impl Authenticator {
     /// (and with it, whether the account exists).
     pub async fn locked_out(&self) -> AuthOutcome {
         let hash = self.dummy_hash.clone();
+        let guess = self.dummy_guess.clone();
         if let Ok(permit) = self.hashing.clone().acquire_owned().await {
             let _ = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                verify_password("locked", &hash)
+                verify_password(&guess, &hash)
             })
             .await;
         }
