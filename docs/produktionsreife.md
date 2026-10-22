@@ -1,6 +1,6 @@
 # Produktionsreife – Anforderungen, Ist-Stand und Fahrplan
 
-Stand: 22.10.2026, Vorabversion 0.1.0-alpha.1: `main` mit M5a (OIDC), M6a (Import/Export), Phase-2-Limits und -Robustheit, Release-Pipeline, Update-Hinweis, CodeQL/Coverage, neuer Web-UI und den Phase-3-Punkten Papierkorb, `MOVE`/`COPY`, CardDAV-Fotos/-Gruppen sowie RRULE-Expansion mit Zeitzonen.
+Stand: 22.10.2026, Vorabversion 0.1.0-alpha.2: `main` mit M5a (OIDC), M6 (Import/Export, Webcal-Abos mit SSRF-Schutz, `calcraft migrate`), Phase-2-Limits und -Robustheit, Release-Pipeline, Update-Hinweis, CodeQL/Coverage, neuer Web-UI und den Phase-3-Punkten Papierkorb, `MOVE`/`COPY`, CardDAV-Fotos/-Gruppen sowie RRULE-Expansion mit Zeitzonen, Kalender-Reihenfolge/Dead Properties, systemd-Dienst (`Type=notify`) und `/readyz` mit Schreibzustand.
 Dieses Dokument ist die Grundlage für die Freigabe einer stabilen Version.
 Ein Punkt gilt erst als **erledigt**, wenn es einen automatisierten Test
 (oder einen dokumentierten, wiederholbaren manuellen Nachweis) dafür gibt.

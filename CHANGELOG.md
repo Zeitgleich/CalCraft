@@ -7,6 +7,17 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2] – 2026-10-22
+
+Second pre-release, for testing only – not for production use (open points:
+[docs/produktionsreife.md](docs/produktionsreife.md)). New: calendar
+subscriptions (webcal), `calcraft migrate`, calendar order and dead
+properties, a systemd service and a write-aware `/readyz`. Upgrading applies
+the database migrations `0008_health`, `0009_subscriptions` and
+`0010_dead_properties` (a pre-migration backup is taken by default). New
+configuration section `[subscriptions]` (off by default); new Cargo features
+`subscriptions` and `migrate` (both on by default).
+
 ### Added
 
 - Dead properties (RFC 4918 §4) on calendars and address books: PROPPATCH,
