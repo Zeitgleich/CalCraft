@@ -44,15 +44,45 @@ pub trait Resolver: Send + Sync {
     fn lookup<'a>(&'a self, host: &'a str, port: u16) -> Lookup<'a>;
 }
 
-/// The operating system's resolver (`getaddrinfo`).
-#[derive(Debug, Default)]
-pub struct SystemResolver;
+/// Concurrent system DNS lookups of subscriptions.
+pub const MAX_DNS_LOOKUPS: usize = 4;
+
+/// The operating system's resolver (`getaddrinfo`, on the blocking pool).
+///
+/// A lookup cannot be cancelled: the caller's timeout only stops waiting.
+/// Each lookup therefore runs in its own task that holds one of
+/// [`MAX_DNS_LOOKUPS`] permits until `getaddrinfo` returns, so stuck
+/// lookups cannot exhaust the blocking pool shared with imports and
+/// parsing; further lookups wait for a permit (within the caller's
+/// timeout).
+#[derive(Debug)]
+pub struct SystemResolver {
+    pub(crate) permits: Arc<tokio::sync::Semaphore>,
+}
+
+impl Default for SystemResolver {
+    fn default() -> Self {
+        Self {
+            permits: Arc::new(tokio::sync::Semaphore::new(MAX_DNS_LOOKUPS)),
+        }
+    }
+}
 
 impl Resolver for SystemResolver {
     fn lookup<'a>(&'a self, host: &'a str, port: u16) -> Lookup<'a> {
+        let permits = self.permits.clone();
+        let host = host.to_owned();
         Box::pin(async move {
-            let addrs = tokio::net::lookup_host((host, port)).await?;
-            Ok(addrs.map(|addr| addr.ip()).collect())
+            let permit = permits
+                .acquire_owned()
+                .await
+                .map_err(|_| io::Error::other("resolver closed"))?;
+            let task = tokio::spawn(async move {
+                let _permit = permit;
+                let addrs = tokio::net::lookup_host((host.as_str(), port)).await?;
+                Ok(addrs.map(|addr| addr.ip()).collect())
+            });
+            task.await.map_err(|_| io::Error::other("lookup failed"))?
         })
     }
 }
@@ -176,7 +206,10 @@ impl Fetcher {
     ) -> Result<Fetched, SubscriptionError> {
         tokio::time::timeout(self.timeout, self.fetch_chain(url, conditional))
             .await
-            .unwrap_or(Err(SubscriptionError::FetchFailed(Some("timeout"))))
+            .unwrap_or_else(|_| {
+                tracing::info!(host = %url.host_name(), "subscription fetch timed out");
+                Err(SubscriptionError::FetchFailed(None))
+            })
     }
 
     async fn fetch_chain(
@@ -243,33 +276,40 @@ impl Fetcher {
     /// Resolves the host once and checks every address; returns the one to
     /// connect to. A name with any non-public address is refused, so a
     /// resolver cannot hide a private address behind a public one.
+    ///
+    /// For names, "resolves to a non-public address", "does not exist" and
+    /// "lookup timed out" give the same generic error, so users cannot
+    /// probe internal DNS names; the precise reason is logged (host only).
+    /// Address literals are refused as [`SubscriptionError::BlockedAddress`]
+    /// by [`Policy::parse_url`] already, which tells the user nothing new.
     async fn resolve(&self, url: &FeedUrl) -> Result<SocketAddr, SubscriptionError> {
+        let generic = |reason: &'static str| {
+            tracing::info!(host = %url.host_name(), reason, "subscription feed refused");
+            SubscriptionError::FetchFailed(None)
+        };
         let ips = match &url.host {
             Host::Ip(ip) => vec![*ip],
             Host::Name(name) => {
                 let lookup = self.resolver.lookup(name, url.port);
                 match tokio::time::timeout(DNS_TIMEOUT, lookup).await {
                     Ok(Ok(ips)) => ips,
-                    Ok(Err(_)) => {
-                        return Err(SubscriptionError::FetchFailed(Some("host not found")));
-                    }
-                    Err(_) => return Err(SubscriptionError::FetchFailed(Some("DNS timeout"))),
+                    Ok(Err(_)) => return Err(generic("host not found")),
+                    Err(_) => return Err(generic("DNS timeout")),
                 }
             }
         };
         if ips.is_empty() {
-            return Err(SubscriptionError::FetchFailed(Some("host not found")));
+            return Err(generic("host not found"));
         }
         let mut checked = Vec::with_capacity(ips.len().min(MAX_ADDRESSES));
         for ip in ips.into_iter().take(MAX_ADDRESSES) {
             match self.policy.check_ip(ip) {
                 Ok(ip) => checked.push(ip),
                 Err(err) => {
-                    tracing::info!(
-                        host = %url.host_name(),
-                        "subscription feed refused: host resolves to a non-public address"
-                    );
-                    return Err(err);
+                    return Err(match url.host {
+                        Host::Ip(_) => err,
+                        Host::Name(_) => generic("host resolves to a non-public address"),
+                    });
                 }
             }
         }
@@ -317,7 +357,7 @@ impl Fetcher {
         };
         get_pinned(&tls, request).await.map_err(|err| match err {
             HttpError::TooLarge => SubscriptionError::TooLarge,
-            HttpError::Timeout => SubscriptionError::FetchFailed(Some("timeout")),
+            HttpError::Timeout => SubscriptionError::FetchFailed(None),
             err => {
                 // The error chain names the address at most, never the path.
                 tracing::debug!(host = %url.host_name(), %err, "subscription fetch failed");

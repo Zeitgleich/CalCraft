@@ -318,10 +318,10 @@ async fn dns_rebinding_uses_the_pinned_address() {
     assert_eq!(resolver.calls(), 1);
     assert_eq!(server.requests().len(), 1);
     // The next lookup answers with the private address: refused before any
-    // connection is made.
+    // connection is made (generically, see below).
     assert_eq!(
         fetcher.fetch(&url, &Conditional::default()).await,
-        Err(SubscriptionError::BlockedAddress)
+        Err(SubscriptionError::FetchFailed(None))
     );
     assert_eq!(server.requests().len(), 1);
 }
@@ -337,7 +337,6 @@ async fn every_address_of_a_name_is_checked() {
         vec!["fd00:ec2::254".parse().unwrap()],
         vec![],
     ] {
-        let empty = answer.is_empty();
         let fetcher = fetcher(server.port, TestResolver::new(vec![answer], Vec::new()));
         let url = fetcher
             .policy()
@@ -347,13 +346,92 @@ async fn every_address_of_a_name_is_checked() {
             .fetch(&url, &Conditional::default())
             .await
             .unwrap_err();
-        if empty {
-            assert_eq!(err, SubscriptionError::FetchFailed(Some("host not found")));
-        } else {
-            assert_eq!(err, SubscriptionError::BlockedAddress);
-        }
+        // Same answer as for a name that does not exist: no DNS oracle.
+        assert_eq!(err, SubscriptionError::FetchFailed(None));
     }
     assert!(server.requests().is_empty());
+}
+
+/// Never answers.
+struct HangingResolver;
+
+impl Resolver for HangingResolver {
+    fn lookup<'a>(&'a self, _host: &'a str, _port: u16) -> Lookup<'a> {
+        Box::pin(std::future::pending())
+    }
+}
+
+/// Fails like NXDOMAIN.
+struct MissingResolver;
+
+impl Resolver for MissingResolver {
+    fn lookup<'a>(&'a self, _host: &'a str, _port: u16) -> Lookup<'a> {
+        Box::pin(async { Err(std::io::Error::other("no such host")) })
+    }
+}
+
+#[tokio::test]
+async fn internal_names_cannot_be_told_apart() {
+    let policy = Policy::new(&SubscriptionsConfig::default());
+    let url = policy
+        .parse_url("https://intranet.example.org/cal.ics")
+        .unwrap();
+    let make = |resolver: Arc<dyn Resolver>| {
+        Fetcher::new(
+            policy.clone(),
+            resolver,
+            None,
+            64 * 1024,
+            Duration::from_secs(30),
+            3,
+        )
+    };
+    let private = make(TestResolver::new(
+        Vec::new(),
+        vec!["10.0.0.7".parse().unwrap()],
+    ));
+    let missing = make(Arc::new(MissingResolver));
+    let hanging = make(Arc::new(HangingResolver));
+    let mut errors = Vec::new();
+    for fetcher in [private, missing, hanging] {
+        errors.push(
+            fetcher
+                .fetch(&url, &Conditional::default())
+                .await
+                .unwrap_err(),
+        );
+    }
+    assert_eq!(errors, vec![SubscriptionError::FetchFailed(None); 3]);
+    // In the API all three read the same.
+    let api: Vec<String> = errors
+        .into_iter()
+        .map(|err| format!("{:?}", crate::api::ApiError::from(ServiceError::Feed(err))))
+        .collect();
+    assert!(api.windows(2).all(|w| w[0] == w[1]), "{api:?}");
+}
+
+#[tokio::test]
+async fn system_dns_lookups_are_capped() {
+    let resolver = fetch::SystemResolver::default();
+    // All permits taken, as if MAX_DNS_LOOKUPS lookups were stuck in
+    // getaddrinfo: a further lookup waits and runs into the caller's
+    // timeout instead of occupying another blocking thread.
+    let held = resolver
+        .permits
+        .clone()
+        .acquire_many_owned(u32::try_from(fetch::MAX_DNS_LOOKUPS).unwrap())
+        .await
+        .unwrap();
+    let lookup = resolver.lookup("localhost", 443);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), lookup)
+            .await
+            .is_err()
+    );
+    drop(held);
+    let ips = resolver.lookup("localhost", 443).await.unwrap();
+    assert!(ips.iter().any(IpAddr::is_loopback), "{ips:?}");
+    assert_eq!(resolver.permits.available_permits(), fetch::MAX_DNS_LOOKUPS);
 }
 
 #[tokio::test]
@@ -451,7 +529,7 @@ async fn redirects_are_followed_and_checked_again() {
         .unwrap();
     assert_eq!(
         rebinding.fetch(&url, &Conditional::default()).await,
-        Err(SubscriptionError::BlockedAddress)
+        Err(SubscriptionError::FetchFailed(None))
     );
     assert_eq!(resolver.calls(), 2);
     // No redirects allowed at all.
@@ -511,7 +589,7 @@ async fn body_size_time_and_content_are_limited() {
     let started = std::time::Instant::now();
     assert_eq!(
         fetch("/hang").await,
-        Err(SubscriptionError::FetchFailed(Some("timeout")))
+        Err(SubscriptionError::FetchFailed(None))
     );
     assert!(started.elapsed() < Duration::from_secs(3));
     assert_eq!(fetch("/html").await, Err(SubscriptionError::NotICalendar));
@@ -837,6 +915,153 @@ async fn refresh_now_is_rate_limited() {
         service.create(&user, request(&url)).await,
         Err(ServiceError::Store(StoreError::CollectionExists))
     ));
+}
+
+/// Creates `count` subscriptions of `user` (each with its own slug).
+async fn subscribe_many(service: &Subscriptions, user: &User, url: &str, count: usize) -> Vec<i64> {
+    let mut ids = Vec::new();
+    for i in 0..count {
+        let mut next = request(url);
+        next.slug = Some(format!("feed-{i}").parse().unwrap());
+        ids.push(service.create(user, next).await.unwrap().collection.id);
+    }
+    ids
+}
+
+#[tokio::test]
+async fn waiting_for_a_fetch_slot_has_a_deadline() {
+    let server = Server::start().await;
+    server.respond(|_| calendar(&feed(&[("a", "Alpha")]), ""));
+    let (service, user) = service(&server, TestResolver::local()).await;
+    let url = server.url("feed.example", "/cal.ics");
+    let id = service
+        .create(&user, request(&url))
+        .await
+        .unwrap()
+        .collection
+        .id;
+    let before = service
+        .store()
+        .subscription_by_collection(id)
+        .await
+        .unwrap()
+        .unwrap();
+    // Both slots (max_concurrent_fetches = 2 by default) are taken.
+    let mut service = service;
+    Arc::get_mut(&mut service).unwrap().queue_wait = Duration::from_millis(100);
+    let _held = service.fetches.acquire_many(2).await.unwrap();
+    let requests = server.requests().len();
+    let err = feed_error(service.refresh(id).await.unwrap_err());
+    assert_eq!(err, SubscriptionError::Busy);
+    let mut next = request(&url);
+    next.slug = None;
+    let err = feed_error(service.create(&user, next).await.unwrap_err());
+    assert_eq!(err, SubscriptionError::Busy);
+    // Nothing was fetched or recorded; the subscription stays due.
+    assert_eq!(server.requests().len(), requests);
+    let after = service
+        .store()
+        .subscription_by_collection(id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after, before);
+    let api = crate::api::ApiError::from(ServiceError::Feed(SubscriptionError::Busy));
+    assert!(format!("{api:?}").contains("503"), "{api:?}");
+}
+
+#[tokio::test]
+async fn refresh_now_is_limited_per_user() {
+    let server = Server::start().await;
+    server.respond(|_| calendar(&feed(&[("a", "Alpha")]), ""));
+    let (mut service, user) = service(&server, TestResolver::local()).await;
+    Arc::get_mut(&mut service).unwrap().max_refresh_now = MAX_REFRESH_NOW;
+    let url = server.url("feed.example", "/cal.ics");
+    let ids = subscribe_many(&service, &user, &url, 2).await;
+    // Spread over both subscriptions, the user gets MAX_REFRESH_NOW.
+    for i in 0..MAX_REFRESH_NOW {
+        let id = ids[usize::try_from(i).unwrap() % ids.len()];
+        service.refresh_now(&user, id).await.unwrap();
+    }
+    let requests = server.requests().len();
+    for id in &ids {
+        let err = feed_error(service.refresh_now(&user, *id).await.unwrap_err());
+        assert_eq!(err, SubscriptionError::RateLimited);
+    }
+    assert_eq!(server.requests().len(), requests);
+    // Other users are not affected.
+    let bob = service
+        .store()
+        .create_user(&"bob".parse().unwrap(), "h", None)
+        .await
+        .unwrap();
+    let bob_id = service
+        .create(&bob, request(&url))
+        .await
+        .unwrap()
+        .collection
+        .id;
+    service.refresh_now(&bob, bob_id).await.unwrap();
+}
+
+#[tokio::test]
+async fn background_queue_is_bounded() {
+    let server = Server::start().await;
+    server.respond(|_| calendar(&feed(&[("a", "Alpha")]), ""));
+    let store = Store::in_memory().await.unwrap();
+    let mut config = config(server.port);
+    config.max_per_user = 10;
+    config.max_concurrent_fetches = 1;
+    let service = Subscriptions::without_rate_limit(
+        store,
+        &config,
+        fetcher(server.port, TestResolver::local()),
+    );
+    let user = service
+        .store()
+        .create_user(&"alice".parse().unwrap(), "h", None)
+        .await
+        .unwrap();
+    let url = server.url("feed.example", "/cal.ics");
+    let ids = subscribe_many(&service, &user, &url, 6).await;
+    for id in &ids {
+        service
+            .store()
+            .update_subscription(*id, None, 0)
+            .await
+            .unwrap();
+    }
+    // The only slot is busy: queued refreshes wait, at most 2 per slot.
+    let held = service.fetches.acquire().await.unwrap();
+    assert_eq!(service.run_due().await, 2);
+    assert_eq!(service.run_due().await, 0, "queue full, the rest stays due");
+    assert_eq!(
+        service
+            .store()
+            .due_subscriptions(now(), 100)
+            .await
+            .unwrap()
+            .len(),
+        6
+    );
+    drop(held);
+    for _ in 0..200 {
+        if service.queued.load(Ordering::SeqCst) == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(service.queued.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        service
+            .store()
+            .due_subscriptions(now(), 100)
+            .await
+            .unwrap()
+            .len(),
+        4
+    );
+    assert_eq!(service.run_due().await, 2);
 }
 
 #[tokio::test]

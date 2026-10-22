@@ -29,7 +29,11 @@ follow [Semantic Versioning](https://semver.org/). Release process:
   (DNS rebinding), redirects followed manually and checked again (at most 3,
   never https → http), deadline, size limit (10 MiB), no cookies or
   credentials, fixed User-Agent; optional `allowed_hosts`/`denied_hosts`.
-  Limits: 20 subscriptions and 10 subscribe attempts per 10 minutes per user,
+  Limits: 20 subscriptions, 10 subscribe attempts and 10 "refresh now" per 10
+  minutes per user, at most 10 s waiting for a fetch slot (`503 busy`), a
+  bounded background queue, at most 4 concurrent DNS lookups; names that
+  resolve to private addresses, do not exist or time out all answer
+  `fetch_failed` (no DNS oracle),
   quota and object limits as for imports. Feed URLs are shown only to their
   owner and never logged (host only). Database migration `0009_subscriptions`.
 - DAV: collections can be read-only (subscriptions): writes answer `403` with

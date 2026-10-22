@@ -217,6 +217,10 @@ impl IntoResponse for ApiError {
             Self::Subscription(status, ..) if *status == StatusCode::TOO_MANY_REQUESTS => {
                 Some("60")
             }
+            // All fetch slots busy.
+            Self::Subscription(status, ..) if *status == StatusCode::SERVICE_UNAVAILABLE => {
+                Some("30")
+            }
             _ => None,
         };
         let (status, code, message) = match self {

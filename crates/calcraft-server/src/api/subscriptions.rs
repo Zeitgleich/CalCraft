@@ -94,6 +94,7 @@ impl From<ServiceError> for ApiError {
                     }
                     SubscriptionError::LimitReached(_) => StatusCode::CONFLICT,
                     SubscriptionError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+                    SubscriptionError::Busy => StatusCode::SERVICE_UNAVAILABLE,
                 };
                 // The detail of the other errors is part of the message already.
                 let message = match (&err, err.detail()) {
@@ -267,6 +268,6 @@ pub async fn refresh(
     let service = service(&state)?;
     let user = &session.user;
     let sub = own(&state, user, &slug).await?;
-    let sub = service.refresh(sub.collection.id).await?;
+    let sub = service.refresh_now(user, sub.collection.id).await?;
     Ok(Json(info(service, sub, user)))
 }

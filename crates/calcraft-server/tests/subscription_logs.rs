@@ -112,7 +112,8 @@ async fn subscription_logs_name_the_host_only() {
             .body(Body::from(serde_json::json!({ "url": url }).to_string()))
             .unwrap();
         let response = app.clone().oneshot(request).await.unwrap();
-        assert_eq!(response.status(), 400, "{url}");
+        // 400 for refused URLs, 502 (generic) for names resolving to private addresses.
+        assert!(matches!(response.status().as_u16(), 400 | 502), "{url}");
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(!body.contains(SECRET), "error reflects the URL: {body}");
@@ -152,7 +153,8 @@ async fn subscription_logs_name_the_host_only() {
         .await
         .unwrap();
     let sub = service.refresh(collection.id).await.unwrap();
-    assert_eq!(sub.last_error.as_deref(), Some("blocked_address"));
+    // Generic for the user, precise (host only) in the log.
+    assert_eq!(sub.last_error.as_deref(), Some("fetch_failed"));
 
     let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     assert!(
@@ -160,6 +162,7 @@ async fn subscription_logs_name_the_host_only() {
         "the host is logged: {logs}"
     );
     assert!(logs.contains("subscription refresh failed"), "{logs}");
+    assert!(logs.contains("non-public address"), "{logs}");
     for secret in [SECRET, "/private", "token=", "latest/"] {
         assert!(!logs.contains(secret), "{secret} in logs: {logs}");
     }

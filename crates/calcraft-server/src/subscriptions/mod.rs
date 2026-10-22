@@ -21,7 +21,10 @@ pub mod ssrf;
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -29,7 +32,7 @@ use calcraft_core::Slug;
 use calcraft_store::{
     FeedState, NewSubscription, Store, StoreError, Subscription, SubscriptionFailure, User,
 };
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, SemaphorePermit};
 
 use crate::{
     auth::now,
@@ -50,13 +53,22 @@ pub const MIN_REFRESH_GAP_SECS: i64 = 60;
 /// [`CREATE_WINDOW_SECS`]: failed attempts are not limited by the
 /// per-user cap, and every attempt makes the server send a request.
 pub const MAX_CREATE_ATTEMPTS: u32 = 10;
+/// "Refresh now" requests per user (over all their subscriptions) within
+/// [`CREATE_WINDOW_SECS`].
+pub const MAX_REFRESH_NOW: u32 = 10;
 const CREATE_WINDOW_SECS: i64 = 600;
+/// How long a refresh or subscribe request waits for a free fetch slot
+/// before it is refused as [`SubscriptionError::Busy`].
+const QUEUE_WAIT: Duration = Duration::from_secs(10);
+/// Background refreshes queued per fetch slot; further due subscriptions
+/// wait for the next tick.
 /// Users tracked for the attempt limit before stale entries are dropped.
 const MAX_TRACKED_USERS: usize = 10_000;
 /// How often the background task looks for due subscriptions.
 const TICK: Duration = Duration::from_secs(60);
 /// Due subscriptions picked up per tick.
 const BATCH: u32 = 32;
+const QUEUED_PER_SLOT: usize = 2;
 
 /// Why a feed could not be subscribed to or refreshed. The messages are
 /// generic on purpose: they must not turn the server into a port scanner
@@ -80,6 +92,9 @@ pub enum SubscriptionError {
     LimitReached(&'static str),
     #[error("too many attempts; please wait a moment")]
     RateLimited,
+    /// All fetch slots stayed busy; nothing was recorded.
+    #[error("the server is busy fetching other feeds; please try again later")]
+    Busy,
 }
 
 impl SubscriptionError {
@@ -93,6 +108,7 @@ impl SubscriptionError {
             Self::TooLarge => "too_large",
             Self::LimitReached(_) => "limit_reached",
             Self::RateLimited => "rate_limited",
+            Self::Busy => "busy",
         }
     }
 
@@ -148,6 +164,15 @@ pub struct CreateRequest<'a> {
     pub refresh_secs: Option<i64>,
 }
 
+/// Decrements the count of queued background refreshes when dropped.
+struct Queued(Arc<Subscriptions>);
+
+impl Drop for Queued {
+    fn drop(&mut self) {
+        self.0.queued.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// Removes a subscription from the in-flight set when dropped.
 struct InFlight<'a> {
     set: &'a Mutex<HashSet<i64>>,
@@ -174,6 +199,13 @@ pub struct Subscriptions {
     /// Per user: start of the window and subscribe attempts in it.
     create_attempts: Mutex<HashMap<i64, (i64, u32)>>,
     max_create_attempts: u32,
+    /// The same for "refresh now".
+    refresh_attempts: Mutex<HashMap<i64, (i64, u32)>>,
+    max_refresh_now: u32,
+    /// Background refreshes spawned and not finished.
+    queued: AtomicUsize,
+    max_queued: usize,
+    queue_wait: Duration,
     /// [`MIN_REFRESH_GAP_SECS`]; lowered by tests only.
     min_gap: i64,
 }
@@ -230,7 +262,7 @@ impl Subscriptions {
         };
         let fetcher = Fetcher::new(
             Policy::new(config),
-            Arc::new(SystemResolver),
+            Arc::new(SystemResolver::default()),
             tls,
             config.max_bytes,
             config.timeout(),
@@ -250,6 +282,13 @@ impl Subscriptions {
             in_flight: Mutex::new(HashSet::new()),
             create_attempts: Mutex::new(HashMap::new()),
             max_create_attempts: MAX_CREATE_ATTEMPTS,
+            refresh_attempts: Mutex::new(HashMap::new()),
+            max_refresh_now: MAX_REFRESH_NOW,
+            queued: AtomicUsize::new(0),
+            max_queued: config
+                .max_concurrent_fetches
+                .saturating_mul(QUEUED_PER_SLOT),
+            queue_wait: QUEUE_WAIT,
             min_gap: MIN_REFRESH_GAP_SECS,
         })
     }
@@ -266,17 +305,15 @@ impl Subscriptions {
         if let Some(inner) = Arc::get_mut(&mut this) {
             inner.min_gap = 0;
             inner.max_create_attempts = u32::MAX;
+            inner.max_refresh_now = u32::MAX;
         }
         this
     }
 
-    /// Counts a subscribe attempt of `user`; `false` once the limit for
-    /// the current window is reached.
-    fn allow_create(&self, user: i64, now: i64) -> bool {
-        let mut attempts = self
-            .create_attempts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+    /// Counts an attempt of `user` in `attempts`; `false` once `max`
+    /// attempts were made in the current window.
+    fn allow(attempts: &Mutex<HashMap<i64, (i64, u32)>>, max: u32, user: i64, now: i64) -> bool {
+        let mut attempts = attempts.lock().unwrap_or_else(PoisonError::into_inner);
         if attempts.len() >= MAX_TRACKED_USERS {
             attempts.retain(|_, (start, _)| now - *start < CREATE_WINDOW_SECS);
         }
@@ -284,11 +321,24 @@ impl Subscriptions {
         if now - entry.0 >= CREATE_WINDOW_SECS {
             *entry = (now, 0);
         }
-        if entry.1 >= self.max_create_attempts {
+        if entry.1 >= max {
             return false;
         }
         entry.1 += 1;
         true
+    }
+
+    fn allow_create(&self, user: i64, now: i64) -> bool {
+        Self::allow(&self.create_attempts, self.max_create_attempts, user, now)
+    }
+
+    /// A fetch slot, waiting at most [`QUEUE_WAIT`]: requests never queue
+    /// without a deadline.
+    async fn fetch_slot(&self) -> Result<SemaphorePermit<'_>, SubscriptionError> {
+        match tokio::time::timeout(self.queue_wait, self.fetches.acquire()).await {
+            Ok(Ok(permit)) => Ok(permit),
+            Ok(Err(_)) | Err(_) => Err(SubscriptionError::Busy),
+        }
     }
 
     pub fn store(&self) -> &Store {
@@ -322,21 +372,15 @@ impl Subscriptions {
         })
     }
 
-    /// Fetches and converts a feed (no storage yet).
+    /// Fetches and converts a feed (no storage yet). The caller holds a
+    /// fetch slot.
     async fn load(
         &self,
         url: &FeedUrl,
         conditional: &Conditional,
         collection: &calcraft_store::Collection,
     ) -> Result<Option<Loaded>, ServiceError> {
-        let fetched = {
-            let _permit = self
-                .fetches
-                .acquire()
-                .await
-                .map_err(|_| SubscriptionError::FetchFailed(Some("server is shutting down")))?;
-            self.fetcher.fetch(url, conditional).await?
-        };
+        let fetched = self.fetcher.fetch(url, conditional).await?;
         let Fetched::Body {
             body,
             etag,
@@ -410,7 +454,10 @@ impl Subscriptions {
             token_salt: 0,
             read_only: true,
         };
-        let loaded = match self.load(&url, &Conditional::default(), &placeholder).await {
+        let slot = self.fetch_slot().await?;
+        let loaded = self.load(&url, &Conditional::default(), &placeholder).await;
+        drop(slot);
+        let loaded = match loaded {
             Ok(Some(loaded)) => loaded,
             // No validators were sent, so 304 is not a valid answer.
             Ok(None) => return Err(SubscriptionError::FetchFailed(None).into()),
@@ -467,10 +514,31 @@ impl Subscriptions {
             .ok_or(ServiceError::NotFound)
     }
 
+    /// "Refresh now" of `owner`: like [`Subscriptions::refresh`], but at
+    /// most [`MAX_REFRESH_NOW`] times per user and window, over all of the
+    /// user's subscriptions.
+    pub async fn refresh_now(
+        &self,
+        owner: &User,
+        collection_id: i64,
+    ) -> Result<Subscription, ServiceError> {
+        if !Self::allow(
+            &self.refresh_attempts,
+            self.max_refresh_now,
+            owner.id,
+            now(),
+        ) {
+            return Err(SubscriptionError::RateLimited.into());
+        }
+        self.refresh(collection_id).await
+    }
+
     /// Refreshes one subscription now. Fails with
     /// [`SubscriptionError::RateLimited`] if it is being refreshed or was
-    /// refreshed less than [`MIN_REFRESH_GAP_SECS`] ago. A failed fetch is
-    /// recorded and returned as `Ok` (with `last_error` set).
+    /// refreshed less than [`MIN_REFRESH_GAP_SECS`] ago, and with
+    /// [`SubscriptionError::Busy`] (nothing recorded) if no fetch slot
+    /// becomes free in time. A failed fetch is recorded and returned as
+    /// `Ok` (with `last_error` set).
     pub async fn refresh(&self, collection_id: i64) -> Result<Subscription, ServiceError> {
         let Some(_guard) = self.claim(collection_id) else {
             return Err(SubscriptionError::RateLimited.into());
@@ -480,6 +548,15 @@ impl Subscriptions {
             .subscription_by_collection(collection_id)
             .await?
             .ok_or(ServiceError::NotFound)?;
+        // Cheap early answer before waiting for a slot; the store checks
+        // again atomically below.
+        if sub
+            .last_attempt_at
+            .is_some_and(|last| now() - last < self.min_gap)
+        {
+            return Err(SubscriptionError::RateLimited.into());
+        }
+        let _slot = self.fetch_slot().await?;
         let now = now();
         let interval = self.interval(sub.refresh_secs, sub.feed_ttl_secs);
         // The provisional next time also covers a refresh that never ends
@@ -592,10 +669,15 @@ impl Subscriptions {
             if busy {
                 continue;
             }
+            // Bounded queue: the rest stays due for the next tick.
+            if self.queued.fetch_add(1, Ordering::SeqCst) >= self.max_queued {
+                self.queued.fetch_sub(1, Ordering::SeqCst);
+                break;
+            }
+            let queued = Queued(self.clone());
             started += 1;
-            let this = self.clone();
             tokio::spawn(async move {
-                match this.refresh(id).await {
+                match queued.0.refresh(id).await {
                     Ok(_) | Err(ServiceError::Feed(_) | ServiceError::NotFound) => {}
                     Err(err) => tracing::warn!(%err, "subscription refresh failed"),
                 }

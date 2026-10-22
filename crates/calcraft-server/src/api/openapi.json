@@ -1329,7 +1329,7 @@
       },
       "post": {
         "summary": "Subscribe to a calendar feed",
-        "description": "Checks the URL (https or webcal; http only if allowed by the administrator), fetches the feed once and creates a read-only calendar with its events. DAV clients see it like any other calendar but cannot change it. Errors: 400 invalid_url (not https/webcal, user info, port, length, …) or blocked_address (the host or one of its addresses is private, loopback, link-local, a cloud metadata service or otherwise not public, or excluded by subscriptions.allowed_hosts/denied_hosts); 502 fetch_failed; 422 not_icalendar or too_large; 409 limit_reached (subscriptions per user, quota, objects) or collection exists. 404 while subscriptions are disabled.",
+        "description": "Checks the URL (https or webcal; http only if allowed by the administrator), fetches the feed once and creates a read-only calendar with its events. DAV clients see it like any other calendar but cannot change it. Errors: 400 invalid_url (not https/webcal, user info, port, length, …) or blocked_address (an address literal that is not public, a local name such as localhost, or a host excluded by subscriptions.allowed_hosts/denied_hosts); 502 fetch_failed (also for names that resolve to non-public addresses, do not exist or time out: no DNS oracle); 429 rate_limited (10 attempts per 10 minutes); 503 busy (no free fetch slot within 10 s, Retry-After); 422 not_icalendar or too_large; 409 limit_reached (subscriptions per user, quota, objects) or collection exists. 404 while subscriptions are disabled.",
         "tags": [
           "subscriptions"
         ],
@@ -1465,7 +1465,7 @@
     "/v1/subscriptions/{slug}/refresh": {
       "post": {
         "summary": "Refresh a subscription now",
-        "description": "At most once a minute per subscription (429 rate_limited with Retry-After otherwise). A failed fetch is not an error of this request: the result has last_error set and the last good content stays.",
+        "description": "At most once a minute per subscription and 10 times per 10 minutes per user over all subscriptions (429 rate_limited with Retry-After otherwise); 503 busy with Retry-After if no fetch slot becomes free within 10 s. A failed fetch is not an error of this request: the result has last_error set and the last good content stays.",
         "tags": [
           "subscriptions"
         ],

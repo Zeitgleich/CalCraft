@@ -344,7 +344,10 @@ a minute) and *Unsubscribe*. REST API: `GET/POST /api/v1/subscriptions`,
 - **Limits:** the feed goes through the same parser and validation as an import
   (1 MiB per event, 10 000 events), counts towards the owner's storage quota, and
   may have at most `max_bytes` (10 MiB). Each user may have `max_per_user` (20)
-  subscriptions and 10 subscribe attempts per 10 minutes.
+  subscriptions, 10 subscribe attempts and 10 *Refresh now* per 10 minutes. A
+  request waits at most 10 s for a free fetch slot (otherwise `503 busy`), and at
+  most two background refreshes per slot are queued; the rest waits for the next
+  minute.
 - **Read-only:** PUT, DELETE, COPY/MOVE into and PROPPATCH of a subscription answer
   `403` with `DAV:need-privileges`, and `current-user-privilege-set` only contains
   `read`. Name and color can be changed in the web UI. Unsubscribing (or deleting
@@ -373,7 +376,12 @@ redirect it. Redirects are followed manually (at most `max_redirects`, 3) and ev
 hop is checked again; https → http is never followed. Every fetch has one deadline
 (`timeout_secs`, 30 s, plus 10 s per connection attempt), a size limit, no cookies,
 no credentials and the fixed User-Agent `calcraft/<version>`. Error messages are
-generic (`fetch_failed`) so that the server cannot be used to scan ports.
+generic (`fetch_failed`) so that the server cannot be used to scan ports or probe
+internal DNS names: a name that resolves to a private address, does not exist or
+times out gives the same answer (the precise reason is logged, with the host
+only); `blocked_address` is only returned for address literals and local names.
+System DNS lookups run at most four at a time, so stuck lookups cannot exhaust
+the threads shared with imports.
 Subscriptions with their own credentials (HTTP Basic) are not supported.
 
 ### Import and export
