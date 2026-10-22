@@ -11,7 +11,7 @@
 # - the watchdog keeps a healthy server alive beyond WatchdogSec
 # - `systemctl restart` shuts down gracefully
 # - enabled for multi-user.target (comes back after a reboot)
-# - a broken configuration ends in "failed" (start limit) instead of looping
+# - a broken configuration ends in "failed" (check-config or start limit), no loop
 #
 # DESTRUCTIVE for the host it runs on (installs to /usr/local/bin, /etc,
 # /var/lib): run it only on a throw-away machine or CI runner, as root.
@@ -222,19 +222,26 @@ running || fail "not running after start"
 ready || fail "/readyz not OK after start"
 user_exists || fail "user alice lost after stop/start"
 
-step "broken configuration -> failed after the start limit, no endless loop"
+step "broken configuration -> failed, no endless loop"
 systemctl reset-failed "$unit"
 cp "$config" "$config.good"
 echo 'not_a_key = 1' >>"$config"
 systemctl restart "$unit" && fail "restart with a broken configuration succeeded"
-wait_for 120 "Result=start-limit-hit" bash -c "[ \"\$(systemctl show -P Result $unit)\" = start-limit-hit ]"
-expect_prop ActiveState failed
+# systemd either does not restart a unit whose ExecStartPre (check-config)
+# fails, or gives up at the start limit; both end in "failed". What matters:
+# it stays failed and does not keep restarting.
+wait_for 120 "ActiveState=failed" bash -c "[ \"\$(systemctl show -P ActiveState $unit)\" = failed ]"
+result=$(prop Result)
+case "$result" in
+exit-code | start-limit-hit) ;;
+*) fail "unexpected Result=$result for a broken configuration" ;;
+esac
 restarts=$(prop NRestarts)
-sleep 15
+sleep 20
 expect_prop ActiveState failed
 expect_prop NRestarts "$restarts"
 journal_has "unknown field" || fail "the configuration error is not in the journal"
-echo "gave up after NRestarts=$restarts; journal names the error:"
+echo "failed with Result=$result after NRestarts=$restarts; journal names the error:"
 journal | grep -F "unknown field" | tail -n 1
 
 step "fixed configuration -> starts again"
