@@ -56,7 +56,7 @@ impl AppState {
 
 /// Builds the complete application router for the given configuration.
 pub fn router(config: &Config, mut state: AppState) -> Router {
-    state.max_vcard_bytes = config.storage.max_vcard_bytes;
+    state.max_vcard_bytes = config.max_vcard_bytes();
     let web_ui = config.web_ui.enabled && cfg!(feature = "web-ui");
     let app = Router::new()
         // GET / shows the web UI; DAV clients configured with the bare

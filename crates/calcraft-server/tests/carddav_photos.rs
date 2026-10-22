@@ -179,7 +179,7 @@ async fn photos_round_trip_byte_exact() {
 #[tokio::test]
 async fn photo_size_limit_is_enforced_and_configurable() {
     let app = app().await;
-    let limit = Config::default().storage.max_vcard_bytes;
+    let limit = Config::default().max_vcard_bytes();
     assert_eq!(limit, 2 * MIB);
 
     // Larger than a calendar object may be, exactly at the vCard limit.
@@ -205,7 +205,7 @@ async fn photo_size_limit_is_enforced_and_configurable() {
 
     // A lower limit applies to PUT and is advertised.
     let mut config = Config::default();
-    config.storage.max_vcard_bytes = 256 * 1024;
+    config.storage.max_vcard_bytes = Some(256 * 1024);
     config.validate().unwrap();
     let small = app_with(&config).await;
     let reply = put_card(&small, &uri, &card_of_size("over", 256 * 1024 + 1)).await;
@@ -219,6 +219,26 @@ async fn photo_size_limit_is_enforced_and_configurable() {
         "{}",
         reply.body
     );
+
+    // Without an explicit setting, a smaller body limit also caps vCards
+    // (no configuration error, so older configurations keep working).
+    let mut config = Config::default();
+    config.server.max_body_bytes = 512 * 1024;
+    config.validate().unwrap();
+    let capped = app_with(&config).await;
+    let reply = send(&capped, "PROPFIND", BOOK, &[("depth", "0")], props).await;
+    assert!(
+        reply.body.contains("<card:max-resource-size>524288<"),
+        "{}",
+        reply.body
+    );
+    let reply = put_card(&capped, &uri, &card_of_size("over", 512 * 1024 + 1)).await;
+    assert!(!reply.status.is_success(), "{}", reply.status);
+    let reply = put_card(&capped, &uri, &card_of_size("fits", 512 * 1024)).await;
+    assert_eq!(reply.status, StatusCode::CREATED);
+    // An explicit value above the body limit is rejected.
+    config.storage.max_vcard_bytes = Some(MIB);
+    assert!(config.validate().is_err());
 
     // Calendar objects keep their own 1 MiB limit.
     let event = format!(
@@ -248,7 +268,9 @@ async fn invalid_or_unsafe_photos_are_rejected() {
             "PHOTO;ENCODING=b;TYPE=SVG:PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+",
         ),
         ("3.0", "PHOTO;ENCODING=b;TYPE=image/svg+xml:PHN2Zz4="),
-        ("3.0", "PHOTO;ENCODING=b:/9j/4AAQ"),
+        // Untyped embedded data must look like an allowed image.
+        ("3.0", "PHOTO;ENCODING=b:PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+"),
+        ("3.0", "PHOTO;ENCODING=b:AAAAAAAAAAAAAAAA"),
         ("3.0", "PHOTO;VALUE=uri:javascript:alert(1)"),
         ("4.0", "PHOTO:data:text/html;base64,PHNjcmlwdD4="),
         ("4.0", "PHOTO:data:image/svg+xml;base64,PHN2Zz4="),
@@ -269,6 +291,35 @@ async fn invalid_or_unsafe_photos_are_rejected() {
         );
     }
     assert_eq!(get(&app, &uri).await.status, StatusCode::NOT_FOUND);
+}
+
+/// Exports from iOS, Android and Synology contain empty photos and vCard 3.0
+/// photos without `TYPE`; both are stored unchanged.
+#[tokio::test]
+async fn empty_and_untyped_photos_are_accepted() {
+    let app = app().await;
+    let jpeg = format!("/9j/4AAQSkZJRgABAQAAAQABAAD{}", photo_base64(3000));
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAwS2OUAAAAABJRU5ErkJggg==";
+    for (name, photo) in [
+        ("empty-v3", "PHOTO;ENCODING=b;TYPE=JPEG:".to_owned()),
+        ("empty-v4", "PHOTO:".to_owned()),
+        ("empty-logo", "LOGO;VALUE=uri:".to_owned()),
+        (
+            "untyped-jpeg",
+            fold(&format!("PHOTO;ENCODING=b:{jpeg}"))
+                .trim_end()
+                .to_owned(),
+        ),
+        ("untyped-png", format!("PHOTO;ENCODING=BASE64:{png}")),
+    ] {
+        let card = format!(
+            "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:{name}\r\nUID:{name}\r\n{photo}\r\nEND:VCARD\r\n"
+        );
+        let uri = format!("{BOOK}{name}.vcf");
+        let reply = put_card(&app, &uri, &card).await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{name}: {}", reply.body);
+        assert!(get(&app, &uri).await.body == card, "{name} was changed");
+    }
 }
 
 const APPLE_GROUP: &str = "BEGIN:VCARD\r\nVERSION:3.0\r\nPRODID:-//Apple Inc.//AddressBook 26.0//EN\r\nN:Family\r\nFN:Family\r\nX-ADDRESSBOOKSERVER-KIND:group\r\nX-ADDRESSBOOKSERVER-MEMBER:urn:uuid:2D7B4A8C-0F3E-4E43-9C2B-5A7E1B3D9F01\r\nX-ADDRESSBOOKSERVER-MEMBER:urn:uuid:8E0C5D21-6B4F-4A7D-8E3A-1C9F2B6D4E02\r\nREV:2026-10-22T08:00:00Z\r\nUID:6F1A3B5C-7D9E-4F21-A3B5-C7D9E1F3A5B7\r\nEND:VCARD\r\n";
@@ -401,7 +452,7 @@ async fn groups_round_trip_and_sync() {
 #[tokio::test]
 async fn replaced_photos_do_not_use_up_the_quota() {
     let mut config = Config::default();
-    config.storage.max_vcard_bytes = 10 * MIB;
+    config.storage.max_vcard_bytes = Some(10 * MIB);
     let app = app_with(&config).await;
     let uri = format!("{BOOK}portrait.vcf");
     let card = card_of_size("portrait", 10 * MIB);

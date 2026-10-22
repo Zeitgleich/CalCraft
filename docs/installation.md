@@ -231,8 +231,9 @@ trusted_proxies = ["127.0.0.1/32", "::1/128"]
 
 [storage]
 database = "/var/lib/calcraft/calcraft.db"
-# Largest vCard incl. contact photo (2 MiB); at most server.max_body_bytes.
-max_vcard_bytes = 2097152
+# Largest vCard incl. contact photo. Unset: 2 MiB (capped at max_body_bytes);
+# an explicit value must not exceed server.max_body_bytes.
+# max_vcard_bytes = 2097152
 
 [security]
 # CalCraft runs behind HTTPS (see section 9/10), so tell browsers to stay on HTTPS.
@@ -760,7 +761,7 @@ while it is off.
 | `502 Bad Gateway` | CalCraft is not running or listens elsewhere: `systemctl status calcraft`, `curl http://127.0.0.1:5232/readyz`. |
 | Client reports wrong password, although it is correct | 2FA is enabled: use an app password. After 5 wrong attempts an account is locked for 15 minutes and refuses even the correct password. |
 | `413 Request Entity Too Large` (Apache over HTTP/2: `502`) on large uploads or imports | Raise `client_max_body_size` (nginx) / `LimitRequestBody` (Apache) to at least `server.max_body_bytes`. |
-| Contacts with large photos do not sync (`403`, `max-resource-size`) | Raise `storage.max_vcard_bytes` (default 2 MiB, at most 10 MiB and `server.max_body_bytes`). |
+| Contacts with large photos do not sync (`403`, `max-resource-size`) | Raise `storage.max_vcard_bytes` (default 2 MiB or `server.max_body_bytes` if smaller; at most 10 MiB and `server.max_body_bytes`). |
 | DAV client finds no calendars | Use the server root `https://cal.example.com/` (not a sub-path). Test discovery: `curl -i https://cal.example.com/.well-known/caldav` must answer `301` with `Location: /dav/`. |
 | `405 Method Not Allowed` for `PROPFIND`/`REPORT` | A WAF or proxy rule blocks DAV methods; allow them for this host. |
 | Objects with special characters in their name return 404 (Apache) | Add `nocanon` and `AllowEncodedSlashes NoDecode` (section 10). |

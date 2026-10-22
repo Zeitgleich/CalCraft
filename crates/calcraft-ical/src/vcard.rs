@@ -85,16 +85,54 @@ fn check_data_uri(uri: &str) -> Result<(), IcalError> {
     Ok(())
 }
 
+/// Decodes the first bytes of valid base64, enough for a magic number.
+fn base64_prefix(data: &str) -> Vec<u8> {
+    let sextet = |b: u8| match b {
+        b'A'..=b'Z' => b - b'A',
+        b'a'..=b'z' => b - b'a' + 26,
+        b'0'..=b'9' => b - b'0' + 52,
+        b'+' => 62,
+        _ => 63,
+    };
+    let chars: Vec<u8> = data.bytes().take(16).take_while(|&b| b != b'=').collect();
+    let mut out = Vec::new();
+    for chunk in chars.chunks(4) {
+        let bits = chunk.iter().enumerate().fold(0u32, |acc, (i, &b)| {
+            acc | u32::from(sextet(b)) << (18 - 6 * i)
+        });
+        let bytes = bits.to_be_bytes();
+        out.extend_from_slice(&bytes[1..chunk.len()]);
+    }
+    out
+}
+
+/// Whether the data starts like a JPEG, PNG, GIF or WebP file. Only the
+/// magic number is looked at, never the image itself.
+fn has_image_magic(data: &str) -> bool {
+    let head = base64_prefix(data);
+    head.starts_with(&[0xFF, 0xD8, 0xFF])
+        || head.starts_with(b"\x89PNG\r\n\x1a\n")
+        || head.starts_with(b"GIF87a")
+        || head.starts_with(b"GIF89a")
+        || (head.starts_with(b"RIFF") && head.get(8..12) == Some(b"WEBP"))
+}
+
 /// Checks a `PHOTO` or `LOGO` property (RFC 6350 §6.2.4, RFC 2426 §3.1.4).
 fn check_image(property: &Property) -> Result<(), IcalError> {
     let value = property.value.as_str();
+    // Exports (iOS, Android, Synology) contain empty photos; harmless.
+    if value.is_empty() {
+        return Ok(());
+    }
     if let Some(encoding) = property.parameter("ENCODING") {
-        // vCard 3.0 inline binary: `ENCODING=b;TYPE=JPEG:<base64>`.
+        // vCard 3.0 inline binary: `ENCODING=b;TYPE=JPEG:<base64>`. Without
+        // TYPE, the magic number must show an allowed image type.
         let base64 = matches!(encoding.values.as_slice(), [e] if e.eq_ignore_ascii_case("b") || e.eq_ignore_ascii_case("base64"));
-        let types = property.parameter("TYPE").map(|t| t.values.as_slice());
-        let types_ok =
-            types.is_some_and(|t| !t.is_empty() && t.iter().all(|t| is_allowed_image_type(t)));
-        if !base64 || !types_ok || !is_base64(value) {
+        let type_ok = match property.parameter("TYPE").map(|t| t.values.as_slice()) {
+            Some(types) if !types.is_empty() => types.iter().all(|t| is_allowed_image_type(t)),
+            _ => has_image_magic(value),
+        };
+        if !base64 || !is_base64(value) || !type_ok {
             return Err(IcalError::Invalid("unsupported embedded image"));
         }
         return Ok(());
@@ -231,6 +269,15 @@ mod tests {
             "LOGO;ENCODING=b;TYPE=GIF:R0lGODlh\r\n",
             "PHOTO;VALUE=uri:https://example.com/a.jpg\r\n",
             "PHOTO;ENCODING=b;TYPE=JPEG:/9j/\r\n 4AAQ\r\n",
+            // Untyped, recognised by the magic number.
+            "PHOTO;ENCODING=b:/9j/4AAQSkZJRg==\r\n",
+            "PHOTO;ENCODING=BASE64:iVBORw0KGgoAAAANSUhEUg==\r\n",
+            "PHOTO;ENCODING=b:R0lGODlhAQABAA==\r\n",
+            "PHOTO;ENCODING=b:UklGRiQAAABXRUJQVlA4IA==\r\n",
+            // Empty photos occur in exports.
+            "PHOTO:\r\n",
+            "PHOTO;ENCODING=b;TYPE=JPEG:\r\n",
+            "LOGO;VALUE=uri:\r\n",
         ] {
             card(&format!("VERSION:3.0\r\nUID:1\r\nFN:x\r\n{photo}")).unwrap();
         }
@@ -248,9 +295,9 @@ mod tests {
     fn rejects_unsafe_or_invalid_photos() {
         for photo in [
             "PHOTO;ENCODING=b;TYPE=JPEG:not base64!\r\n",
-            "PHOTO;ENCODING=b;TYPE=JPEG:\r\n",
             "PHOTO;ENCODING=b;TYPE=SVG:PHN2Zz4=\r\n",
-            "PHOTO;ENCODING=b:/9j/4AAQ\r\n",
+            "PHOTO;ENCODING=b:PHN2Zz4=\r\n",
+            "PHOTO;ENCODING=b:AAAAAAAA\r\n",
             "PHOTO;ENCODING=QUOTED-PRINTABLE;TYPE=JPEG:abc\r\n",
             "PHOTO:data:image/svg+xml;base64,PHN2Zz4=\r\n",
             "PHOTO:data:text/html;base64,PGI+\r\n",
@@ -264,7 +311,6 @@ mod tests {
             "PHOTO:https://\r\n",
             "PHOTO:https://example.com/a b.jpg\r\n",
             "LOGO:vbscript:x\r\n",
-            "PHOTO:\r\n",
         ] {
             assert!(
                 card(&format!("VERSION:4.0\r\nUID:1\r\nFN:x\r\n{photo}")).is_err(),

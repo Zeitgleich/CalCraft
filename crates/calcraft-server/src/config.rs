@@ -111,8 +111,11 @@ pub struct StorageConfig {
     pub pre_migration_backups_keep: usize,
     /// Largest accepted vCard in bytes (`CARDDAV:max-resource-size`),
     /// including embedded photos. At most [`MAX_VCARD_BYTES`] and
-    /// `server.max_body_bytes`. Calendar objects are limited to 1 MiB.
-    pub max_vcard_bytes: usize,
+    /// `server.max_body_bytes`. Unset: [`DEFAULT_MAX_VCARD_BYTES`], or
+    /// `server.max_body_bytes` if that is smaller (see
+    /// [`Config::max_vcard_bytes`]). Calendar objects are limited to 1 MiB.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_vcard_bytes: Option<usize>,
 }
 
 /// Default of `storage.max_vcard_bytes`: room for a high-resolution
@@ -129,7 +132,7 @@ impl Default for StorageConfig {
             database: PathBuf::from("calcraft.db"),
             pre_migration_backup: true,
             pre_migration_backups_keep: 3,
-            max_vcard_bytes: DEFAULT_MAX_VCARD_BYTES,
+            max_vcard_bytes: None,
         }
     }
 }
@@ -546,6 +549,14 @@ impl Config {
         Ok(config)
     }
 
+    /// Effective `storage.max_vcard_bytes`: the configured value, or
+    /// [`DEFAULT_MAX_VCARD_BYTES`] capped at `server.max_body_bytes`.
+    pub fn max_vcard_bytes(&self) -> usize {
+        self.storage
+            .max_vcard_bytes
+            .unwrap_or_else(|| DEFAULT_MAX_VCARD_BYTES.min(self.server.max_body_bytes))
+    }
+
     /// Checks invariants that serde cannot express.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.server.max_body_bytes == 0 {
@@ -599,16 +610,19 @@ impl Config {
                 "storage.pre_migration_backups_keep must be at least 1",
             ));
         }
-        let vcard = self.storage.max_vcard_bytes;
-        if !(MIN_VCARD_BYTES..=MAX_VCARD_BYTES).contains(&vcard) {
-            return Err(ConfigError::Invalid(
-                "storage.max_vcard_bytes must be between 65536 (64 KiB) and 10485760 (10 MiB)",
-            ));
-        }
-        if vcard > self.server.max_body_bytes {
-            return Err(ConfigError::Invalid(
-                "storage.max_vcard_bytes must not exceed server.max_body_bytes",
-            ));
+        // Only an explicit value is checked: the default adapts to a smaller
+        // body limit, so existing configurations keep working.
+        if let Some(vcard) = self.storage.max_vcard_bytes {
+            if !(MIN_VCARD_BYTES..=MAX_VCARD_BYTES).contains(&vcard) {
+                return Err(ConfigError::Invalid(
+                    "storage.max_vcard_bytes must be between 65536 (64 KiB) and 10485760 (10 MiB)",
+                ));
+            }
+            if vcard > self.server.max_body_bytes {
+                return Err(ConfigError::Invalid(
+                    "storage.max_vcard_bytes must not exceed server.max_body_bytes",
+                ));
+            }
         }
         if !UPDATE_INTERVAL_HOURS.contains(&self.updates.interval_hours) {
             return Err(ConfigError::Invalid(
@@ -719,22 +733,32 @@ mod tests {
 
     #[test]
     fn vcard_limit_is_bounded() {
-        assert_eq!(
-            Config::default().storage.max_vcard_bytes,
-            DEFAULT_MAX_VCARD_BYTES
-        );
+        assert_eq!(Config::default().max_vcard_bytes(), DEFAULT_MAX_VCARD_BYTES);
         let config = from_toml("[storage]\nmax_vcard_bytes = 10485760\n").unwrap();
-        assert_eq!(config.storage.max_vcard_bytes, MAX_VCARD_BYTES);
+        assert_eq!(config.max_vcard_bytes(), MAX_VCARD_BYTES);
         for toml in [
             "[storage]\nmax_vcard_bytes = 10485761\n",
             "[storage]\nmax_vcard_bytes = 0\n",
             "[storage]\nmax_vcard_bytes = 65535\n",
-            "[server]\nmax_body_bytes = 1048576\n",
+            // An explicit value above the body limit is a mistake.
+            "[server]\nmax_body_bytes = 1048576\n[storage]\nmax_vcard_bytes = 2097152\n",
         ] {
             assert!(from_toml(toml).is_err(), "{toml}");
         }
-        from_toml("[server]\nmax_body_bytes = 1048576\n[storage]\nmax_vcard_bytes = 1048576\n")
-            .unwrap();
+        let config =
+            from_toml("[server]\nmax_body_bytes = 1048576\n[storage]\nmax_vcard_bytes = 1048576\n")
+                .unwrap();
+        assert_eq!(config.max_vcard_bytes(), 1024 * 1024);
+    }
+
+    #[test]
+    fn vcard_default_follows_a_smaller_body_limit() {
+        // Configurations from before the setting existed keep working.
+        let config = from_toml("[server]\nmax_body_bytes = 1048576\n").unwrap();
+        assert_eq!(config.storage.max_vcard_bytes, None);
+        assert_eq!(config.max_vcard_bytes(), 1024 * 1024);
+        let config = from_toml("[server]\nmax_body_bytes = 20971520\n").unwrap();
+        assert_eq!(config.max_vcard_bytes(), DEFAULT_MAX_VCARD_BYTES);
     }
 
     const OIDC: &str = r#"[oidc]
