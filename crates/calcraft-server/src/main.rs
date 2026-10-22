@@ -214,6 +214,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     }
 
     let mut state = AppState::new(open_store(&config).await?)?;
+    // Objects stored by older versions get exact time-range indexes.
+    calcraft_server::reindex::spawn(state.store.clone());
     state.secure_cookies = config.security.secure_cookies;
     state
         .auth

@@ -85,6 +85,8 @@ async fn put(store: &Store, collection: i64, uid: &str, etag: &str) {
                 component: "VEVENT",
                 range_start: None,
                 range_end: None,
+                recurring: false,
+                index_version: 0,
                 etag,
                 content: content.as_bytes(),
             },

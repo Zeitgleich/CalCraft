@@ -12,6 +12,7 @@ pub mod limits;
 pub mod net;
 #[cfg(feature = "oidc")]
 pub mod oidc;
+pub mod reindex;
 pub mod secrets;
 pub mod security;
 pub mod telemetry;

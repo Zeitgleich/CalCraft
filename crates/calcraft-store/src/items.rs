@@ -51,8 +51,37 @@ pub struct NewItem<'a> {
     pub component: &'a str,
     pub range_start: Option<i64>,
     pub range_end: Option<i64>,
+    /// The range only spans the hull of several instances.
+    pub recurring: bool,
+    /// Version of the indexing that computed the range.
+    pub index_version: i64,
     pub etag: &'a str,
     pub content: &'a [u8],
+}
+
+/// A candidate of a time-range query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryCandidate {
+    pub meta: ItemMeta,
+    /// The indexed range is only a hull: check the instances exactly.
+    pub recurring: bool,
+}
+
+/// An object whose time-range index is out of date.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleIndex {
+    pub id: i64,
+    pub etag: String,
+    pub content: Vec<u8>,
+}
+
+/// New index values for [`Store::set_item_index`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ItemIndex {
+    pub range_start: Option<i64>,
+    pub range_end: Option<i64>,
+    pub recurring: bool,
+    pub version: i64,
 }
 
 /// Conditional request headers for writes (RFC 9110 §13.1).
@@ -279,31 +308,91 @@ impl Store {
     }
 
     /// Like [`Store::query_items`], but returns only metadata, so callers can
-    /// check result size before loading any content.
-    pub async fn query_item_meta(
+    /// check result size before loading any content. Pages through the
+    /// candidates in name order: pass the last name seen as `after`.
+    pub async fn query_candidates(
         &self,
         collection_id: i64,
         component: Option<&str>,
         start: Option<i64>,
         end: Option<i64>,
+        after: Option<&str>,
         limit: u32,
-    ) -> Result<Vec<ItemMeta>> {
+    ) -> Result<Vec<QueryCandidate>> {
         let rows = sqlx::query(
-            "SELECT name, etag, length(content) AS size FROM items \
+            "SELECT name, etag, length(content) AS size, recurring FROM items \
              WHERE collection_id = ?1 \
                AND (?2 IS NULL OR component = ?2) \
                AND (?3 IS NULL OR range_end IS NULL OR range_end > ?3) \
                AND (?4 IS NULL OR range_start IS NULL OR range_start < ?4) \
-             ORDER BY name LIMIT ?5",
+               AND (?5 IS NULL OR name > ?5) \
+             ORDER BY name LIMIT ?6",
         )
         .bind(collection_id)
         .bind(component)
         .bind(start)
         .bind(end)
+        .bind(after)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        rows.iter().map(meta_from_row).collect()
+        rows.iter()
+            .map(|row| {
+                Ok(QueryCandidate {
+                    meta: meta_from_row(row)?,
+                    recurring: row.try_get("recurring")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Up to `limit` calendar objects indexed by a version older than
+    /// `version`, in id order after `after_id`.
+    pub async fn stale_index(
+        &self,
+        version: i64,
+        after_id: i64,
+        limit: u32,
+    ) -> Result<Vec<StaleIndex>> {
+        let rows = sqlx::query(
+            "SELECT id, etag, content FROM items \
+             WHERE index_version < ? AND id > ? AND component <> 'VCARD' \
+             ORDER BY id LIMIT ?",
+        )
+        .bind(version)
+        .bind(after_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(StaleIndex {
+                    id: row.try_get("id")?,
+                    etag: row.try_get("etag")?,
+                    content: row.try_get("content")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Stores new index values for an object, unless it changed since it
+    /// was read (`etag`) or is already indexed by this version. Neither the
+    /// object nor any sync state changes. Returns whether the row changed.
+    pub async fn set_item_index(&self, id: i64, etag: &str, index: &ItemIndex) -> Result<bool> {
+        let done = sqlx::query(
+            "UPDATE items SET range_start = ?, range_end = ?, recurring = ?, index_version = ? \
+             WHERE id = ? AND etag = ? AND index_version < ?",
+        )
+        .bind(index.range_start)
+        .bind(index.range_end)
+        .bind(index.recurring)
+        .bind(index.version)
+        .bind(id)
+        .bind(etag)
+        .bind(index.version)
+        .execute(&self.writer)
+        .await?;
+        Ok(done.rows_affected() == 1)
     }
 
     /// Objects whose conservative time span overlaps `[start, end)`.
@@ -401,11 +490,13 @@ impl Store {
         .try_get("sync_revision")?;
 
         sqlx::query(
-            "INSERT INTO items (collection_id, name, uid, etag, component, range_start, range_end, content, revision) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+            "INSERT INTO items (collection_id, name, uid, etag, component, range_start, range_end, \
+               recurring, index_version, content, revision) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (collection_id, name) DO UPDATE SET \
                uid = excluded.uid, etag = excluded.etag, component = excluded.component, \
                range_start = excluded.range_start, range_end = excluded.range_end, \
+               recurring = excluded.recurring, index_version = excluded.index_version, \
                content = excluded.content, revision = excluded.revision, \
                modified_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
         )
@@ -416,6 +507,8 @@ impl Store {
         .bind(item.component)
         .bind(item.range_start)
         .bind(item.range_end)
+        .bind(item.recurring)
+        .bind(item.index_version)
         .bind(item.content)
         .bind(revision)
         .execute(&mut *tx)
@@ -844,6 +937,8 @@ mod tests {
             component: "VEVENT",
             range_start: start,
             range_end: end,
+            recurring: false,
+            index_version: 0,
             etag,
             content: b"BEGIN:VCALENDAR",
         }
@@ -1191,6 +1286,104 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn query_candidates_page_and_flag_recurrence() {
+        let (store, cal, _) = setup().await;
+        for (index, name) in ["a.ics", "b.ics", "c.ics"].into_iter().enumerate() {
+            let mut new = item(name, "\"e\"", Some(0), Some(100));
+            new.recurring = index == 1;
+            store
+                .put_item(cal.id, name, &new, &Precondition::None)
+                .await
+                .unwrap();
+        }
+        let page = |after: Option<&'static str>| {
+            let store = store.clone();
+            async move {
+                store
+                    .query_candidates(cal.id, Some("VEVENT"), Some(50), Some(60), after, 2)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|c| (c.meta.name, c.recurring))
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(
+            page(None).await,
+            [("a.ics".to_owned(), false), ("b.ics".to_owned(), true)]
+        );
+        assert_eq!(page(Some("b.ics")).await, [("c.ics".to_owned(), false)]);
+        assert!(page(Some("c.ics")).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_index_is_updated_without_a_change() {
+        let (store, cal, _) = setup().await;
+        store
+            .put_item(
+                cal.id,
+                "old.ics",
+                &item("old", "\"1\"", None, None),
+                &Precondition::None,
+            )
+            .await
+            .unwrap();
+        let mut current = item("new", "\"2\"", Some(5), Some(6));
+        current.index_version = 1;
+        store
+            .put_item(cal.id, "new.ics", &current, &Precondition::None)
+            .await
+            .unwrap();
+        let revision = async |store: &Store| {
+            store
+                .collection(cal.owner_id, CollectionKind::Calendar, &cal.slug)
+                .await
+                .unwrap()
+                .unwrap()
+                .sync_revision
+        };
+        let before = revision(&store).await;
+
+        let stale = store.stale_index(1, 0, 10).await.unwrap();
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].etag, "\"1\"");
+        let index = ItemIndex {
+            range_start: Some(10),
+            range_end: Some(20),
+            recurring: true,
+            version: 1,
+        };
+        // A changed object (other etag) is left alone.
+        assert!(
+            !store
+                .set_item_index(stale[0].id, "\"x\"", &index)
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .set_item_index(stale[0].id, "\"1\"", &index)
+                .await
+                .unwrap()
+        );
+        // Idempotent: a second run changes nothing.
+        assert!(
+            !store
+                .set_item_index(stale[0].id, "\"1\"", &index)
+                .await
+                .unwrap()
+        );
+        assert!(store.stale_index(1, 0, 10).await.unwrap().is_empty());
+        let found = store
+            .query_candidates(cal.id, None, Some(12), Some(13), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].recurring);
+        assert_eq!(revision(&store).await, before);
     }
 
     #[tokio::test]

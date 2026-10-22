@@ -128,6 +128,8 @@ async fn put_seed(store: &Store, collection: &Collection, prefix: &str, name: &s
         component,
         range_start: None,
         range_end: None,
+        recurring: false,
+        index_version: 0,
         etag: &etag,
         content: content.as_bytes(),
     };

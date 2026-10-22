@@ -4,7 +4,8 @@
 //!
 //! Responses are bounded. Every storage query carries a row limit, the
 //! number of results and the total size of returned object data are capped,
-//! and object content is only loaded when it is requested. Queries and
+//! and object content is only loaded when it is requested or needed for an
+//! exact recurrence check. Queries and
 //! sync-collection return truncated results with a 507 entry for the
 //! collection (RFC 6578 §3.6, RFC 4791 §7.9); sync clients continue with
 //! the returned token. Multiget fails as a whole instead, because the
@@ -19,9 +20,11 @@ use axum::{
 };
 use calcraft_core::CollectionKind;
 use calcraft_dav::{
-    DavError, MAX_REPORT_BODY, Multistatus, Propfind, Report, Response as DavResponse,
+    CalendarFilter, DavError, MAX_REPORT_BODY, Multistatus, Propfind, Report,
+    Response as DavResponse,
 };
-use calcraft_store::{Collection, ItemMeta, StoreError};
+use calcraft_ical::{Budget as Work, OBJECT_BUDGET, matches_time_range};
+use calcraft_store::{Collection, Item, ItemMeta, StoreError};
 
 use super::{
     Ctx, bad_request, dav_error,
@@ -34,6 +37,15 @@ use super::{
 const MAX_RESULTS: usize = 5_000;
 /// Maximum total size of object data in one REPORT response.
 const MAX_DATA_BYTES: i64 = 32 * 1024 * 1024;
+/// Candidates read per storage query in calendar-query.
+const QUERY_PAGE: u32 = 500;
+/// Recurrence work (see [`calcraft_ical::Budget`]) one calendar-query may
+/// spend on exact time-range checks; each object gets at most
+/// [`OBJECT_BUDGET`]. Beyond it, and beyond [`MAX_EXACT_CHECKS`] objects,
+/// candidates are returned without the check: conservatively, never
+/// dropped.
+const QUERY_WORK: u64 = 20_000_000;
+const MAX_EXACT_CHECKS: usize = 10_000;
 
 /// Reasons a REPORT fails after parsing.
 enum ReportError {
@@ -125,14 +137,116 @@ async fn object_response(
     let Some(item) = ctx.state.store.item(collection.id, &meta.name).await? else {
         return Ok(None);
     };
+    Ok(Some(item_response(ctx, collection, &item, props)))
+}
+
+/// The response entry for a loaded object.
+fn item_response(
+    ctx: Ctx<'_>,
+    collection: &Collection,
+    item: &Item,
+    props: &Propfind,
+) -> DavResponse {
+    let href = item_href(collection, &ctx.user.username, &item.name);
     let available = item_properties(
-        user,
-        kind,
+        ctx.user,
+        collection.kind,
         &item.etag,
         item.content.len(),
         Some(&item.content),
     );
-    Ok(Some(respond(&href, &available, props)))
+    respond(&href, &available, props)
+}
+
+/// Whether a recurring object has an instance in the filter's time range,
+/// checked off the async threads within `work`. `None` if the object
+/// vanished. Returns the loaded object for reuse.
+async fn check_instances(
+    ctx: Ctx<'_>,
+    collection: &Collection,
+    name: &str,
+    filter: &CalendarFilter,
+    work: &mut u64,
+) -> Result<Option<(bool, Item)>, StoreError> {
+    let Some(item) = ctx.state.store.item(collection.id, name).await? else {
+        return Ok(None);
+    };
+    let granted = OBJECT_BUDGET.min(*work);
+    let (start, end) = (filter.start, filter.end);
+    let checked = tokio::task::spawn_blocking(move || {
+        let mut budget = Work::new(granted);
+        let matched = matches_time_range(&item.content, start, end, &mut budget);
+        (matched, budget.remaining(), item)
+    })
+    .await;
+    match checked {
+        Ok((matched, left, item)) => {
+            *work = work.saturating_sub(granted.saturating_sub(left));
+            Ok(Some((matched, item)))
+        }
+        // The check cannot panic; if it did, the object is returned.
+        Err(_) => Ok(ctx
+            .state
+            .store
+            .item(collection.id, name)
+            .await?
+            .map(|item| (true, item))),
+    }
+}
+
+/// calendar-query: index candidates in name order, recurring ones checked
+/// against their instances, truncated at the limits with a 507 entry.
+async fn calendar_query(
+    ctx: Ctx<'_>,
+    collection: &Collection,
+    filter: &CalendarFilter,
+    props: &Propfind,
+    responses: &mut Vec<DavResponse>,
+) -> Result<(), ReportError> {
+    let with_data = wants_data(props, collection.kind);
+    let mut budget = Budget::new(MAX_RESULTS, with_data);
+    let has_range = filter.start.is_some() || filter.end.is_some();
+    let mut work = QUERY_WORK;
+    let mut checks = 0usize;
+    let mut after: Option<String> = None;
+    loop {
+        let page = ctx
+            .state
+            .store
+            .query_candidates(
+                collection.id,
+                filter.component.map(|kind| kind.as_str()),
+                filter.start,
+                filter.end,
+                after.as_deref(),
+                QUERY_PAGE,
+            )
+            .await?;
+        for candidate in &page {
+            let meta = &candidate.meta;
+            let mut loaded = None;
+            if has_range && candidate.recurring && checks < MAX_EXACT_CHECKS && work > 0 {
+                checks += 1;
+                match check_instances(ctx, collection, &meta.name, filter, &mut work).await? {
+                    None | Some((false, _)) => continue,
+                    Some((true, item)) => loaded = Some(item),
+                }
+            }
+            if !budget.take(Some(meta)) {
+                responses.push(truncated(collection, ctx));
+                return Ok(());
+            }
+            let response = match loaded {
+                Some(item) if with_data => Some(item_response(ctx, collection, &item, props)),
+                _ => object_response(ctx, collection, meta, props, with_data).await?,
+            };
+            responses.extend(response);
+        }
+        if page.len() < QUERY_PAGE as usize {
+            return Ok(());
+        }
+        after = page.last().map(|c| c.meta.name.clone());
+    }
 }
 
 fn truncated(collection: &Collection, ctx: Ctx<'_>) -> DavResponse {
@@ -195,21 +309,7 @@ pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
             multiget(ctx, &collection, &props, hrefs, &mut responses).await
         }
         Report::CalendarQuery { props, filter } if kind == CollectionKind::Calendar => {
-            match store
-                .query_item_meta(
-                    collection.id,
-                    filter.component.map(|kind| kind.as_str()),
-                    filter.start,
-                    filter.end,
-                    row_limit(MAX_RESULTS),
-                )
-                .await
-            {
-                Ok(metas) => {
-                    query_responses(ctx, &collection, &metas, &props, &mut responses).await
-                }
-                Err(err) => Err(err.into()),
-            }
+            calendar_query(ctx, &collection, &filter, &props, &mut responses).await
         }
         Report::AddressbookQuery { props } if kind == CollectionKind::Addressbook => {
             match store
