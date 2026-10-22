@@ -2,7 +2,7 @@
 //!
 //! The parser enforces hard resource limits and never panics on input. It
 //! is the only iCalendar parser in the project: validation, indexing and
-//! (later) recurrence expansion all work on its output, so they can never
+//! recurrence expansion all work on its output, so they can never
 //! disagree about what an object contains.
 //!
 //! The alternative formats (jCal, jCard, xCal, CSV) are converted to and
@@ -16,7 +16,10 @@ mod datetime;
 mod jcal;
 mod object;
 mod parser;
+mod recurrence;
+mod rrule;
 pub mod transfer;
+mod tz;
 mod values;
 mod vcard;
 pub mod write;
@@ -24,8 +27,11 @@ mod xcal;
 pub mod xml;
 
 pub use datetime::{DateTime, parse_date_or_datetime, parse_duration, parse_utc_datetime};
-pub use object::{CalendarObject, ComponentKind, TimeRange};
+pub use object::{CalendarObject, ComponentKind, INDEX_VERSION, TimeRange};
 pub use parser::{Component, Parameter, Property, parse};
+pub use recurrence::{
+    Budget, MAX_INSTANCES, OBJECT_BUDGET, exact_time_range_match, matches_time_range,
+};
 pub use transfer::{
     Exporter, Format, ImportContext, ImportedObject, MAX_IMPORT_OBJECTS, MAX_IMPORT_SIZE, Target,
 };

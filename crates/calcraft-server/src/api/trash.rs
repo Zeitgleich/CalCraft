@@ -129,6 +129,10 @@ pub async fn restore(
         .restore_trash_entry(user.id, id, target.as_ref())
         .await?
         .ok_or(ApiError::NotFound)?;
+    // Restored rows carry no time-range index of the current version; the
+    // re-index (idempotent, only stale rows) catches them up. Until then
+    // queries treat them conservatively.
+    crate::reindex::spawn(state.store.clone());
     let collection = restored.collection_slug.to_string();
     let href = format!(
         "{DAV_ROOT}{}/{}/{collection}/{}",

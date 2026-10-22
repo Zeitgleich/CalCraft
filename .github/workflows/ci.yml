@@ -149,7 +149,7 @@ jobs:
           cargo +nightly install cargo-fuzz --locked --version 0.13.2
       - name: Fuzz each target for 60 seconds
         run: |
-          for target in ical_object dav_xml; do
+          for target in ical_object dav_xml recurrence; do
             # Checked-in seeds (fuzz/seeds/<target>) start the corpus.
             mkdir -p "fuzz/corpus/$target"
             if [ -d "fuzz/seeds/$target" ]; then cp fuzz/seeds/"$target"/* "fuzz/corpus/$target/"; fi

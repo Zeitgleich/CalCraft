@@ -35,7 +35,8 @@ pub use backup::{
     latest_migration, pre_migration_backups, restore_database,
 };
 pub use items::{
-    Change, Item, ItemMeta, NewItem, Precondition, PutOutcome, Transfer, TransferOutcome,
+    Change, Item, ItemIndex, ItemMeta, NewItem, Precondition, PutOutcome, QueryCandidate,
+    StaleIndex, Transfer, TransferOutcome,
 };
 pub use items::{MAX_BYTES_PER_USER, MAX_ITEMS_PER_COLLECTION};
 pub use oidc::{ApprovedBinding, OidcBinding};

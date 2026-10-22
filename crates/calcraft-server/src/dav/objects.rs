@@ -10,7 +10,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use calcraft_core::CollectionKind;
-use calcraft_ical::{CalendarObject, IcalError, MAX_OBJECT_SIZE, VCard};
+use calcraft_ical::{CalendarObject, INDEX_VERSION, IcalError, MAX_OBJECT_SIZE, VCard};
 use calcraft_store::{Collection, NewItem, Precondition, PutOutcome, StoreError};
 
 use crate::auth::now;
@@ -115,6 +115,7 @@ pub(crate) struct Validated {
     pub component: &'static str,
     pub range_start: Option<i64>,
     pub range_end: Option<i64>,
+    pub recurring: bool,
 }
 
 /// Why an object was not accepted by [`check_object`].
@@ -179,6 +180,7 @@ pub(crate) fn check_object(
                 component: object.kind.as_str(),
                 range_start: object.range.start,
                 range_end: object.range.end,
+                recurring: object.recurring,
             })
         }
         CollectionKind::Addressbook => {
@@ -188,6 +190,7 @@ pub(crate) fn check_object(
                 component: "VCARD",
                 range_start: None,
                 range_end: None,
+                recurring: false,
             })
         }
     }
@@ -252,6 +255,8 @@ pub async fn put(ctx: Ctx<'_>, resource: Resource, request: Request) -> Response
         component: validated.component,
         range_start: validated.range_start,
         range_end: validated.range_end,
+        recurring: validated.recurring,
+        index_version: INDEX_VERSION,
         etag: &etag,
         content: &body,
     };

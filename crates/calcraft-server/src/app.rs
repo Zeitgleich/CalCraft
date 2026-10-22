@@ -37,6 +37,9 @@ pub struct AppState {
     pub updates: Option<Arc<crate::updates::UpdateCheck>>,
     /// Largest accepted vCard; [`router`] sets it from `storage.max_vcard_bytes`.
     pub max_vcard_bytes: usize,
+    /// Bounds concurrent recurrence checks of calendar-query (CPU work on
+    /// the blocking pool), separately from password hashing.
+    pub expansion: Arc<tokio::sync::Semaphore>,
 }
 
 impl AppState {
@@ -50,8 +53,14 @@ impl AppState {
             #[cfg(feature = "update-check")]
             updates: None,
             max_vcard_bytes: crate::config::DEFAULT_MAX_VCARD_BYTES,
+            expansion: Arc::new(tokio::sync::Semaphore::new(expansion_permits())),
         })
     }
+}
+
+/// Concurrent recurrence checks: half the cores, at least one.
+fn expansion_permits() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1))
 }
 
 /// Builds the complete application router for the given configuration.

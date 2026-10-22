@@ -17,7 +17,7 @@ use calcraft_core::{
     CollectionKind,
     api::{ImportRejection, ImportReport},
 };
-use calcraft_ical::{Exporter, Format, IcalError, ImportContext, Target, transfer};
+use calcraft_ical::{Exporter, Format, INDEX_VERSION, IcalError, ImportContext, Target, transfer};
 use calcraft_store::{Collection, NewItem, Precondition, PutOutcome, Store, StoreError};
 use tokio::sync::{Semaphore, mpsc};
 
@@ -283,6 +283,8 @@ pub async fn import(
             component: validated.component,
             range_start: validated.range_start,
             range_end: validated.range_end,
+            recurring: validated.recurring,
+            index_version: INDEX_VERSION,
             etag: &etag,
             content: &bytes,
         };

@@ -5,13 +5,16 @@ use crate::{
     Component, IcalError, Property,
     datetime::{DateTime, parse_date_or_datetime, parse_duration},
     parse,
+    recurrence::{self, Budget, OBJECT_BUDGET, SLACK as LOCAL_TIME_SLACK},
+    rrule::parse_rule,
 };
 
 const MAX_UID_LEN: usize = 1024;
-/// Largest UTC offset of any timezone (UTC+14). Local times are widened by
-/// this much in both directions, which keeps time-range matching correct
-/// without a timezone database.
-const LOCAL_TIME_SLACK: i64 = 14 * 3600;
+
+/// Version of the time-range indexing ([`CalendarObject::range`],
+/// [`CalendarObject::recurring`]). Stored objects indexed by an older
+/// version are re-indexed on upgrade.
+pub const INDEX_VERSION: i64 = 1;
 
 /// Component type of a calendar object resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -42,9 +45,13 @@ impl ComponentKind {
 
 /// Inclusive-exclusive span in Unix seconds; `None` means unbounded.
 ///
-/// The span may be wider than the exact set of occurrences, never narrower:
-/// recurring objects without an `UNTIL` are open-ended, and local times are
-/// widened by the maximum UTC offset.
+/// The span may be wider than the exact set of occurrences, never narrower.
+/// It is exact for UTC times and for local times with an embedded
+/// VTIMEZONE; floating times, all-day dates and TZIDs without VTIMEZONE are
+/// widened by the maximum UTC offset (±14 h). Recurring objects span from
+/// their first to their last instance; open-ended rules stay open, and so
+/// do rules too large to expand within the budget (unless bounded by
+/// `UNTIL`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimeRange {
     pub start: Option<i64>,
@@ -84,6 +91,10 @@ pub struct CalendarObject {
     pub uid: String,
     pub kind: ComponentKind,
     pub range: TimeRange,
+    /// The object has several instances (RRULE, RDATE or overrides), so
+    /// `range` is only their hull: time-range queries check candidates with
+    /// [`crate::matches_time_range`].
+    pub recurring: bool,
 }
 
 impl CalendarObject {
@@ -108,6 +119,7 @@ impl CalendarObject {
         let mut range: Option<TimeRange> = None;
         let mut masters = 0;
         let mut recurrence_ids: Vec<&str> = Vec::new();
+        let mut recurring = false;
 
         for component in &calendar.components {
             if component.name == "VTIMEZONE" {
@@ -144,16 +156,26 @@ impl CalendarObject {
                 return Err(IcalError::Invalid("more than one master component"));
             }
 
+            recurring |= ["RRULE", "RDATE", "EXDATE", "RECURRENCE-ID"]
+                .iter()
+                .any(|name| component.property(name).is_some());
             let component_range = component_range(component, this_kind)?;
             range = Some(range.map_or(component_range, |r| r.union(component_range)));
         }
 
+        let uid = uid
+            .ok_or(IcalError::Invalid("no event, todo or journal"))?
+            .to_owned();
+        let kind = kind.ok_or(IcalError::Invalid("no event, todo or journal"))?;
+        // Exact instances where possible; the conservative range otherwise.
+        let mut budget = Budget::new(OBJECT_BUDGET);
+        let range = recurrence::span(&calendar, &mut budget)
+            .unwrap_or_else(|_| range.unwrap_or(TimeRange::UNBOUNDED));
         Ok(Self {
-            uid: uid
-                .ok_or(IcalError::Invalid("no event, todo or journal"))?
-                .to_owned(),
-            kind: kind.ok_or(IcalError::Invalid("no event, todo or journal"))?,
-            range: range.unwrap_or(TimeRange::UNBOUNDED),
+            uid,
+            kind,
+            range,
+            recurring,
         })
     }
 }
@@ -180,44 +202,20 @@ fn duration(component: &Component) -> Result<Option<i64>, IcalError> {
         .transpose()
 }
 
-/// Validates the RRULE syntax that matters for safe expansion and returns
-/// its UNTIL, if any. The rule is not expanded here.
+/// Validates an RRULE (with the parser expansion uses) and returns its
+/// UNTIL, if any.
+/// UNTIL is only trusted for supported rules: an irregular rule (e.g. with
+/// repeated UNTIL parts) stays open-ended.
 fn rrule_until(rule: &str) -> Result<Option<DateTime>, IcalError> {
-    let invalid = IcalError::Invalid("invalid RRULE");
-    let mut freq = false;
-    let mut until = None;
-    let mut count = false;
-    for part in rule.split(';') {
-        let (key, value) = part.split_once('=').ok_or(invalid.clone())?;
-        match key.to_ascii_uppercase().as_str() {
-            "FREQ" => {
-                if !matches!(
-                    value.to_ascii_uppercase().as_str(),
-                    "SECONDLY" | "MINUTELY" | "HOURLY" | "DAILY" | "WEEKLY" | "MONTHLY" | "YEARLY"
-                ) {
-                    return Err(invalid);
-                }
-                freq = true;
-            }
-            "INTERVAL" | "COUNT" => {
-                let n: u32 = value.parse().map_err(|_| invalid.clone())?;
-                if n == 0 {
-                    return Err(invalid);
-                }
-                count |= key.eq_ignore_ascii_case("COUNT");
-            }
-            "UNTIL" => until = Some(parse_date_or_datetime(value)?),
-            _ => {}
-        }
-    }
-    if !freq || (count && until.is_some()) {
-        return Err(invalid);
-    }
-    Ok(until)
+    let rule = parse_rule(rule)?;
+    Ok(rule.until.filter(|_| rule.supported))
 }
 
+/// Conservative span of one component, used when exact evaluation is not
+/// possible: local times widened, open-ended unless bounded by UNTIL.
 fn component_range(component: &Component, kind: ComponentKind) -> Result<TimeRange, IcalError> {
     let start = datetime(component, "DTSTART")?;
+    let start_is_date = start.is_some_and(|s| s.is_date);
     let end_prop = match kind {
         ComponentKind::Event => datetime(component, "DTEND")?,
         ComponentKind::Todo => datetime(component, "DUE")?,
@@ -256,12 +254,30 @@ fn component_range(component: &Component, kind: ComponentKind) -> Result<TimeRan
     }
     if let Some(rrule) = rrules.first() {
         end = match rrule_until(&rrule.value)? {
-            Some(until) => end.zip(start).map(|(e, s)| until.seconds + (e - s)),
+            // A DATE UNTIL with DATE-TIME instances includes that whole day.
+            Some(until) => {
+                let until_end = if until.is_date && !start_is_date {
+                    until.seconds + 86_400
+                } else {
+                    until.seconds
+                };
+                end.zip(start).map(|(e, s)| until_end + (e - s))
+            }
             None => None,
         };
     }
-    if component.property("RDATE").is_some() {
-        end = None;
+    // RDATE values may lie anywhere; THISANDFUTURE overrides move later
+    // instances. Neither is bounded here.
+    let this_and_future = component
+        .property("RECURRENCE-ID")
+        .and_then(|p| p.parameter("RANGE"))
+        .is_some_and(|p| {
+            p.values
+                .iter()
+                .any(|v| v.eq_ignore_ascii_case("THISANDFUTURE"))
+        });
+    if component.property("RDATE").is_some() || this_and_future {
+        return Ok(TimeRange::UNBOUNDED);
     }
 
     let slack = if local { LOCAL_TIME_SLACK } else { 0 };
@@ -316,7 +332,9 @@ mod tests {
         let open = object("BEGIN:VEVENT\r\nUID:a\r\nDTSTART:20261021T100000Z\r\nRRULE:FREQ=WEEKLY\r\nEND:VEVENT\r\n").unwrap();
         assert_eq!(open.range.end, None);
         let counted = object("BEGIN:VEVENT\r\nUID:a\r\nDTSTART:20261021T100000Z\r\nRRULE:FREQ=DAILY;COUNT=3\r\nEND:VEVENT\r\n").unwrap();
-        assert_eq!(counted.range.end, None);
+        // COUNT is expanded: the third instance (zero length) ends the span.
+        assert_eq!(counted.range.end, Some(1_792_749_600 + 1));
+        assert!(counted.recurring);
         let until = object("BEGIN:VEVENT\r\nUID:a\r\nDTSTART:20261021T100000Z\r\nDTEND:20261021T110000Z\r\nRRULE:FREQ=DAILY;UNTIL=20261031T100000Z\r\nEND:VEVENT\r\n").unwrap();
         assert_eq!(until.range.end, Some(1_793_440_800 + 3600));
     }

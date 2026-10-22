@@ -71,8 +71,21 @@ follow [Semantic Versioning](https://semver.org/). Release process:
   app manifest; sources and PNG exports in `assets/brand/`, see
   [docs/brand.md](docs/brand.md). The Content Security Policy gains
   `manifest-src 'self'` for the manifest.
+- Exact `calendar-query` time ranges for recurring events: RRULE expansion
+  (all BYxxx parts incl. BYSETPOS, WKST, ordinal BYDAY, BYWEEKNO), RDATE,
+  EXDATE and `RECURRENCE-ID` overrides, with work budgets per object and per
+  REPORT; exceeding a budget returns the object conservatively. Time zones
+  come from the VTIMEZONE embedded in the object (DST gaps and overlaps per
+  RFC 5545), without a time zone database; floating times and `TZID`s
+  without VTIMEZONE keep the ±14 h widening. See [docs/caldav.md](docs/caldav.md).
+- Fuzz target `recurrence` for the RRULE and VTIMEZONE evaluator.
 
 ### Changed
+
+- Database migration `0007_recurrence` (columns `items.recurring`,
+  `items.index_version`). After the upgrade, existing calendar objects are
+  re-indexed once in the background; until then their time ranges stay
+  conservative. Objects, ETags and sync tokens do not change.
 
 - Web UI: refreshed design with the logo in the header and on the login page,
   a token-based colour system (light and dark), clearer buttons, focus rings
@@ -80,6 +93,9 @@ follow [Semantic Versioning](https://semver.org/). Release process:
   outlined empty states, and tables that scroll inside their frame on phones.
 
 ### Fixed
+
+- `calendar-query` no longer misses a VTODO whose DUE equals the end of the
+  requested range, nor objects with an RDATE before their DTSTART.
 
 - Web UI: the action column of the user and app-password tables now lines up
   with the other cells; on phone widths the header is compact (user and

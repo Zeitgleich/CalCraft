@@ -217,6 +217,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // Purges expired trash entries now and then regularly.
     calcraft_server::trash::warn_if_disabled_with_entries(&store).await;
     calcraft_server::trash::spawn_purge(store.clone());
+    // Objects stored by older versions get exact time-range indexes.
+    calcraft_server::reindex::spawn(store.clone());
     let mut state = AppState::new(store)?;
     state.secure_cookies = config.security.secure_cookies;
     state
