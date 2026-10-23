@@ -7,6 +7,27 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 
 ## [Unreleased]
 
+### Added
+
+- Web UI calendar (new start page): month, week, day and agenda views of
+  all own calendars, subscriptions and accepted shares in the browser's time
+  zone, calendars shown or hidden from the sidebar; event dialog to create,
+  change and delete events (title, all day, start and end with time zone,
+  location, description, calendar, simple repeat rules, display reminders,
+  private flag; attendees and attachment downloads shown), for the whole
+  series or one instance; drag and drop and resizing with mouse, pen and
+  touch; keyboard shortcuts and keyboard moves; ARIA roles and labels, a
+  native modal dialog with focus return, reduced-motion support. Changes
+  carry the ETag; a conflict is reported and the view reloaded.
+- REST API for the calendar views: `GET /api/v1/calendars`,
+  `GET /api/v1/events` (instances in a time range, expanded with the
+  recurrence engine and its limits; busy blocks for private events of
+  read-only shares), `/api/v1/calendars/{slug}/events[/{name}[/move]]`
+  (read, create, change, move/resize, delete, move to another calendar; all
+  with `If-Match`) and `GET /api/v1/attachments/{id}`. Every change runs
+  through the DAV `PUT`/`DELETE`/`MOVE` handlers, so validation, sharing
+  rights, scheduling, quota, trash and attachment rules are those of DAV.
+
 ## [0.1.0-alpha.4] – 2026-10-23
 
 Fourth pre-release, for testing only – not for production use (open points:

@@ -918,6 +918,13 @@ pub fn exact_time_range_match(
     overlaps(&root, start, end, budget).ok()
 }
 
+#[path = "recurrence_expand.rs"]
+mod expand;
+pub use expand::{
+    Expanded, Instance, InstanceTime, instances, master_instance_id, override_index, same_instant,
+    zone_to_local, zone_to_utc,
+};
+
 #[cfg(test)]
 #[path = "recurrence_tests.rs"]
 mod tests;

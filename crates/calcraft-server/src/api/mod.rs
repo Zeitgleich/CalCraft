@@ -8,6 +8,7 @@
 mod account;
 mod admin;
 mod collections;
+mod events;
 #[cfg(feature = "oidc")]
 mod oidc;
 mod publish;
@@ -78,6 +79,15 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("patch", "/v1/subscriptions/{slug}"),
     ("delete", "/v1/subscriptions/{slug}"),
     ("post", "/v1/subscriptions/{slug}/refresh"),
+    ("get", "/v1/calendars"),
+    ("post", "/v1/calendars/{slug}/events"),
+    ("get", "/v1/calendars/{slug}/events/{name}"),
+    ("put", "/v1/calendars/{slug}/events/{name}"),
+    ("patch", "/v1/calendars/{slug}/events/{name}"),
+    ("delete", "/v1/calendars/{slug}/events/{name}"),
+    ("post", "/v1/calendars/{slug}/events/{name}/move"),
+    ("get", "/v1/events"),
+    ("get", "/v1/attachments/{id}"),
     ("get", "/v1/trash"),
     ("delete", "/v1/trash"),
     ("post", "/v1/trash/{id}/restore"),
@@ -144,6 +154,21 @@ pub fn router() -> Router<AppState> {
         .route("/v1/shared", get(sharing::incoming_list))
         .route("/v1/shared/{id}/accept", post(sharing::accept))
         .route("/v1/shared/{id}", delete(sharing::leave))
+        .route("/v1/calendars", get(events::calendars))
+        .route("/v1/calendars/{slug}/events", post(events::create))
+        .route(
+            "/v1/calendars/{slug}/events/{name}",
+            get(events::get)
+                .put(events::update)
+                .patch(events::update_times)
+                .delete(events::delete),
+        )
+        .route(
+            "/v1/calendars/{slug}/events/{name}/move",
+            post(events::move_event),
+        )
+        .route("/v1/events", get(events::list))
+        .route("/v1/attachments/{id}", get(events::attachment))
         .route("/v1/trash", get(trash::list).delete(trash::empty))
         .route("/v1/trash/{id}/restore", post(trash::restore))
         .route("/v1/trash/{id}", delete(trash::delete_entry))
@@ -226,6 +251,8 @@ pub enum ApiError {
     Csrf,
     NotFound,
     Conflict(&'static str),
+    /// The object changed since the client read it (`If-Match` failed).
+    PreconditionFailed,
     /// A trash entry cannot be restored; the code says why.
     RestoreConflict(calcraft_store::TrashConflict),
     Limit(&'static str),
@@ -289,6 +316,11 @@ impl IntoResponse for ApiError {
             ),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found", "not found".to_owned()),
             Self::Conflict(message) => (StatusCode::CONFLICT, "conflict", message.to_owned()),
+            Self::PreconditionFailed => (
+                StatusCode::PRECONDITION_FAILED,
+                "precondition_failed",
+                "the event was changed in the meantime; reload it".to_owned(),
+            ),
             Self::RestoreConflict(conflict) => (
                 StatusCode::CONFLICT,
                 conflict.code(),

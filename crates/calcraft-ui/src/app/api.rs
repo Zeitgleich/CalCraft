@@ -19,6 +19,16 @@ fn js_error(value: JsValue) -> ApiFailure {
 
 /// Sends a request and returns status and body text.
 async fn call(method: &str, path: &str, body: Option<String>) -> Result<(u16, String), ApiFailure> {
+    call_with(method, path, body, None).await
+}
+
+/// [`call`] with an `If-Match` header (the ETag the UI last saw).
+async fn call_with(
+    method: &str,
+    path: &str,
+    body: Option<String>,
+    if_match: Option<&str>,
+) -> Result<(u16, String), ApiFailure> {
     let window = web_sys::window().ok_or_else(|| ApiFailure::network("no window"))?;
     let init = RequestInit::new();
     init.set_method(method);
@@ -29,6 +39,9 @@ async fn call(method: &str, path: &str, body: Option<String>) -> Result<(u16, St
         .map_err(js_error)?;
     if method != "GET" {
         headers.set(CSRF_HEADER, "1").map_err(js_error)?;
+    }
+    if let Some(etag) = if_match {
+        headers.set("if-match", etag).map_err(js_error)?;
     }
     if let Some(body) = body {
         headers
@@ -108,4 +121,21 @@ pub async fn send_empty(method: &str, path: &str) -> Result<(), ApiFailure> {
 pub async fn post_for<T: DeserializeOwned>(path: &str) -> Result<T, ApiFailure> {
     let (status, text) = call("POST", path, None).await?;
     decode(status, &text)
+}
+
+/// Change of an event with `If-Match`: JSON body and JSON response.
+pub async fn send_if_match<B: Serialize, T: DeserializeOwned>(
+    method: &str,
+    path: &str,
+    etag: &str,
+    body: &B,
+) -> Result<T, ApiFailure> {
+    let (status, text) = call_with(method, path, Some(encode(body)?), Some(etag)).await?;
+    decode(status, &text)
+}
+
+/// `DELETE` with `If-Match`; the response body, if any, is ignored.
+pub async fn delete_if_match(path: &str, etag: &str) -> Result<(), ApiFailure> {
+    let (status, text) = call_with("DELETE", path, None, Some(etag)).await?;
+    expect_empty(status, &text)
 }

@@ -34,7 +34,9 @@ pub use datetime::{
 pub use object::{CalendarObject, ComponentKind, INDEX_VERSION, TimeRange};
 pub use parser::{Component, Parameter, Property, parse};
 pub use recurrence::{
-    Budget, MAX_INSTANCES, OBJECT_BUDGET, exact_time_range_match, matches_time_range,
+    Budget, Expanded, Instance, InstanceTime, MAX_INSTANCES, OBJECT_BUDGET, exact_time_range_match,
+    instances, master_instance_id, matches_time_range, override_index, same_instant, zone_to_local,
+    zone_to_utc,
 };
 pub use transfer::{
     Exporter, Format, ImportContext, ImportedObject, MAX_IMPORT_OBJECTS, MAX_IMPORT_SIZE, Target,

@@ -7,6 +7,8 @@ pub mod attachments;
 pub mod auth;
 pub mod config;
 pub mod dav;
+#[cfg(feature = "api")]
+pub mod events;
 #[cfg(feature = "https-client")]
 pub mod https;
 pub mod limits;

@@ -4,6 +4,7 @@
 //! tested natively (`cargo test -p calcraft-ui`). The Leptos application
 //! itself lives in the binary target and is only compiled for `wasm32`.
 
+pub mod cal;
 pub mod sso;
 pub mod text;
 pub mod validate;
@@ -61,6 +62,11 @@ impl ApiFailure {
         self.code == "unauthorized"
     }
 
+    /// The object changed since it was read (412): reload it.
+    pub fn is_conflict(&self) -> bool {
+        self.code == "precondition_failed"
+    }
+
     /// Login needs a second factor.
     pub fn is_totp_required(&self) -> bool {
         self.code == "totp_required"
@@ -83,6 +89,7 @@ impl ApiFailure {
             "collection_in_trash" => text::ERR_RESTORE_COLLECTION_IN_TRASH.to_owned(),
             "collection_deleted" => text::ERR_RESTORE_COLLECTION_DELETED.to_owned(),
             "invalid_target" => text::ERR_RESTORE_INVALID_TARGET.to_owned(),
+            "precondition_failed" => text::CAL_CONFLICT.to_owned(),
             _ if self.message.is_empty() => text::ERR_UNKNOWN.to_owned(),
             _ => capitalize(&self.message),
         }
@@ -156,6 +163,7 @@ pub fn group_secret(secret: &str) -> String {
 /// Pages of the application, addressed by the URL fragment (`#/settings`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
+    Calendar,
     Overview,
     Settings,
     AppPasswords,
@@ -164,7 +172,8 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 5] = [
+    pub const ALL: [Page; 6] = [
+        Page::Calendar,
         Page::Overview,
         Page::Settings,
         Page::AppPasswords,
@@ -172,20 +181,22 @@ impl Page {
         Page::Admin,
     ];
 
-    /// Parses `location.hash`; unknown fragments show the overview.
+    /// Parses `location.hash`; unknown fragments show the calendar.
     pub fn from_hash(hash: &str) -> Self {
         match hash.trim_start_matches('#').trim_start_matches('/') {
+            "collections" => Self::Overview,
             "settings" => Self::Settings,
             "app-passwords" => Self::AppPasswords,
             "trash" => Self::Trash,
             "admin" => Self::Admin,
-            _ => Self::Overview,
+            _ => Self::Calendar,
         }
     }
 
     pub fn hash(self) -> &'static str {
         match self {
-            Self::Overview => "#/",
+            Self::Calendar => "#/",
+            Self::Overview => "#/collections",
             Self::Settings => "#/settings",
             Self::AppPasswords => "#/app-passwords",
             Self::Trash => "#/trash",
@@ -195,6 +206,7 @@ impl Page {
 
     pub fn title(self) -> &'static str {
         match self {
+            Self::Calendar => text::NAV_CALENDAR,
             Self::Overview => text::NAV_OVERVIEW,
             Self::Settings => text::NAV_SETTINGS,
             Self::AppPasswords => text::NAV_APP_PASSWORDS,

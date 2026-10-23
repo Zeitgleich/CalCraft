@@ -6,7 +6,8 @@
 //! cancellations, free/busy lookups), and no managed attachments (file
 //! names, contents, managed ids), and nothing of sharing (the sharee's
 //! address in a share request, what a sharee writes) or public links (the
-//! secret token, also of unknown links, and the published content).
+//! secret token, also of unknown links, and the published content), and
+//! nothing of what the web UI's event API reads or writes.
 //!
 //! This binary holds a single test because it installs the global
 //! subscriber (the same one `logging.format = "json"` uses), which also
@@ -428,6 +429,7 @@ mod api {
         assert_eq!(deleted.status, StatusCode::NO_CONTENT);
         let (emptied, _) = call(app, "DELETE", "/api/v1/trash", Some(&session), Value::Null).await;
         assert_eq!(emptied.status, StatusCode::NO_CONTENT);
+        event_flows(app, &session, secrets).await;
 
         let (created, json) = call(
             app,
@@ -525,6 +527,107 @@ mod api {
         .await;
         assert_eq!(forged.status, StatusCode::UNAUTHORIZED);
         app_password
+    }
+
+    /// The web UI's event API with marked contents: create, list, read,
+    /// change one instance, move, delete, a stale ETag and refused input.
+    pub async fn event_flows(app: &Router, session: &str, secrets: &mut Vec<String>) {
+        let summary = format!("{MARKER}EventSummary");
+        let location = format!("{MARKER}EventLocation");
+        let description = format!("{MARKER}EventDescription");
+        secrets.extend([summary.clone(), location.clone(), description.clone()]);
+        let fields = |date: &str, from: &str, to: &str| {
+            json!({
+                "summary": summary,
+                "location": location,
+                "description": description,
+                "start": {"date": date, "time": from, "tzid": "UTC"},
+                "end": {"date": date, "time": to, "tzid": "UTC"},
+                "alarms": [{"minutes_before": 5}],
+            })
+        };
+        let (created, json) = call(
+            app,
+            "POST",
+            "/api/v1/calendars/default/events",
+            Some(session),
+            json!({"fields": fields("2026-11-02", "09:00", "10:00"), "recurrence": {"freq": "daily", "count": 3}}),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+        let name = json["name"].as_str().unwrap().to_owned();
+        let etag = json["etag"].as_str().unwrap().to_owned();
+        let path = format!("/api/v1/calendars/default/events/{name}");
+        let (list, _) = call(
+            app,
+            "GET",
+            "/api/v1/events?start=1793000000&end=1794000000",
+            Some(session),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(list.status, StatusCode::OK);
+        let (detail, _) = call(app, "GET", &path, Some(session), Value::Null).await;
+        assert!(detail.body.contains(&description));
+
+        let with_etag = |method: &'static str, uri: String, etag: String, body: Value| async move {
+            let headers = [
+                ("x-calcraft-request", "1"),
+                ("content-type", "application/json"),
+                ("cookie", session),
+                ("if-match", etag.as_str()),
+            ];
+            let reply = send(app, method, &uri, &headers, body.to_string()).await;
+            let json = serde_json::from_str(&reply.body).unwrap_or(Value::Null);
+            (reply, json)
+        };
+        let mut one = json!({"fields": fields("2026-11-03", "14:00", "15:00")});
+        one["recurrence_id"] = json!("20261103T090000Z");
+        let (changed, json) = with_etag("PUT", path.clone(), etag.clone(), one).await;
+        assert_eq!(changed.status, StatusCode::OK, "{}", changed.body);
+        let etag2 = json["etag"].as_str().unwrap().to_owned();
+        let (stale, _) = with_etag(
+            "PATCH",
+            path.clone(),
+            etag,
+            json!({"start": 1_793_600_000, "end": 1_793_603_600}),
+        )
+        .await;
+        assert_eq!(stale.status, StatusCode::PRECONDITION_FAILED);
+        let (moved, json) = with_etag(
+            "PATCH",
+            path.clone(),
+            etag2,
+            json!({"start": 1_793_696_400, "end": 1_793_700_000}),
+        )
+        .await;
+        assert_eq!(moved.status, StatusCode::OK, "{}", moved.body);
+        let etag3 = json["etag"].as_str().unwrap().to_owned();
+        let (excluded, json) = with_etag(
+            "DELETE",
+            format!("{path}?recurrence_id=20261104T090000Z"),
+            etag3,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(excluded.status, StatusCode::OK, "{}", excluded.body);
+        let etag4 = json["etag"].as_str().unwrap().to_owned();
+        // Refused input with marked contents.
+        let bad_zone = format!("{MARKER}/Zone");
+        secrets.push(bad_zone.clone());
+        let mut refused = json!({"fields": fields("2026-11-02", "09:00", "10:00")});
+        refused["fields"]["start"]["tzid"] = json!(bad_zone);
+        let (bad, _) = call(
+            app,
+            "POST",
+            "/api/v1/calendars/default/events",
+            Some(session),
+            refused,
+        )
+        .await;
+        assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+        let (deleted, _) = with_etag("DELETE", path, etag4, Value::Null).await;
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT);
     }
 }
 

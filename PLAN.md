@@ -201,12 +201,26 @@ eine Admin-Ausnahmeliste für interne Feed-Server.
 | Stufe | Inhalt |
 |---|---|
 | UI-1 | Login, Kalender-/Adressbuchliste, Einstellungen, App-Passwörter, Admin |
-| UI-2 | Agenda- und Monatsansicht, Termin-Dialog |
-| UI-3 | Woche/Tag mit Zeitraster, Layout überlappender Termine |
-| UI-4 | Drag & Drop, Resize, Touch, Tastatur, ARIA |
+| UI-2 ✅ | Agenda- und Monatsansicht, Termin-Dialog |
+| UI-3 ✅ | Woche/Tag mit Zeitraster, Layout überlappender Termine |
+| UI-4 ✅ | Drag & Drop, Resize, Touch, Tastatur, ARIA |
 | UI-5 | Kontakte, Freigaben, i18n (de/en), Dark Mode |
 
-Ziel < 500 KB gzip (Stand UI-1: ca. 430 KB wasm, 165 KB gzip). Kein npm, kein CSS-Framework.
+Ziel < 500 KB gzip (Stand UI-1: ca. 430 KB wasm, 165 KB gzip; Stand UI-4: ca. 1,1 MB wasm, 405 KB gzip,
+mit JS und CSS ca. 420 KB gzip). Kein npm, kein CSS-Framework.
+
+**Kalenderansichten (UI-2 bis UI-4):** REST statt CalDAV im Browser: `/api/v1/calendars` (eigene, Abos, angenommene
+Freigaben), `/api/v1/events?start&end` (Instanzen, serverseitig mit der Rekurrenz-Engine und ihren Budgets expandiert;
+private Termine schreibgeschützter Freigaben als Belegt-Stubs) und `/api/v1/calendars/{slug}/events/{name}` (lesen,
+anlegen, ändern, verschieben/Größe ändern, löschen, in anderen Kalender verschieben). Jede Änderung wird als DAV-Anfrage
+(PUT/DELETE/MOVE mit `If-Match`) durch dieselben DAV-Handler geschickt (`dav/rest.rs`) – kein zweiter Schreibpfad;
+der Server ändert nur die Dialog-Felder im vorhandenen Objekt (`events.rs`), alles andere bleibt. Serie vs. Instanz:
+eine Instanz wird ein Override (`RECURRENCE-ID`), Löschen einer Instanz ein `EXDATE`; verschiebt man den Serienstart,
+wandern EXDATEs und Override-IDs mit. Zeitzonen: der Browser liefert die VTIMEZONE-Definition (aus `Date`/`Intl`
+abgeleitete jährliche Regeln ab 1970), der Server übernimmt sie nur, wenn das Objekt die Zone noch nicht hat. Positionen im
+Zeitraster werden per CSSOM (`style.setProperty`, nur berechnete Prozentwerte) gesetzt – das beschränkt die CSP nicht;
+im Markup gibt es weiterhin keine `style`-Attribute, Farben bleiben SVG-`fill`. Reine Logik (Datum/DST, Spalten-Layout,
+Tastaturmodell, Drag-Rechnung, Formular) in `calcraft_ui::cal`, nativ getestet.
 
 **Architektur (ab M4b):**
 
@@ -264,8 +278,8 @@ Der Client-Track startet nach M4 (wenn Web-UI-Komponenten existieren).
 | **M1** ✅ | WebDAV-Kern: OPTIONS, PROPFIND (Depth 0/1), Principal Discovery, Basic Auth, Storage (SQLite) |
 | **M2** ✅ | CalDAV: MKCALENDAR, PUT/GET/DELETE mit Preconditions, calendar-query, calendar-multiget; Parser-Limits + Fuzzing |
 | **M3** ✅ | sync-collection, CardDAV · aus Phase 3 erledigt: Kontaktfotos (`storage.max_vcard_bytes`) und Gruppen (Apple, vCard 4.0), `MOVE`/`COPY` zwischen eigenen Collections, Papierkorb, exakte RRULE-Expansion mit Budgets und eingebetteten VTIMEZONEs (`docs/caldav.md`; `expand` und Zeitzonen-Datenbank offen) |
-| **M4** | **M4a** ✅ REST-API + OpenAPI, Sessions, 2FA (TOTP + Wiederherstellungscodes), App-Passwörter, Admin · **M4b** ✅ Web-UI Stufe 1 · **M4c** 🟡 SSO-Login in der Web-UI ✅, Logo/Favicon/Design-System ✅, Termin- und Kontaktansichten offen |
-| **M5** | **M5a** ✅ OIDC/SSO (Keycloak & Co.) · **M5b** ✅ Freigaben an Benutzer (lesen/schreiben, Annahme nötig, Apple-CalendarServer-Sharing, REST + Web-UI) und öffentliche Nur-Lese-Links (`[publish]`, Standard aus), siehe `docs/sharing.md` · offen: Gruppen, Erinnerungen (SMTP), Web-UI Stufe 3–4 |
+| **M4** | **M4a** ✅ REST-API + OpenAPI, Sessions, 2FA (TOTP + Wiederherstellungscodes), App-Passwörter, Admin · **M4b** ✅ Web-UI Stufe 1 · **M4c** 🟡 SSO-Login in der Web-UI ✅, Logo/Favicon/Design-System ✅, Terminansichten ✅ (UI-2 bis UI-4), Kontaktansicht offen |
+| **M5** | **M5a** ✅ OIDC/SSO (Keycloak & Co.) · **M5b** ✅ Freigaben an Benutzer (lesen/schreiben, Annahme nötig, Apple-CalendarServer-Sharing, REST + Web-UI) und öffentliche Nur-Lese-Links (`[publish]`, Standard aus), siehe `docs/sharing.md` · Web-UI Stufe 3–4 ✅ (Kalenderansichten, Drag & Drop, Tastatur, ARIA) · offen: Gruppen, Erinnerungen (SMTP) |
 | **M6** | **M6a** ✅ Import/Export aller Formate (REST + CLI) · Backup/Restore + Pre-Migration-Backups ✅ · **M6b** ✅ Webcal-Abos (eingehend) mit SSRF-Schutz · Migration aus Radicale/Baïkal/Synology/Nextcloud ✅ (`calcraft migrate`: Discovery, Multiget mit GET-Fallback, Validierung wie Import, `--dry-run`, idempotent; getestet gegen einen Fake-Server, noch nicht gegen echte Instanzen) |
 | **S** | **Scheduling (RFC 6638):** **Stufe A** ✅ zwischen Benutzern desselben Servers (`[scheduling]`, standardmäßig aus): implizites Scheduling bei PUT/DELETE (REQUEST, CANCEL, REPLY inkl. Serien, Overrides, EXDATE), Inbox/Outbox, Schedule-Tag/`If-Schedule-Tag-Match`, Free/Busy über die Outbox, Adressen nur vom Admin (`calcraft user set-email`, REST, Web-UI) oder `<user>@<domain>`, nie aus OIDC; Limits (Teilnehmer, Empfänger pro Stunde, Inbox-Größe, Quota), Tests `tests/scheduling.rs`, Matrix, Fuzz-Ziel `itip`, python-caldav in der CI · **Stufe B** offen: iMIP (SMTP ausgehend, eingehende Antworten mit DMARC-Prüfung) |
 | **A** | **Managed Attachments (RFC 8607)** ✅ (`[attachments]`, standardmäßig aus): Upload/Update/Remove per `POST …?action=attachment-*` inkl. `rid`, Speicherung in SQLite (Backup, Papierkorb, Quota des Hochladenden), Download unter `/dav/attachments/<managed-id>` nur für Hochladende und Benutzer, deren eigene Objekte es referenzieren (Einladungen), immer als Download mit `nosniff`/Sandbox-CSP, fremde Managed-IDs per PUT abgelehnt, Tests `tests/attachments.rs`, Matrix, Fuzz-Ziel `attach` (`docs/attachments.md`) · offen: Anzeige in der Web-UI, Virenscan |

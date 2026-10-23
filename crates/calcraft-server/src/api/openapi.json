@@ -2104,6 +2104,540 @@
           }
         }
       }
+    },
+    "/v1/calendars": {
+      "get": {
+        "summary": "Calendars of the user's home that hold events",
+        "description": "Own calendars, subscriptions and accepted shares, with colour and whether events can be changed.",
+        "tags": [
+          "events"
+        ],
+        "responses": {
+          "200": {
+            "description": "Calendars",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CalendarView"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "summary": "Instances of events in a time range",
+        "description": "Recurring events are expanded with the server's recurrence engine and its limits; truncated is set when a limit was reached. Private events of read-only shares are busy blocks. At most 400 days per request.",
+        "tags": [
+          "events"
+        ],
+        "parameters": [
+          {
+            "name": "start",
+            "in": "query",
+            "required": true,
+            "description": "Unix seconds (inclusive)",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "end",
+            "in": "query",
+            "required": true,
+            "description": "Unix seconds (exclusive)",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "calendar",
+            "in": "query",
+            "required": false,
+            "description": "Only this calendar (slug)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Instances",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventList"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/calendars/{slug}/events": {
+      "post": {
+        "summary": "Create an event",
+        "description": "Stored like a DAV PUT (validation, quota, scheduling of attendees).",
+        "tags": [
+          "events"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "description": "Calendar in the user's home (own, subscription, or the sharee's slug of an accepted share).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventSaved"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/calendars/{slug}/events/{name}": {
+      "get": {
+        "summary": "An event as the dialog shows it",
+        "description": "The series, or one instance with recurrence_id. Busy blocks for private events of read-only shares.",
+        "tags": [
+          "events"
+        ],
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "description": "Calendar in the user's home (own, subscription, or the sharee's slug of an accepted share).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Object name, e.g. 3f2a….ics",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "recurrence_id",
+            "in": "query",
+            "required": false,
+            "description": "One instance of a recurring event (value from the listing).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Event",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventDetail"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Change an event",
+        "description": "Changes the series, or one instance (recurrence_id in the body; creates an override). Only the dialog's fields change; everything else in the object is kept. Runs through the DAV PUT path: read-only shares and subscriptions answer 403, sharees cannot change scheduling objects, attendees are notified like for DAV clients.",
+        "tags": [
+          "events"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "description": "ETag of the event as last read; a changed event answers 412 (precondition_failed).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "description": "Calendar in the user's home (own, subscription, or the sharee's slug of an accepted share).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Object name, e.g. 3f2a….ics",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventSaved"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "summary": "Move or resize an event",
+        "description": "New start and end (drag and drop) of the series or one instance, encoded like the listing's start and end.",
+        "tags": [
+          "events"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "description": "ETag of the event as last read; a changed event answers 412 (precondition_failed).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "description": "Calendar in the user's home (own, subscription, or the sharee's slug of an accepted share).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Object name, e.g. 3f2a….ics",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventTimes"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventSaved"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete an event or one instance",
+        "description": "Without recurrence_id the object goes to the trash (DAV DELETE). With it, the instance is excluded (EXDATE) and 200 returns the changed object.",
+        "tags": [
+          "events"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "description": "ETag of the event as last read; a changed event answers 412 (precondition_failed).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "description": "Calendar in the user's home (own, subscription, or the sharee's slug of an accepted share).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Object name, e.g. 3f2a….ics",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "recurrence_id",
+            "in": "query",
+            "required": false,
+            "description": "One instance of a recurring event (value from the listing).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Instance deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventSaved"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Deleted"
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/calendars/{slug}/events/{name}/move": {
+      "post": {
+        "summary": "Move an event to another calendar",
+        "description": "DAV MOVE to a calendar of the same owner (no overwrite).",
+        "tags": [
+          "events"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "description": "ETag of the event as last read; a changed event answers 412 (precondition_failed).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "description": "Calendar in the user's home (own, subscription, or the sharee's slug of an accepted share).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Object name, e.g. 3f2a….ics",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MoveEvent"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Moved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventSaved"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/attachments/{id}": {
+      "get": {
+        "summary": "Download a managed attachment",
+        "description": "Same rules and headers as GET /dav/attachments/{id}: only attachments the user may read, always as a download.",
+        "tags": [
+          "events"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file",
+            "content": {
+              "application/octet-stream": {}
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -3325,6 +3859,540 @@
           "link",
           "url",
           "webcal_url"
+        ]
+      },
+      "CalendarView": {
+        "type": "object",
+        "properties": {
+          "slug": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "own",
+              "shared",
+              "subscription"
+            ]
+          },
+          "writable": {
+            "type": "boolean"
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "private_hidden": {
+            "type": "boolean",
+            "description": "Read-only share: private events are busy blocks"
+          }
+        },
+        "required": [
+          "slug",
+          "source",
+          "writable"
+        ]
+      },
+      "EventInstance": {
+        "type": "object",
+        "description": "start/end are Unix seconds: UTC instants, or midnight of the date (all_day) or local wall time (floating), read as if UTC.",
+        "properties": {
+          "calendar": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "etag": {
+            "type": "string"
+          },
+          "recurrence_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "location": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "all_day": {
+            "type": "boolean"
+          },
+          "floating": {
+            "type": "boolean"
+          },
+          "start": {
+            "type": "integer"
+          },
+          "end": {
+            "type": "integer"
+          },
+          "busy": {
+            "type": "boolean"
+          },
+          "cancelled": {
+            "type": "boolean"
+          },
+          "recurring": {
+            "type": "boolean"
+          },
+          "writable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "calendar",
+          "name",
+          "etag",
+          "all_day",
+          "start",
+          "end"
+        ]
+      },
+      "EventList": {
+        "type": "object",
+        "properties": {
+          "instances": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventInstance"
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "instances"
+        ]
+      },
+      "EventTime": {
+        "type": "object",
+        "properties": {
+          "date": {
+            "type": "string",
+            "description": "YYYY-MM-DD (for all-day ends: exclusive)"
+          },
+          "time": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "HH:MM; null for all-day"
+          },
+          "tzid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "IANA zone, UTC, or null for floating time"
+          }
+        },
+        "required": [
+          "date"
+        ]
+      },
+      "Recurrence": {
+        "type": "object",
+        "properties": {
+          "freq": {
+            "type": "string",
+            "enum": [
+              "daily",
+              "weekly",
+              "monthly",
+              "yearly"
+            ]
+          },
+          "interval": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 999
+          },
+          "count": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Last day, YYYY-MM-DD"
+          },
+          "weekdays": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "MO",
+                "TU",
+                "WE",
+                "TH",
+                "FR",
+                "SA",
+                "SU"
+              ]
+            }
+          }
+        },
+        "required": [
+          "freq"
+        ]
+      },
+      "Alarm": {
+        "type": "object",
+        "properties": {
+          "minutes_before": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 40320
+          }
+        },
+        "required": [
+          "minutes_before"
+        ]
+      },
+      "Participant": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "address"
+        ]
+      },
+      "EventAttachment": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "url": {
+            "type": "string"
+          },
+          "size": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "managed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "url",
+          "managed"
+        ]
+      },
+      "EventFields": {
+        "type": "object",
+        "properties": {
+          "summary": {
+            "type": "string"
+          },
+          "location": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "start": {
+            "$ref": "#/components/schemas/EventTime"
+          },
+          "end": {
+            "$ref": "#/components/schemas/EventTime"
+          },
+          "alarms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Alarm"
+            }
+          },
+          "private": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ]
+      },
+      "EventDetail": {
+        "type": "object",
+        "properties": {
+          "calendar": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "etag": {
+            "type": "string"
+          },
+          "uid": {
+            "type": "string"
+          },
+          "writable": {
+            "type": "boolean"
+          },
+          "busy": {
+            "type": "boolean"
+          },
+          "fields": {
+            "$ref": "#/components/schemas/EventFields"
+          },
+          "recurrence_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_override": {
+            "type": "boolean"
+          },
+          "recurrence": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Recurrence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recurrence_rule": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RRULE the dialog cannot edit (kept)"
+          },
+          "organizer": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Participant"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "attendees": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Participant"
+            }
+          },
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventAttachment"
+            }
+          }
+        },
+        "required": [
+          "calendar",
+          "name",
+          "etag",
+          "uid",
+          "writable",
+          "fields"
+        ]
+      },
+      "Observance": {
+        "type": "object",
+        "properties": {
+          "daylight": {
+            "type": "boolean"
+          },
+          "start": {
+            "type": "string"
+          },
+          "offset_from": {
+            "type": "string"
+          },
+          "offset_to": {
+            "type": "string"
+          },
+          "rrule": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "daylight",
+          "start",
+          "offset_from",
+          "offset_to"
+        ]
+      },
+      "TimeZoneInfo": {
+        "type": "object",
+        "description": "Becomes a VTIMEZONE if the object has none for tzid.",
+        "properties": {
+          "tzid": {
+            "type": "string"
+          },
+          "observances": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Observance"
+            }
+          }
+        },
+        "required": [
+          "tzid",
+          "observances"
+        ]
+      },
+      "EventInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "recurrence_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fields": {
+            "$ref": "#/components/schemas/EventFields"
+          },
+          "recurrence": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Recurrence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "keep_recurrence": {
+            "type": "boolean"
+          },
+          "timezones": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TimeZoneInfo"
+            }
+          }
+        },
+        "required": [
+          "fields"
+        ]
+      },
+      "EventTimes": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "recurrence_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start": {
+            "type": "integer"
+          },
+          "end": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ]
+      },
+      "MoveEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "calendar": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "calendar"
+        ]
+      },
+      "EventSaved": {
+        "type": "object",
+        "properties": {
+          "calendar": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "etag": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "calendar",
+          "name"
         ]
       }
     }

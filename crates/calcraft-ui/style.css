@@ -908,6 +908,800 @@ tr.disabled td {
     white-space: nowrap;
 }
 
+/* Calendar views (month, week, day, agenda) and the event dialog.
+   Positions in the time grid are set through the CSSOM by the app
+   (top/height/left/width in percent); colors come as SVG fills. */
+
+main.wide {
+    max-width: 1400px;
+}
+
+.cal-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-4);
+    margin-bottom: var(--space-4);
+}
+
+.cal-nav {
+    display: flex;
+    gap: var(--space-1);
+}
+
+button.icon {
+    min-width: 2.4rem;
+    font-size: 1.15rem;
+    line-height: 1.2;
+    padding: 0.3rem 0.6rem;
+}
+
+.cal-title {
+    flex: 1;
+    min-width: 10rem;
+    font-size: 1.5rem;
+    margin: 0;
+}
+
+.segmented {
+    display: inline-flex;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    box-shadow: var(--shadow-sm);
+}
+
+.segmented button {
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    background: var(--surface);
+    color: var(--text);
+    padding: 0.4rem 0.8rem;
+}
+
+.segmented button + button {
+    border-left: 1px solid var(--border);
+}
+
+.segmented button:hover {
+    background: var(--surface-2);
+}
+
+.segmented button[aria-pressed="true"] {
+    background: var(--accent-soft);
+    color: var(--accent-soft-text);
+    font-weight: 650;
+}
+
+.cal-layout {
+    display: grid;
+    grid-template-columns: 14rem minmax(0, 1fr);
+    gap: var(--space-5);
+    align-items: start;
+}
+
+.cal-side h2 {
+    margin-top: 0;
+    font-size: 0.875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+}
+
+.cal-list {
+    list-style: none;
+    margin: 0 0 var(--space-4);
+    padding: 0;
+    display: grid;
+    gap: var(--space-2);
+}
+
+.cal-toggle {
+    cursor: pointer;
+}
+
+.cal-name {
+    overflow-wrap: anywhere;
+}
+
+.cal-note {
+    display: block;
+    padding-left: 2.6rem;
+}
+
+.cal-help summary {
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 0.875rem;
+}
+
+.dot {
+    flex: none;
+    width: 0.65rem;
+    height: 0.65rem;
+    color: var(--muted);
+}
+
+/* Month */
+
+.month {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    overflow: hidden;
+    box-shadow: var(--shadow-sm);
+}
+
+.month-head,
+.month-row {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+.month-wd {
+    padding: var(--space-2);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--muted);
+    text-align: center;
+    border-bottom: 1px solid var(--border);
+}
+
+.month-wd abbr {
+    text-decoration: none;
+}
+
+.month-cell {
+    min-height: 7.5rem;
+    padding: 0.2rem 0.25rem 0.35rem;
+    border-right: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.month-row > .month-cell:last-child {
+    border-right: 0;
+}
+
+.month-row:last-child > .month-cell {
+    border-bottom: 0;
+}
+
+.month-cell.weekend {
+    background: color-mix(in srgb, var(--surface-2) 45%, var(--surface));
+}
+
+.month-cell.other-month {
+    background: var(--bg);
+}
+
+.month-cell.other-month .day-number {
+    color: var(--muted);
+}
+
+.month-cell:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+}
+
+.month-cell[aria-selected="true"] {
+    box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+.day-number {
+    align-self: flex-start;
+    border: 0;
+    background: none;
+    box-shadow: none;
+    color: var(--text);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    padding: 0.05rem 0.4rem;
+    border-radius: 999px;
+    min-width: 1.75rem;
+}
+
+.day-number:hover {
+    background: var(--surface-2);
+    color: var(--text);
+}
+
+.today .day-number,
+.tg-dayhead.today strong {
+    background: var(--accent);
+    color: var(--accent-text);
+}
+
+.month-chips {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.chip {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    width: 100%;
+    min-width: 0;
+    border: 0;
+    border-radius: 4px;
+    box-shadow: none;
+    background: none;
+    color: var(--text);
+    font-size: 0.8125rem;
+    font-weight: 450;
+    line-height: 1.35;
+    padding: 0.05rem 0.3rem;
+    text-align: left;
+    white-space: nowrap;
+}
+
+.chip:hover {
+    background: var(--surface-2);
+    color: var(--text);
+}
+
+.chip.all-day {
+    background: var(--accent-soft);
+    color: var(--accent-soft-text);
+}
+
+.chip-time {
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    flex: none;
+}
+
+.chip-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.chip.busy .chip-title,
+.ev.busy .ev-title {
+    font-style: italic;
+}
+
+.cancelled .chip-title,
+.cancelled .ev-title,
+.cancelled .agenda-title {
+    text-decoration: line-through;
+}
+
+.draggable {
+    touch-action: none;
+    cursor: grab;
+}
+
+.dragging {
+    opacity: 0.75;
+    cursor: grabbing;
+    outline: 2px dashed var(--accent);
+    z-index: 3;
+}
+
+button.more {
+    border: 0;
+    background: none;
+    box-shadow: none;
+    color: var(--link);
+    font-size: 0.75rem;
+    padding: 0 0.3rem;
+}
+
+button.more:hover {
+    background: none;
+    color: var(--link);
+    text-decoration: underline;
+}
+
+/* Week and day: time grid */
+
+.tgrid {
+    --hour: 3.5rem;
+    --time-col: 3.5rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    box-shadow: var(--shadow-sm);
+    overflow: hidden;
+}
+
+.tg-head,
+.tg-allday,
+.tg-body {
+    display: grid;
+    grid-template-columns: var(--time-col) repeat(7, minmax(0, 1fr));
+}
+
+.tgrid.days-1 .tg-head,
+.tgrid.days-1 .tg-allday,
+.tgrid.days-1 .tg-body {
+    grid-template-columns: var(--time-col) minmax(0, 1fr);
+}
+
+.tg-corner {
+    padding: var(--space-1);
+    align-self: center;
+    text-align: right;
+}
+
+.tg-dayhead {
+    border-left: 1px solid var(--border);
+    padding: var(--space-1);
+    text-align: center;
+}
+
+button.link-like {
+    border: 0;
+    background: none;
+    box-shadow: none;
+    color: var(--text);
+    padding: 0.15rem 0.4rem;
+    font-weight: 450;
+    align-self: center;
+}
+
+button.link-like:hover {
+    background: var(--surface-2);
+    color: var(--text);
+}
+
+.tg-dayhead strong {
+    display: inline-block;
+    min-width: 1.7rem;
+    border-radius: 999px;
+    padding: 0 0.3rem;
+}
+
+.tg-wd {
+    color: var(--muted);
+    font-size: 0.8125rem;
+}
+
+.tg-allday {
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border-strong);
+}
+
+.tg-alldaycell {
+    border-left: 1px solid var(--border);
+    padding: 2px;
+    min-height: 1.8rem;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.tg-scroll {
+    height: min(70vh, calc(var(--hour) * 14));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.tg-body {
+    height: calc(var(--hour) * 24);
+}
+
+.tg-hours {
+    display: grid;
+    grid-template-rows: repeat(24, 1fr);
+}
+
+.tg-hour {
+    position: relative;
+    font-size: 0.75rem;
+    color: var(--muted);
+    text-align: right;
+    padding-right: var(--space-1);
+    font-variant-numeric: tabular-nums;
+}
+
+.tg-hour span {
+    position: relative;
+    top: -0.55rem;
+}
+
+.tg-hour:first-child span {
+    visibility: hidden;
+}
+
+.tg-col {
+    position: relative;
+    border-left: 1px solid var(--border);
+    background-image: repeating-linear-gradient(
+        to bottom,
+        var(--border) 0,
+        var(--border) 1px,
+        transparent 1px,
+        transparent var(--hour)
+    );
+    cursor: cell;
+}
+
+.tg-col.today {
+    background-color: color-mix(in srgb, var(--accent-soft) 45%, transparent);
+}
+
+.ev {
+    position: absolute;
+    isolation: isolate;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    overflow: hidden;
+    margin: 0;
+    padding: 0.15rem 0.35rem 0.15rem 0.5rem;
+    border: 1px solid var(--surface);
+    border-radius: 5px;
+    background: var(--surface);
+    box-shadow: none;
+    color: var(--text);
+    font-size: 0.78rem;
+    font-weight: 450;
+    line-height: 1.25;
+    text-align: left;
+}
+
+.ev:hover {
+    background: var(--surface);
+    border-color: var(--border-strong);
+    color: var(--text);
+}
+
+.ev-bg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: -1;
+    opacity: 0.22;
+    color: var(--accent);
+}
+
+.ev::before {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 3px;
+    background: var(--border-strong);
+}
+
+.ev-title {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ev-time,
+.ev-location {
+    color: var(--text-2);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ev.short {
+    flex-direction: row;
+    gap: 0.35rem;
+    white-space: nowrap;
+}
+
+.ev.tiny {
+    padding: 0 0.3rem 0 0.45rem;
+    font-size: 0.7rem;
+    line-height: 1.1;
+}
+
+.ev.tiny .ev-time {
+    display: none;
+}
+
+.ev.busy .ev-bg {
+    opacity: 0.12;
+}
+
+.ev-resize {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 6px;
+    cursor: ns-resize;
+    touch-action: none;
+}
+
+.tg-now {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 0;
+    border-top: 2px solid var(--danger);
+    z-index: 4;
+    pointer-events: none;
+}
+
+.tg-now::before {
+    content: "";
+    position: absolute;
+    left: -5px;
+    top: -6px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--danger);
+}
+
+/* Agenda */
+
+.agenda-day {
+    margin-bottom: var(--space-4);
+}
+
+.agenda-date {
+    font-size: 0.9375rem;
+    margin: 0 0 var(--space-2);
+    color: var(--text-2);
+}
+
+.agenda-day.today .agenda-date {
+    color: var(--accent-soft-text);
+}
+
+.agenda-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    overflow: hidden;
+}
+
+.agenda-list li + li {
+    border-top: 1px solid var(--border);
+}
+
+.agenda-item {
+    display: grid;
+    grid-template-columns: 7.5rem auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--space-3);
+    width: 100%;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    background: none;
+    color: var(--text);
+    font-weight: 400;
+    text-align: left;
+    padding: 0.55rem var(--space-3);
+}
+
+.agenda-item:hover {
+    background: var(--surface-2);
+    color: var(--text);
+}
+
+.agenda-time {
+    color: var(--text-2);
+    font-variant-numeric: tabular-nums;
+    font-size: 0.875rem;
+}
+
+.agenda-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.agenda-title {
+    font-weight: 550;
+    overflow-wrap: anywhere;
+}
+
+/* Event dialog (native modal <dialog>) */
+
+.ev-dialog {
+    width: min(40rem, calc(100vw - 1.5rem));
+    max-height: calc(100vh - 2rem);
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: var(--shadow);
+}
+
+.ev-dialog::backdrop {
+    background: rgb(15 23 42 / 0.45);
+}
+
+.ev-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: var(--space-4) var(--space-5) var(--space-5);
+}
+
+.ev-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+}
+
+.ev-head h2 {
+    margin: 0;
+}
+
+.ev-fields {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-3);
+    border: 0;
+    padding: 0;
+}
+
+.ev-fields:disabled {
+    opacity: 0.85;
+}
+
+.ev-times {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-3);
+}
+
+.ev-when,
+.ev-scope,
+.ev-repeat,
+.ev-alarms,
+.ev-weekdays {
+    gap: var(--space-2);
+}
+
+input[type="date"],
+input[type="time"],
+input[type="number"] {
+    font: inherit;
+    font-size: 1rem;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 0.45rem 0.6rem;
+    min-height: 2.5rem;
+}
+
+input[type="number"] {
+    width: 6rem;
+}
+
+input[type="date"]:focus,
+input[type="time"]:focus,
+input[type="number"]:focus,
+input[type="radio"]:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--focus);
+}
+
+input[type="radio"] {
+    accent-color: var(--accent);
+    margin: 0;
+}
+
+.ev-repeat-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    width: 100%;
+}
+
+.ev-alarm {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+}
+
+button.small-button {
+    padding: 0.25rem 0.6rem;
+    font-size: 0.8125rem;
+}
+
+.ev-people,
+.ev-files {
+    margin: var(--space-1) 0 var(--space-2);
+    padding-left: 1.2rem;
+}
+
+.ev-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
+}
+
+.ev-actions .push {
+    margin-left: auto;
+}
+
+@media (max-width: 860px) {
+    .cal-layout {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .cal-side {
+        order: 2;
+    }
+
+    .month-cell {
+        min-height: 4.5rem;
+    }
+
+    .chip-time {
+        display: none;
+    }
+
+    .agenda-item {
+        grid-template-columns: 5.5rem auto minmax(0, 1fr);
+    }
+
+    .agenda-cal {
+        display: none;
+    }
+}
+
+@media (max-width: 600px) {
+    .cal-title {
+        font-size: 1.2rem;
+        order: -1;
+        flex-basis: 100%;
+    }
+
+    .cal-new {
+        margin-left: auto;
+    }
+
+    .tgrid {
+        --time-col: 2.6rem;
+    }
+
+    .tgrid.days-7 .tg-wd {
+        display: none;
+    }
+
+    .ev {
+        font-size: 0.7rem;
+        padding: 0.1rem 0.15rem 0.1rem 0.35rem;
+    }
+
+    .ev-times {
+        grid-template-columns: 1fr;
+    }
+
+    .ev-form {
+        padding: var(--space-3) var(--space-4) var(--space-4);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .tg-scroll {
+        scroll-behavior: auto;
+    }
+}
+
 @media (prefers-reduced-motion: reduce) {
     *,
     *::before,

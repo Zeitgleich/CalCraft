@@ -74,8 +74,9 @@ fn pages_round_trip() {
     for page in Page::ALL {
         assert_eq!(Page::from_hash(page.hash()), page);
     }
-    assert_eq!(Page::from_hash(""), Page::Overview);
-    assert_eq!(Page::from_hash("#/nonsense"), Page::Overview);
+    assert_eq!(Page::from_hash(""), Page::Calendar);
+    assert_eq!(Page::from_hash("#/nonsense"), Page::Calendar);
+    assert_eq!(Page::from_hash("#/collections"), Page::Overview);
     assert!(!Page::Admin.visible(false));
     assert!(Page::Admin.visible(true));
 }

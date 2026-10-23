@@ -5,7 +5,7 @@
 
 // Navigation and layout
 pub const NAV_LABEL: &str = "Main navigation";
-pub const NAV_OVERVIEW: &str = "Overview";
+pub const NAV_OVERVIEW: &str = "Calendars & contacts";
 pub const NAV_SETTINGS: &str = "Account";
 pub const NAV_APP_PASSWORDS: &str = "App passwords";
 pub const NAV_TRASH: &str = "Trash";
@@ -363,4 +363,163 @@ pub fn publish_options(busy_only: bool, private: &str, attendees: bool) -> Strin
         }
     }
     text
+}
+
+// Calendar views (UI-2 … UI-4)
+pub const NAV_CALENDAR: &str = "Calendar";
+pub const CAL_PREVIOUS: &str = "Previous";
+pub const CAL_NEXT: &str = "Next";
+pub const CAL_TODAY: &str = "Today";
+pub const CAL_NEW_EVENT: &str = "New event";
+pub const CAL_VIEW_LABEL: &str = "View";
+pub const CAL_VIEW_MONTH: &str = "Month";
+pub const CAL_VIEW_WEEK: &str = "Week";
+pub const CAL_VIEW_DAY: &str = "Day";
+pub const CAL_VIEW_AGENDA: &str = "Agenda";
+pub const CAL_CALENDARS: &str = "Calendars";
+pub const CAL_READ_ONLY: &str = "read-only";
+pub const CAL_SHARED_BY: &str = "shared by";
+pub const CAL_SUBSCRIPTION: &str = "subscription";
+pub const CAL_NO_CALENDARS: &str = "No calendar yet. Create one under “Calendars & contacts”.";
+pub const CAL_NO_EVENTS: &str = "No events in this period.";
+pub const CAL_TRUNCATED: &str = "Not all events could be shown (too many in this period).";
+pub const CAL_ALL_DAY: &str = "All day";
+pub const CAL_MORE: &str = "more";
+pub const CAL_UNTITLED: &str = "(no title)";
+pub const CAL_CANCELLED: &str = "cancelled";
+pub const CAL_REPEATS: &str = "repeats";
+pub const CAL_ZONE_NOTE: &str = "Times in";
+pub const CAL_SHORTCUTS: &str = "Keyboard shortcuts";
+pub const CAL_SHORTCUTS_TEXT: &str = "t today · n new event · m month · w week · d day · a agenda · ←/→ or j/k previous/next period · arrow keys move between days · Enter opens · on a selected event: Shift+arrow keys move it, Alt+↑/↓ change its end, Enter or Delete opens it";
+pub const CAL_MOVED: &str = "Event moved.";
+pub const CAL_CONFLICT: &str = "The event was changed elsewhere in the meantime and has been reloaded. Please check and try again.";
+pub const CAL_DAY_GRID: &str = "Days";
+pub const CAL_TIME_GRID: &str = "Time grid";
+pub const CAL_RESIZE: &str = "Change end";
+
+// Event dialog
+pub const EV_NEW: &str = "New event";
+pub const EV_EDIT: &str = "Edit event";
+pub const EV_VIEW: &str = "Event";
+pub const EV_TITLE: &str = "Title";
+pub const EV_LOCATION: &str = "Location";
+pub const EV_DESCRIPTION: &str = "Description";
+pub const EV_ALL_DAY: &str = "All day";
+pub const EV_START: &str = "Start";
+pub const EV_END: &str = "End";
+pub const EV_TIMEZONE: &str = "Time zone";
+pub const EV_TIMEZONE_HINT: &str =
+    "IANA name such as Europe/Berlin, UTC, or empty for floating time.";
+pub const EV_CALENDAR: &str = "Calendar";
+pub const EV_REPEAT: &str = "Repeat";
+pub const EV_REPEAT_NONE: &str = "Does not repeat";
+pub const EV_REPEAT_DAILY: &str = "Daily";
+pub const EV_REPEAT_WEEKLY: &str = "Weekly";
+pub const EV_REPEAT_MONTHLY: &str = "Monthly";
+pub const EV_REPEAT_YEARLY: &str = "Yearly";
+pub const EV_REPEAT_CUSTOM: &str = "Custom rule (kept as it is)";
+pub const EV_INTERVAL: &str = "Interval";
+pub const EV_ON_DAYS: &str = "On";
+pub const EV_ENDS: &str = "Ends";
+pub const EV_ENDS_NEVER: &str = "Never";
+pub const EV_ENDS_COUNT: &str = "After a number of times";
+pub const EV_ENDS_UNTIL: &str = "On a date";
+pub const EV_COUNT: &str = "Times";
+pub const EV_UNTIL: &str = "Last day";
+pub const EV_REMINDERS: &str = "Reminders";
+pub const EV_ADD_REMINDER: &str = "Add reminder";
+pub const EV_REMOVE_REMINDER: &str = "Remove";
+pub const EV_MINUTES_BEFORE: &str = "Minutes before the start";
+pub const EV_PRIVATE: &str =
+    "Private: people you share this calendar with read-only only see “busy”";
+pub const EV_ORGANIZER: &str = "Organizer";
+pub const EV_ATTENDEES: &str = "Attendees";
+pub const EV_ATTACHMENTS: &str = "Attachments";
+pub const EV_SCOPE_QUESTION: &str = "This is a repeating event. Change";
+pub const EV_SCOPE_ONE: &str = "only this instance";
+pub const EV_SCOPE_ALL: &str = "all instances";
+pub const EV_DELETE_ONE: &str = "Delete this instance";
+pub const EV_DELETE_ALL: &str = "Delete all instances";
+pub const EV_DELETE_CONFIRM: &str = "Really delete? Deleted events go to the trash.";
+pub const EV_MOVE_TO: &str = "Move to calendar";
+pub const EV_CLOSE: &str = "Close";
+pub const EV_READ_ONLY: &str = "This event cannot be changed here: the calendar is read-only, it is a busy block, or a meeting of the calendar's owner.";
+pub const EV_BUSY_NOTE: &str = "Private event: only its time is shared with you.";
+pub const EV_OVERRIDE_NOTE: &str = "This instance differs from the rest of the series.";
+pub const ERR_EV_DATE: &str = "Please enter valid dates (YYYY-MM-DD) and times (HH:MM).";
+pub const ERR_EV_END: &str = "The event must end after it starts.";
+pub const ERR_EV_INTERVAL: &str = "The repeat interval must be a number from 1 to 999.";
+pub const ERR_EV_COUNT: &str = "The number of repetitions must be from 1 to 5000.";
+pub const ERR_EV_UNTIL: &str =
+    "Please enter the last day of the repetition (YYYY-MM-DD), not before the start.";
+pub const ERR_EV_WEEKDAYS: &str = "Please choose at least one weekday.";
+pub const ERR_EV_REMINDER: &str = "Reminders must be 0 to 40320 minutes before the start.";
+pub const ERR_EV_ZONE: &str = "Unknown time zone.";
+pub const ERR_EV_CALENDAR: &str = "Please choose a calendar you can write to.";
+pub const ERR_EV_TOO_LONG: &str = "A text is too long.";
+
+pub const WEEKDAYS_SHORT: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+pub const WEEKDAYS_LONG: [&str; 7] = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+];
+pub const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+pub const MONTHS_SHORT: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// A reminder offset for display: “at start”, “15 minutes before”, …
+pub fn alarm_label(minutes: i64) -> String {
+    let plural = |n: i64, unit: &str| {
+        if n == 1 {
+            format!("1 {unit} before")
+        } else {
+            format!("{n} {unit}s before")
+        }
+    };
+    match minutes {
+        0 => "At start".to_owned(),
+        m if m % (7 * 24 * 60) == 0 => plural(m / (7 * 24 * 60), "week"),
+        m if m % (24 * 60) == 0 => plural(m / (24 * 60), "day"),
+        m if m % 60 == 0 => plural(m / 60, "hour"),
+        m => plural(m, "minute"),
+    }
+}
+
+/// Participation status for display.
+pub fn partstat(status: &str) -> &'static str {
+    match status.to_ascii_uppercase().as_str() {
+        "ACCEPTED" => "accepted",
+        "DECLINED" => "declined",
+        "TENTATIVE" => "tentative",
+        "DELEGATED" => "delegated",
+        _ => "no answer yet",
+    }
+}
+
+/// “every 2 weeks”, “daily”, … for a frequency and interval.
+pub fn every(unit: &str, interval: u32) -> String {
+    if interval <= 1 {
+        format!("every {unit}")
+    } else {
+        format!("every {interval} {unit}s")
+    }
 }

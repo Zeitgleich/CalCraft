@@ -10,6 +10,7 @@ mod account;
 mod admin;
 mod api;
 mod app_passwords;
+mod calendar;
 mod collections;
 mod login;
 mod sharing;
@@ -228,11 +229,12 @@ fn Shell() -> impl IntoView {
                 {t::LOGOUT}
             </button>
         </header>
-        <main>
+        <main class:wide=move || page.get() == Page::Calendar>
             {move || {
                 let shown = page.get();
-                let shown = if shown.visible(is_admin()) { shown } else { Page::Overview };
+                let shown = if shown.visible(is_admin()) { shown } else { Page::Calendar };
                 match shown {
+                    Page::Calendar => view! { <calendar::CalendarPage /> }.into_any(),
                     Page::Overview => view! { <collections::Overview /> }.into_any(),
                     Page::Settings => view! { <account::Settings /> }.into_any(),
                     Page::AppPasswords => view! { <app_passwords::AppPasswords /> }.into_any(),

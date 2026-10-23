@@ -14,6 +14,8 @@ mod paths;
 mod propfind;
 mod props;
 mod report;
+#[cfg(feature = "api")]
+pub(crate) mod rest;
 mod scheduling;
 mod sharing;
 mod sync;

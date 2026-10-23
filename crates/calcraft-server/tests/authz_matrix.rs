@@ -2680,6 +2680,15 @@ mod api_matrix {
         let no_cal = "/api/v1/collections/calendar/zz-missing".to_owned();
         let bob_sub = "/api/v1/subscriptions/zqbobmark-sub".to_owned();
         let no_sub = "/api/v1/subscriptions/zz-missing".to_owned();
+        let bob_events = format!("/api/v1/calendars/{}/events", super::BOB.cal2);
+        let no_events = "/api/v1/calendars/zz-missing/events".to_owned();
+        let bob_event = format!("{bob_events}/{}", super::BOB.event);
+        let no_event = format!("{no_events}/{}", super::BOB.event);
+        let event_input = json!({"fields": {
+            "summary": "zzattack",
+            "start": {"date": "2026-10-21", "time": "10:00", "tzid": "UTC"},
+            "end": {"date": "2026-10-21", "time": "11:00", "tzid": "UTC"}
+        }});
         // Without the feature the routes do not exist (404 for everyone).
         let sub = |method, route, alice| {
             if cfg!(feature = "subscriptions") {
@@ -2778,6 +2787,36 @@ mod api_matrix {
             sub("post", "/v1/subscriptions/{slug}/refresh", 404)
                 .uri(format!("{bob_sub}/refresh"), format!("{no_sub}/refresh")),
             sub("delete", "/v1/subscriptions/{slug}", 404).uri(bob_sub, no_sub),
+            // The web UI's calendar views: calendars are resolved in alice's
+            // own home, so bob's calendar slugs are unknown to her
+            // (`api_events_on_shares` covers what bob shares with her).
+            case("get", "/v1/calendars", 200).identity(),
+            case("get", "/v1/events", 404).uri(
+                format!(
+                    "/api/v1/events?start=0&end=86400&calendar={}",
+                    super::BOB.cal2
+                ),
+                "/api/v1/events?start=0&end=86400&calendar=zz-missing".to_owned(),
+            ),
+            case("post", "/v1/calendars/{slug}/events", 404)
+                .uri(bob_events, no_events)
+                .body(event_input.clone()),
+            case("get", "/v1/calendars/{slug}/events/{name}", 404)
+                .uri(bob_event.clone(), no_event.clone()),
+            case("put", "/v1/calendars/{slug}/events/{name}", 404)
+                .uri(bob_event.clone(), no_event.clone())
+                .body(event_input),
+            case("patch", "/v1/calendars/{slug}/events/{name}", 404)
+                .uri(bob_event.clone(), no_event.clone())
+                .body(json!({"start": 0, "end": 3600})),
+            case("post", "/v1/calendars/{slug}/events/{name}/move", 404)
+                .uri(format!("{bob_event}/move"), format!("{no_event}/move"))
+                .body(json!({"calendar": "default"})),
+            case("delete", "/v1/calendars/{slug}/events/{name}", 404).uri(bob_event, no_event),
+            case("get", "/v1/attachments/{id}", 404).uri(
+                format!("/api/v1/attachments/{}", super::BOB_ATTACHMENT),
+                format!("/api/v1/attachments/{}", super::MISSING_ATTACHMENT),
+            ),
             // Alice sees only her own trash; bob's entry ids are unknown to her.
             case("get", "/v1/trash", 200),
             case("post", "/v1/trash/{id}/restore", 404).uri(
@@ -3074,5 +3113,160 @@ mod api_matrix {
         assert!(me.body.contains("\"bob\""));
         fx.assert_bob_unchanged("the API matrix").await;
         println!("authz matrix api: {requests} requests, {assertions} assertions");
+    }
+
+    /// The event API on what bob shares with alice: reads show only what
+    /// the share grants (private events of the read-only share are busy
+    /// blocks), the read-only share refuses every change, the read-write
+    /// share needs the current ETag.
+    #[tokio::test]
+    async fn api_events_on_shares() {
+        use calcraft_core::CollectionKind;
+
+        let mut fx = fixture().await;
+        let ro = super::shared_collection(
+            &fx.store,
+            &fx.bob,
+            CollectionKind::Calendar,
+            super::SHARE_RO,
+        )
+        .await;
+        super::put_seed(
+            &fx.store,
+            &ro,
+            super::SHARED_PREFIX,
+            "private.ics",
+            &super::event_with(
+                "@UID@",
+                "zqbobmark-private-summary",
+                "CLASS:PRIVATE\r\nLOCATION:zqbobmark-private-location\r\n",
+            ),
+        )
+        .await;
+        fx.bob_snapshot = snapshot(&fx.store, &fx.bob, &fx.bob_session).await;
+        let fx = fx;
+        let alice = fx.alice_session.clone();
+
+        let (request, reply) =
+            call(&fx, "get", "/api/v1/calendars", Some(&alice), true, None).await;
+        assert_eq!(reply.status, 200);
+        fx.assert_no_leak_but(&request, &reply, "calendars", &super::SHARED_IDENTITY);
+        let calendars: Value = serde_json::from_str(&reply.body).unwrap();
+        let ro_view = calendars
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["slug"] == "bob-share-ro")
+            .unwrap();
+        assert_eq!(ro_view["writable"], false);
+        assert_eq!(ro_view["private_hidden"], true);
+
+        // 2026-10-20/22 around the seeded events (2026-10-21 10:00 UTC).
+        let (request, reply) = call(
+            &fx,
+            "get",
+            "/api/v1/events?start=1792454400&end=1792627200",
+            Some(&alice),
+            true,
+            None,
+        )
+        .await;
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        fx.assert_no_leak(&request, &reply, "events listing");
+        assert!(
+            reply.body.contains("bobshared-summary-ro"),
+            "{}",
+            reply.body
+        );
+        assert!(reply.body.contains("\"busy\":true"), "{}", reply.body);
+
+        let ro_private = "/api/v1/calendars/bob-share-ro/events/private.ics".to_owned();
+        let (request, reply) = call(&fx, "get", &ro_private, Some(&alice), true, None).await;
+        assert_eq!(reply.status, 200);
+        fx.assert_no_leak(&request, &reply, "private event");
+        let ro_event = format!(
+            "/api/v1/calendars/bob-share-ro/events/{}",
+            super::SHARED_EVENT
+        );
+        let (request, reply) = call(&fx, "get", &ro_event, Some(&alice), true, None).await;
+        assert_eq!(reply.status, 200);
+        fx.assert_no_leak(&request, &reply, "shared event");
+        let etag = serde_json::from_str::<Value>(&reply.body).unwrap()["etag"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let input: Payload = json!({"fields": {
+            "summary": "zzattack",
+            "start": {"date": "2026-10-21", "time": "10:00", "tzid": "UTC"},
+            "end": {"date": "2026-10-21", "time": "11:00", "tzid": "UTC"}
+        }})
+        .into();
+        let times: Payload = json!({"start": 0, "end": 3600}).into();
+        let target: Payload = json!({"calendar": "default"}).into();
+        for (method, uri, body) in [
+            ("PUT", ro_event.clone(), Some(&input)),
+            ("PATCH", ro_event.clone(), Some(&times)),
+            ("DELETE", ro_event.clone(), None),
+            ("POST", format!("{ro_event}/move"), Some(&target)),
+            ("PUT", ro_private.clone(), Some(&input)),
+            ("DELETE", ro_private.clone(), None),
+            (
+                "POST",
+                "/api/v1/calendars/bob-share-ro/events".to_owned(),
+                Some(&input),
+            ),
+        ] {
+            let reply = with_etag(&fx, &alice, method, &uri, &etag, body).await;
+            assert_eq!(reply.status, 403, "{method} {uri}: {}", reply.body);
+            fx.assert_no_leak(&uri, &reply, &uri);
+            fx.assert_bob_unchanged(&format!("{method} {uri}")).await;
+        }
+
+        // Read-write: a stale ETag changes nothing, the current one works.
+        let rw_event = format!(
+            "/api/v1/calendars/bob-share-rw/events/{}",
+            super::SHARED_EVENT
+        );
+        let reply = with_etag(&fx, &alice, "PUT", &rw_event, "\"stale\"", Some(&input)).await;
+        assert_eq!(reply.status, 412, "{}", reply.body);
+        fx.assert_bob_unchanged("stale ETag").await;
+        let rw_etag = "\"bobshared-etag-shared-ev.ics\"";
+        // Moving into alice's own calendar would hand bob's object to her.
+        let reply = with_etag(
+            &fx,
+            &alice,
+            "POST",
+            &format!("{rw_event}/move"),
+            rw_etag,
+            Some(&target),
+        )
+        .await;
+        assert_eq!(reply.status, 400, "{}", reply.body);
+        fx.assert_bob_unchanged("move to another owner").await;
+        let reply = with_etag(&fx, &alice, "PUT", &rw_event, rw_etag, Some(&input)).await;
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        super::reset_shares(&fx.store, &fx.alice, &fx.bob).await;
+    }
+
+    /// A change request with `If-Match`, as alice.
+    async fn with_etag(
+        fx: &Fixture,
+        session: &str,
+        method: &str,
+        uri: &str,
+        etag: &str,
+        body: Option<&Payload>,
+    ) -> Reply {
+        let mut headers = vec![
+            (CSRF_HEADER.to_owned(), "1".to_owned()),
+            ("cookie".to_owned(), format!("calcraft_session={session}")),
+            ("if-match".to_owned(), etag.to_owned()),
+        ];
+        if let Some(body) = body {
+            headers.push(("content-type".to_owned(), body.content_type.to_owned()));
+        }
+        let text = body.map(|b| b.text.as_str()).unwrap_or_default();
+        send(&fx.app, method, uri, &headers, text).await
     }
 }

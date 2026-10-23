@@ -29,6 +29,8 @@ The optional web UI, shown with fictional demo data:
 
 | | |
 |---|---|
+| ![Month view](docs/screenshots/calendar-month.png)<br>Month view of own, shared (read-only) and private (busy) events | ![Week view](docs/screenshots/calendar-week.png)<br>Week view: time grid, overlapping events side by side, current time |
+| ![Event dialog](docs/screenshots/calendar-dialog.png)<br>Event dialog: time zone, repeat rule, reminders, attendees | ![Agenda on a phone in dark mode](docs/screenshots/calendar-agenda-mobile-dark.png)<br>Agenda on a phone, dark mode |
 | ![Calendars and address books overview](docs/screenshots/collections.png)<br>Calendars and address books with their DAV URLs | ![Overview in dark mode](docs/screenshots/collections-dark.png)<br>Dark mode follows the system setting |
 | ![Login page](docs/screenshots/login.png)<br>Login with username and password | ![Login page with single sign-on button](docs/screenshots/login-sso.png)<br>Login with single sign-on (OpenID Connect) enabled |
 | ![Account settings](docs/screenshots/account.png)<br>Account: password and two-factor authentication | ![App passwords](docs/screenshots/app-passwords.png)<br>One app password per device, revocable individually |
@@ -69,8 +71,31 @@ Without these assets the server still builds but shows a placeholder page on `/`
 set `CALCRAFT_UI_REQUIRED=1` to make missing assets a build error. No npm or other
 JavaScript tooling is needed.
 
-The UI covers login (with two-factor codes), calendars and address books, account
-settings (password, TOTP), app passwords and user administration. Disable it at
+The UI covers login (with two-factor codes), the calendar, calendars and address
+books, account settings (password, TOTP), app passwords and user administration.
+
+The calendar (start page) shows all own calendars, subscriptions and accepted
+shares in month, week, day and agenda views, in the browser's time zone, with
+each calendar shown or hidden from the sidebar. Events are created, changed and
+deleted in a dialog (title, all day, start and end with time zone, location,
+description, calendar, a daily/weekly/monthly/yearly repeat rule with interval,
+count or end date and weekdays, display reminders, private flag); attendees and
+managed attachments (download links) are shown. For a repeating event the dialog
+changes either the one instance (an override) or the whole series; deleting one
+instance excludes it. Drag and drop moves events (also between days in the month
+view and in the all-day row), the lower edge changes their end; it works with
+mouse, pen and touch. Keyboard: `t` today, `n` new event, `m`/`w`/`d`/`a` views,
+`j`/`k` or Page Up/Down previous/next period, arrow keys between days, Enter
+opens; on an event Shift+arrow keys move it and Alt+↑/↓ change its end. The
+dialog is a native modal dialog (focus stays inside, Escape closes, focus
+returns). Read-only shares, subscriptions and private events of read-only
+shares (busy blocks) cannot be changed. Every change carries the event's ETag:
+if it was changed elsewhere in the meantime, the UI says so and reloads.
+
+All of this goes through `/api/v1/calendars` and `/api/v1/events`, which run
+every change through the same code as a DAV `PUT`, `DELETE` or `MOVE`
+(validation, sharing rights, scheduling messages, quota, trash, attachments);
+see `/api/openapi.json`. Disable it at
 runtime with `web_ui.enabled = false` or `calcraft serve --no-web-ui`.
 Logo, icons and colours: [docs/brand.md](docs/brand.md).
 
