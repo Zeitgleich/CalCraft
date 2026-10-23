@@ -39,6 +39,7 @@ pub fn Settings() -> impl IntoView {
             </dl>
         </section>
         <Invitations />
+        <super::reminders::Reminders />
         <PasswordForm />
         <TwoFactor />
     }

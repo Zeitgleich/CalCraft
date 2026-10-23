@@ -225,6 +225,53 @@ enabled = false
 max_bytes = 8388608
 max_objects = 10000
 
+[smtp]
+# Outgoing e-mail, used by [reminders]. Off by default. See docs/reminders.md.
+enabled = false
+# Mail server; its TLS certificate must be valid for this name.
+# host = "smtp.example.org"
+# "starttls" (port 587, refused if the server does not offer STARTTLS),
+# "implicit" (TLS from the start, port 465) or "none" (INSECURE: only for a
+# relay on this host - localhost, 127.0.0.1, ::1 - and without username).
+tls = "starttls"
+# port = 587
+# AUTH PLAIN/LOGIN, only over TLS. The password is read from the first line of
+# password_file, which must be a regular file readable only by its owner
+# (chmod 600); it cannot be set here or in the environment.
+# username = "calcraft@example.org"
+# password_file = "/etc/calcraft/smtp-password"
+# Sender address (From: and envelope) and display name.
+# from = "calcraft@example.org"
+from_name = "CalCraft"
+# Name sent with EHLO; default: the domain of from.
+# helo_name = "cal.example.org"
+# Additional trusted CA certificates (PEM); the system trust store is always used.
+# ca_file = "/etc/calcraft/smtp-ca.pem"
+# Deadline of every step (connect, TLS, each command) in seconds (5-300).
+timeout_secs = 30
+# Mails per minute of the whole server (1-10000).
+max_per_minute = 60
+
+[reminders]
+# E-mail for alarms (VALARM) in the users' own calendars, sent only to the
+# owner's own address (set by an administrator, or <user>@<scheduling.domain>),
+# never to attendees. Needs [smtp]. Off by default. See docs/reminders.md.
+enabled = false
+# For users who did not choose: "email" (only alarms with ACTION:EMAIL),
+# "all" (also the display and sound alarms most apps create) or "off".
+default_mode = "email"
+# Mails per user per hour (1-1000) and per day (up to 10000); beyond, reminders
+# are not sent (and shown as such to the user).
+max_per_user_per_hour = 50
+max_per_user_per_day = 500
+# Pending mails of all users together (100-1000000).
+max_queue = 10000
+# Alarms missed by more minutes than this (server down, mail server
+# unreachable) are not sent any more (1-1440).
+max_late_minutes = 30
+# Scheme and host of the web UI for a link in the mails (optional).
+# base_url = "https://cal.example.org"
+
 [logging]
 # Filter syntax of tracing-subscriber; RUST_LOG takes precedence.
 level = "info"

@@ -261,6 +261,45 @@ pub const ACCEPT_INVITATIONS: &str =
     "Other users of this server may invite me and see when I am busy";
 pub const INVITATIONS_HINT: &str = "Off: their invitations are not delivered and free/busy lookups are refused, as if this account did not exist.";
 pub const SCHEDULING_ADDRESSES: &str = "Calendar addresses";
+pub const REMINDERS: &str = "E-mail reminders";
+pub const REMINDERS_TO: &str = "Reminders are sent to";
+pub const REMINDERS_NO_ADDRESS: &str = "No e-mail address is set for your account, so no reminders can be sent. Ask an administrator to set one.";
+pub const REMINDER_MODE: &str = "Send an e-mail for";
+pub const REMINDER_MODE_OFF: &str = "No alarms (off)";
+pub const REMINDER_MODE_EMAIL: &str = "E-mail alarms only";
+pub const REMINDER_MODE_ALL: &str = "All alarms (also pop-up and sound alarms)";
+pub const REMINDER_MODE_DEFAULT: &str = "Server default";
+pub const REMINDER_DESCRIPTION: &str = "Include the event's description";
+pub const REMINDERS_HINT: &str = "Reminders go only to your own address, never to the attendees of an event. Alarms of subscribed calendars are not sent. Most apps create pop-up alarms: choose “All alarms” to get those by e-mail too.";
+pub const REMINDER_TEST: &str = "Send a test e-mail";
+pub const REMINDER_TEST_SENT: &str = "Test e-mail queued; it should arrive in a minute.";
+pub const REMINDER_TEST_DROPPED: &str =
+    "Not sent: the limit of e-mails per hour or day is reached.";
+pub const REMINDER_LAST_PROBLEM: &str = "Last problem";
+pub const REMINDER_QUEUE: &str = "Reminder e-mails";
+pub const REMINDER_SCHEDULED: &str = "Events and tasks with upcoming alarms";
+pub const REMINDER_LAST_SUCCESS: &str = "Last delivery";
+pub const REMINDER_LAST_SMTP_ERROR: &str = "Last mail server problem";
+
+/// "Last 7 days: 3 sent, 1 pending, …".
+pub fn reminder_counts(period: &str, sent: i64, pending: i64, failed: i64, dropped: i64) -> String {
+    format!("{period}: {sent} sent, {pending} waiting, {failed} failed, {dropped} not sent (limit)")
+}
+
+/// Text for a mail error code of the server.
+pub fn mail_error(code: &str) -> &'static str {
+    match code {
+        "smtp_unavailable" => "the mail server could not be reached (will be retried)",
+        "smtp_rejected" => "the mail server refused the message",
+        "smtp_tls" => "the secure connection to the mail server failed",
+        "smtp_auth" => "the server could not log in to the mail server",
+        "limit" => "too many reminders in a short time",
+        "queue_full" => "the server's mail queue is full",
+        "expired" => "the reminder could not be delivered in time",
+        "deleted" => "the event was deleted",
+        _ => "the message could not be sent",
+    }
+}
 pub const EMAIL_HINT: &str = "Optional. Used as the calendar address for invitations between users of this server ([scheduling] in the configuration).";
 pub const SET_EMAIL: &str = "E-mail…";
 

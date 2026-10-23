@@ -38,6 +38,8 @@ pub struct Config {
     pub attachments: AttachmentsConfig,
     pub sharing: SharingConfig,
     pub publish: PublishConfig,
+    pub smtp: SmtpConfig,
+    pub reminders: RemindersConfig,
     pub logging: LoggingConfig,
 }
 
@@ -971,6 +973,319 @@ impl PublishConfig {
     }
 }
 
+/// How the SMTP connection is secured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SmtpTls {
+    /// Plain connection upgraded with `STARTTLS` (port 587); refused if the
+    /// server does not offer it.
+    Starttls,
+    /// TLS from the first byte ("SMTPS", port 465).
+    Implicit,
+    /// **Insecure**: no TLS at all. Only for a relay on the same host
+    /// (`host = "localhost"`, `127.0.0.1` or `::1`) and without
+    /// authentication.
+    None,
+}
+
+/// Bounds of `smtp.timeout_secs`.
+pub const SMTP_TIMEOUT_SECS: std::ops::RangeInclusive<u64> = 5..=300;
+/// Bounds of `smtp.max_per_minute`.
+pub const SMTP_PER_MINUTE: std::ops::RangeInclusive<u32> = 1..=10_000;
+/// Longest SMTP user name.
+pub const MAX_SMTP_USERNAME: usize = 256;
+/// Longest sender display name in characters.
+pub const MAX_FROM_NAME: usize = 64;
+
+/// Outgoing e-mail over SMTP (docs/reminders.md). Off by default. The
+/// password is only read from `password_file` (never from this file or
+/// the environment), so it does not end up in configuration dumps,
+/// process environments or container metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SmtpConfig {
+    pub enabled: bool,
+    /// Host name (or IP address) of the mail server; the TLS certificate
+    /// must be valid for it.
+    pub host: String,
+    /// Default: 587 (`starttls`), 465 (`implicit`), 25 (`none`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    pub tls: SmtpTls,
+    /// User for `AUTH PLAIN`/`AUTH LOGIN` (only ever sent over TLS); unset:
+    /// no authentication.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// File with the password in its first line; must be a regular file
+    /// readable only by its owner (`chmod 600`). Required with `username`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password_file: Option<PathBuf>,
+    /// Sender address (`From:` and envelope sender).
+    pub from: String,
+    /// Display name of the sender.
+    pub from_name: String,
+    /// Name sent with `EHLO`; default: the domain of `from`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub helo_name: Option<String>,
+    /// Additional trusted CA certificates (PEM), e.g. of an internal relay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ca_file: Option<PathBuf>,
+    /// Deadline of every single step (connect, TLS handshake, each command).
+    pub timeout_secs: u64,
+    /// Mails sent per minute by the whole server.
+    pub max_per_minute: u32,
+}
+
+impl Default for SmtpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: String::new(),
+            port: None,
+            tls: SmtpTls::Starttls,
+            username: None,
+            password_file: None,
+            from: String::new(),
+            from_name: "CalCraft".to_owned(),
+            helo_name: None,
+            ca_file: None,
+            timeout_secs: 30,
+            max_per_minute: 60,
+        }
+    }
+}
+
+/// Whether `host` names this machine (allowed with `tls = "none"`).
+pub fn is_loopback_host(host: &str) -> bool {
+    host == "localhost"
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+impl SmtpConfig {
+    pub fn effective_port(&self) -> u16 {
+        self.port.unwrap_or(match self.tls {
+            SmtpTls::Starttls => 587,
+            SmtpTls::Implicit => 465,
+            SmtpTls::None => 25,
+        })
+    }
+
+    /// The validated sender address.
+    pub fn from_address(&self) -> Option<String> {
+        calcraft_core::mail::normalize_address(self.from.trim())
+    }
+
+    /// The name sent with `EHLO`.
+    pub fn helo(&self) -> String {
+        self.helo_name.clone().unwrap_or_else(|| {
+            self.from_address()
+                .and_then(|from| from.rsplit_once('@').map(|(_, domain)| domain.to_owned()))
+                .unwrap_or_else(|| "localhost".to_owned())
+        })
+    }
+
+    pub fn timeout(&self) -> Duration {
+        Duration::from_secs(self.timeout_secs)
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !SMTP_TIMEOUT_SECS.contains(&self.timeout_secs) {
+            return Err(ConfigError::Invalid(
+                "smtp.timeout_secs must be between 5 and 300",
+            ));
+        }
+        if !SMTP_PER_MINUTE.contains(&self.max_per_minute) {
+            return Err(ConfigError::Invalid(
+                "smtp.max_per_minute must be between 1 and 10000",
+            ));
+        }
+        if self.port == Some(0) {
+            return Err(ConfigError::Invalid("smtp.port must not be 0"));
+        }
+        if self.from_name.chars().count() > MAX_FROM_NAME
+            || self.from_name.chars().any(char::is_control)
+        {
+            return Err(ConfigError::Invalid(
+                "smtp.from_name: at most 64 characters, no control characters",
+            ));
+        }
+        if let Some(name) = &self.username
+            && (name.is_empty()
+                || name.len() > MAX_SMTP_USERNAME
+                || name.chars().any(char::is_control))
+        {
+            return Err(ConfigError::Invalid(
+                "smtp.username: 1 to 256 bytes, no control characters",
+            ));
+        }
+        match (&self.username, &self.password_file) {
+            (Some(_), None) => {
+                return Err(ConfigError::Invalid(
+                    "smtp.password_file is required with smtp.username",
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(ConfigError::Invalid(
+                    "smtp.password_file is only used with smtp.username",
+                ));
+            }
+            _ => {}
+        }
+        if let Some(helo) = &self.helo_name
+            && !valid_host_pattern(helo)
+        {
+            return Err(ConfigError::Invalid(
+                "smtp.helo_name must be a lower-case host name",
+            ));
+        }
+        if !self.from.is_empty() && self.from_address().is_none() {
+            return Err(ConfigError::Invalid(
+                "smtp.from must be a plain ASCII e-mail address like calcraft@example.org",
+            ));
+        }
+        let host_ok = (valid_host_pattern(&self.host) && !self.host.starts_with(['*', '.']))
+            || self.host.parse::<std::net::IpAddr>().is_ok();
+        if !self.host.is_empty() && !host_ok {
+            return Err(ConfigError::Invalid(
+                "smtp.host must be a lower-case host name or an IP address",
+            ));
+        }
+        if self.tls == SmtpTls::None && !self.host.is_empty() {
+            if !is_loopback_host(&self.host) {
+                return Err(ConfigError::Invalid(
+                    "smtp.tls = \"none\" is only allowed for a relay on this host \
+                     (localhost, 127.0.0.1 or ::1)",
+                ));
+            }
+            if self.username.is_some() {
+                return Err(ConfigError::Invalid(
+                    "smtp.tls = \"none\" cannot be used with smtp.username (no passwords over plain connections)",
+                ));
+            }
+        }
+        if self.enabled {
+            if self.host.is_empty() {
+                return Err(ConfigError::Invalid(
+                    "smtp.host is required when smtp is enabled",
+                ));
+            }
+            if self.from.is_empty() {
+                return Err(ConfigError::Invalid(
+                    "smtp.from is required when smtp is enabled",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Which alarms send reminder e-mails, as the server default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReminderDefault {
+    Off,
+    /// Alarms with `ACTION:EMAIL` only.
+    Email,
+    /// All alarms (`EMAIL`, `DISPLAY`, `AUDIO`).
+    All,
+}
+
+/// Bounds of `reminders.max_per_user_per_hour`.
+pub const REMINDERS_PER_HOUR: std::ops::RangeInclusive<u32> = 1..=1000;
+/// Upper bound of `reminders.max_per_user_per_day`.
+pub const MAX_REMINDERS_PER_DAY: u32 = 10_000;
+/// Bounds of `reminders.max_queue`.
+pub const REMINDER_QUEUE: std::ops::RangeInclusive<u32> = 100..=1_000_000;
+/// Bounds of `reminders.max_late_minutes`.
+pub const REMINDER_LATE_MINUTES: std::ops::RangeInclusive<u32> = 1..=1440;
+
+/// E-mail reminders for alarms in the users' calendars (docs/reminders.md).
+/// Off by default; needs `[smtp]`. Mails only ever go to the calendar
+/// owner's own address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RemindersConfig {
+    pub enabled: bool,
+    /// For users who did not choose: `email` (alarms with `ACTION:EMAIL`
+    /// only), `all` (also the display and sound alarms most clients create)
+    /// or `off`.
+    pub default_mode: ReminderDefault,
+    /// Mails per user and hour; further reminders are dropped (and shown as
+    /// such to the user).
+    pub max_per_user_per_hour: u32,
+    /// Mails per user and day (at least the hourly limit).
+    pub max_per_user_per_day: u32,
+    /// Pending mails of all users together.
+    pub max_queue: u32,
+    /// Alarms missed by more than this (server down, queue busy) are not
+    /// sent any more.
+    pub max_late_minutes: u32,
+    /// Scheme and host of the web UI, e.g. `https://cal.example.org`, for a
+    /// link in the mails; unset: no link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+}
+
+impl Default for RemindersConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_mode: ReminderDefault::Email,
+            max_per_user_per_hour: 50,
+            max_per_user_per_day: 500,
+            max_queue: 10_000,
+            max_late_minutes: 30,
+            base_url: None,
+        }
+    }
+}
+
+impl RemindersConfig {
+    /// `base_url` without a trailing slash.
+    pub fn base(&self) -> Option<&str> {
+        self.base_url
+            .as_deref()
+            .map(|url| url.strip_suffix('/').unwrap_or(url))
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !REMINDERS_PER_HOUR.contains(&self.max_per_user_per_hour) {
+            return Err(ConfigError::Invalid(
+                "reminders.max_per_user_per_hour must be between 1 and 1000",
+            ));
+        }
+        if self.max_per_user_per_day < self.max_per_user_per_hour
+            || self.max_per_user_per_day > MAX_REMINDERS_PER_DAY
+        {
+            return Err(ConfigError::Invalid(
+                "reminders.max_per_user_per_day must be between max_per_user_per_hour and 10000",
+            ));
+        }
+        if !REMINDER_QUEUE.contains(&self.max_queue) {
+            return Err(ConfigError::Invalid(
+                "reminders.max_queue must be between 100 and 1000000",
+            ));
+        }
+        if !REMINDER_LATE_MINUTES.contains(&self.max_late_minutes) {
+            return Err(ConfigError::Invalid(
+                "reminders.max_late_minutes must be between 1 and 1440",
+            ));
+        }
+        if let Some(url) = &self.base_url
+            && !valid_base_url(url)
+        {
+            return Err(ConfigError::Invalid(
+                "reminders.base_url: use scheme and host only, like https://cal.example.org",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
@@ -1121,6 +1436,13 @@ impl Config {
         self.scheduling.validate()?;
         self.attachments.validate()?;
         self.publish.validate()?;
+        self.smtp.validate()?;
+        self.reminders.validate()?;
+        if self.reminders.enabled && !self.smtp.enabled {
+            return Err(ConfigError::Invalid(
+                "reminders.enabled = true requires [smtp] enabled = true",
+            ));
+        }
         self.oidc.validate()
     }
 }

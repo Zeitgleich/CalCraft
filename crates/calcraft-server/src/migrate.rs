@@ -23,8 +23,8 @@ mod remote;
 
 use std::{
     collections::{HashMap, HashSet},
-    io::{Read, Write},
-    path::{Path, PathBuf},
+    io::Write,
+    path::PathBuf,
     time::Duration,
 };
 
@@ -34,14 +34,13 @@ use calcraft_core::{CollectionKind, Slug, Username, api::ImportReport};
 use calcraft_dav::xml::{NS_APPLE_ICAL, NS_CALDAV, NS_CALENDARSERVER, NS_CARDDAV, NS_DAV};
 use calcraft_ical::{ComponentKind, MAX_OBJECT_SIZE};
 use calcraft_store::{Collection, MAX_ITEMS_PER_COLLECTION, Store, StoreError};
-use zeroize::Zeroizing;
 
+pub use crate::password_file::{Password, read_password_file};
 use crate::{
     https::{HttpClient, Limits},
     transfer::{OnConflict, Writer, prepare_fetched, printable},
     validate::{MAX_DESCRIPTION, MAX_DISPLAY_NAME, clean_color, clean_text},
 };
-pub use remote::Password;
 use remote::{Entry, Remote, RemoteError, path_key, percent_decode, redact_url};
 
 /// Default cap for one response (listings and multiget batches).
@@ -51,8 +50,6 @@ pub const MAX_RESPONSE_LIMIT: usize = 256 * 1024 * 1024;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 pub const DEFAULT_BATCH: usize = 50;
 pub const MAX_BATCH: usize = 500;
-/// Largest accepted password file.
-const MAX_PASSWORD_FILE: u64 = 4096;
 const NS_OWNCLOUD: &str = "http://owncloud.org/ns";
 
 const PRINCIPAL_PROPS: &str = concat!(
@@ -219,64 +216,6 @@ impl Summary {
         }
         Ok(())
     }
-}
-
-/// Checks that a password file is a regular file (no symlink, FIFO or
-/// device), small, and on Unix accessible only by its owner.
-fn check_password_file(path: &Path, metadata: &std::fs::Metadata) -> anyhow::Result<()> {
-    if !metadata.file_type().is_file() || metadata.len() > MAX_PASSWORD_FILE {
-        bail!(
-            "password file {} must be a regular file (not a link or device) of at most \
-             {MAX_PASSWORD_FILE} bytes",
-            path.display()
-        );
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            bail!(
-                "password file {} is accessible by group or others (run chmod 600)",
-                path.display()
-            );
-        }
-    }
-    Ok(())
-}
-
-/// Reads a password from the first line of a file that only its owner can
-/// read. The path is checked without following links before it is opened,
-/// and the opened file is checked again (and on Unix must be the same file).
-pub fn read_password_file(path: &Path) -> anyhow::Result<Password> {
-    let before = std::fs::symlink_metadata(path)
-        .with_context(|| format!("failed to read password file {}", path.display()))?;
-    check_password_file(path, &before)?;
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("failed to open password file {}", path.display()))?;
-    let opened = file.metadata()?;
-    check_password_file(path, &opened)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if (before.dev(), before.ino()) != (opened.dev(), opened.ino()) {
-            bail!(
-                "password file {} was replaced while reading it",
-                path.display()
-            );
-        }
-    }
-    // Allocated once with room for the whole file, so no copy of the
-    // password is left behind by reallocation.
-    let capacity = usize::try_from(MAX_PASSWORD_FILE).unwrap_or(4096) + 1;
-    let mut text = Zeroizing::new(String::with_capacity(capacity));
-    file.take(MAX_PASSWORD_FILE)
-        .read_to_string(&mut text)
-        .context("password file is not UTF-8")?;
-    let password = text.lines().next().unwrap_or_default();
-    if password.is_empty() {
-        bail!("password file {} is empty", path.display());
-    }
-    Ok(Password::new(password))
 }
 
 /// A calendar or address book found on the source server.

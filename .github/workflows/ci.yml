@@ -43,6 +43,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features
       - name: Clippy (DAV only)
         run: cargo clippy -p calcraft-server --all-targets --no-default-features
+      - name: Clippy (DAV with e-mail reminders only)
+        run: cargo clippy -p calcraft-server --all-targets --no-default-features --features smtp
       - name: Test (all features)
         run: cargo test --workspace --all-features
       - name: Test (DAV only)
@@ -210,7 +212,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for target in ical_object dav_xml recurrence import itip attach; do
+          for target in ical_object dav_xml recurrence import itip attach mail; do
             # Checked-in seeds (fuzz/seeds/<target>) start the corpus.
             mkdir -p "fuzz/corpus/$target"
             if [ -d "fuzz/seeds/$target" ]; then cp fuzz/seeds/"$target"/* "fuzz/corpus/$target/"; fi

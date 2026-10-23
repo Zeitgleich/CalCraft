@@ -3,6 +3,7 @@
 //! This crate must stay free of I/O so it can be compiled for `wasm32`.
 
 pub mod api;
+pub mod mail;
 mod names;
 
 pub use names::{CollectionKind, InvalidName, Slug, Username};

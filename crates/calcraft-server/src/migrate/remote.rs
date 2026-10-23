@@ -21,25 +21,7 @@ use crate::{
     transfer::printable,
 };
 
-/// The source password: wiped from memory when dropped, never printed.
-#[derive(Clone)]
-pub struct Password(Zeroizing<String>);
-
-impl Password {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(Zeroizing::new(value.into()))
-    }
-
-    pub fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for Password {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("<redacted>")
-    }
-}
+pub use crate::password_file::Password;
 
 /// A URL for messages: without user info, query and fragment, printable.
 pub fn redact_url(text: &str) -> String {

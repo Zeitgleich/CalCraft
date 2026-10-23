@@ -1,6 +1,8 @@
 mod backup_cmd;
 #[cfg(feature = "migrate")]
 mod migrate_cmd;
+#[cfg(feature = "smtp")]
+mod smtp_cmd;
 mod transfer_cmd;
 mod users;
 
@@ -8,8 +10,8 @@ use std::{net::SocketAddr, path::PathBuf, process::ExitCode};
 
 use anyhow::Context;
 use calcraft_server::{
-    API_COMPILED, AppState, Config, OIDC_COMPILED, SUBSCRIPTIONS_COMPILED, UPDATE_CHECK_COMPILED,
-    WEB_UI_COMPILED, sd_notify, telemetry,
+    API_COMPILED, AppState, Config, OIDC_COMPILED, SMTP_COMPILED, SUBSCRIPTIONS_COMPILED,
+    UPDATE_CHECK_COMPILED, WEB_UI_COMPILED, sd_notify, telemetry,
 };
 use calcraft_store::Store;
 use clap::{Args, Parser, Subcommand};
@@ -67,6 +69,14 @@ enum Command {
         config: ConfigArgs,
         #[command(flatten)]
         args: migrate_cmd::MigrateArgs,
+    },
+    /// Check the outgoing mail settings (`[smtp]`).
+    #[cfg(feature = "smtp")]
+    Smtp {
+        #[command(flatten)]
+        config: ConfigArgs,
+        #[command(subcommand)]
+        command: smtp_cmd::SmtpCommand,
     },
 }
 
@@ -178,6 +188,15 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 migrate_cmd::run(&store, args, config.max_vcard_bytes()).await
             })
         }
+        #[cfg(feature = "smtp")]
+        Command::Smtp { config, command } => {
+            let config = Config::load(config.config.as_deref())?;
+            telemetry::init_cli(&config.logging)?;
+            runtime()?.block_on(async {
+                let store = open_store(&config).await?;
+                smtp_cmd::run(&store, &config, command).await
+            })
+        }
     }
 }
 
@@ -250,6 +269,17 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         );
     }
 
+    if (config.smtp.enabled || config.reminders.enabled) && !SMTP_COMPILED {
+        tracing::warn!(
+            "outgoing mail (smtp, reminders) is enabled in the configuration but not compiled into this binary"
+        );
+    }
+    if config.smtp.enabled && !config.reminders.enabled {
+        tracing::info!(
+            "[smtp] is configured, but nothing uses it yet ([reminders] enabled = false)"
+        );
+    }
+
     if !config.security.password_login && !(OIDC_COMPILED && config.api.enabled) {
         anyhow::bail!(
             "security.password_login = false needs single sign-on, but OIDC is not compiled in or the API is disabled"
@@ -291,6 +321,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         subscriptions.spawn();
         state.subscriptions = Some(subscriptions);
     }
+    #[cfg(feature = "smtp")]
+    if config.reminders.enabled {
+        let reminders = calcraft_server::reminders::Reminders::new(state.store.clone(), &config)
+            .context("invalid [smtp] configuration")?;
+        reminders.prepare().await?;
+        reminders.spawn();
+        state.reminders = Some(reminders);
+    }
     let listener = TcpListener::bind(config.server.bind)
         .await
         .with_context(|| format!("failed to bind {}", config.server.bind))?;
@@ -303,6 +341,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         update_check = config.updates.check && config.api.enabled && UPDATE_CHECK_COMPILED,
         subscriptions =
             config.subscriptions.enabled && config.api.enabled && SUBSCRIPTIONS_COMPILED,
+        reminders = config.reminders.enabled && SMTP_COMPILED,
         "CalCraft {} listening",
         calcraft_core::VERSION,
     );

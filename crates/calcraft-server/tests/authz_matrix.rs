@@ -452,6 +452,11 @@ async fn snapshot(store: &Store, user: &User, session: &str) -> String {
     }
     out += &format!("{:?}\n", store.user_email(user.id).await.unwrap());
     out += &format!(
+        "reminders {:?} {:?}\n",
+        store.reminder_settings(user.id).await.unwrap(),
+        store.mail_counts(Some(user.id), 0).await.unwrap()
+    );
+    out += &format!(
         "attachments {:?} {:?}\n",
         store.attachment_usage(user.id).await.unwrap(),
         store
@@ -899,6 +904,19 @@ async fn fixture() -> Fixture {
             store.clone(),
             &subscriptions,
         ));
+    }
+    // Reminders on, with an SMTP server nobody listens on: the API only
+    // queues (the sender task does not run in tests).
+    #[cfg(feature = "smtp")]
+    {
+        config.smtp.enabled = true;
+        config.smtp.host = "127.0.0.1".to_owned();
+        config.smtp.port = Some(9);
+        config.smtp.tls = calcraft_server::config::SmtpTls::None;
+        config.smtp.from = "calendar@example.org".to_owned();
+        config.reminders.enabled = true;
+        state.reminders =
+            Some(calcraft_server::reminders::Reminders::new(store.clone(), &config).unwrap());
     }
     let app = router(&config, state);
     Fixture {
@@ -2688,6 +2706,13 @@ mod api_matrix {
                 case(method, route, 404).public(404)
             }
         };
+        let mail = |method, route, alice| {
+            if cfg!(feature = "smtp") {
+                case(method, route, alice)
+            } else {
+                case(method, route, 404).public(404)
+            }
+        };
         vec![
             case("get", "/v1/version", 200).public(200),
             case("get", "/v1/auth/methods", 200).public(200),
@@ -2708,6 +2733,11 @@ mod api_matrix {
                 .body(json!({"password": BOB_PW, "code": "123456"})),
             // Only ever the session's own setting (scheduling is on here).
             case("patch", "/v1/me/scheduling", 204).body(json!({"accept_invitations": true})),
+            // Only ever the session's own settings and own address.
+            mail("get", "/v1/me/reminders", 200),
+            mail("patch", "/v1/me/reminders", 204)
+                .body(json!({"mode": "all", "include_description": true})),
+            mail("post", "/v1/me/reminders/test", 202),
             case("get", "/v1/app-passwords", 200),
             case("post", "/v1/app-passwords", 201).body(json!({"name": "zzattack"})),
             case("delete", "/v1/app-passwords/{id}", 404)
@@ -2804,6 +2834,7 @@ mod api_matrix {
             ),
             case("get", "/v1/admin/update", 403),
             case("get", "/v1/admin/shares", 403),
+            mail("get", "/v1/admin/reminders", 403),
             case("post", "/v1/auth/logout", 204),
         ]
     }

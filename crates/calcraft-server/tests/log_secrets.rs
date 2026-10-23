@@ -680,6 +680,236 @@ async fn scheduling_flows(
     );
 }
 
+/// E-mail reminders: an alarm of alice's is delivered to a fake SMTP
+/// server over TLS with AUTH, then a mail is refused with a reply text.
+/// Neither the SMTP credentials, the addresses, the subject nor the
+/// server's replies may be logged.
+#[cfg(feature = "smtp")]
+mod mail {
+    use std::sync::Arc;
+
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use calcraft_server::{Config, config::SmtpTls, reminders::Reminders};
+    use calcraft_store::Store;
+    use rustls::{
+        ServerConfig,
+        pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+    };
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        net::TcpListener,
+    };
+    use tokio_rustls::TlsAcceptor;
+
+    use super::{MARKER, Router, StatusCode, dav};
+
+    /// Test CA and a certificate for localhost signed by it (fixtures).
+    const CA_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIIBhjCCASygAwIBAgIUY6nbb5D7cR7MbPRUbe3p4CHlnCEwCgYIKoZIzj0EAwIw
+IDEeMBwGA1UEAwwVQ2FsQ3JhZnQgU01UUCB0ZXN0IENBMCAXDTI2MTAyMzE1NTk0
+MFoYDzIxMjYwOTI5MTU1OTQwWjAgMR4wHAYDVQQDDBVDYWxDcmFmdCBTTVRQIHRl
+c3QgQ0EwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQiAKobZlFX803MTORFXQyO
+hDWBT3+2dSnUntJTyjdKF28o2aU761v5e221MGamPPsHJA9h5GiqsbtT2ZJPWQQy
+o0IwQDAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBBjAdBgNVHQ4EFgQU
+lOzJf2joCsAETLDeChsNcauzW0owCgYIKoZIzj0EAwIDSAAwRQIhAKD49cvGUyrr
+3zNpi1+G4vOEQcrZatObwb0+SSmy/nAtAiBjORzauxS4p6dQ7rUwPmlXw302FGr/
+Tp80SnpI67IddQ==
+-----END CERTIFICATE-----
+";
+    const LEAF_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIIByjCCAXGgAwIBAgIULQZgkvv3Xons0LCdF4XGo16nVE4wCgYIKoZIzj0EAwIw
+IDEeMBwGA1UEAwwVQ2FsQ3JhZnQgU01UUCB0ZXN0IENBMCAXDTI2MTAyMzE1NTk0
+MFoYDzIxMjYwOTI5MTU1OTQwWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcq
+hkjOPQIBBggqhkjOPQMBBwNCAASAaEYNlg4FAog68n6BOjdZ4HSLSW49ub1J+7Q1
+hZD7O3nI3tgrd+4EnVy+zG8qldMU1YVjOK9vVUF/KE0Q7uswo4GSMIGPMAwGA1Ud
+EwEB/wQCMAAwDgYDVR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMBMBoG
+A1UdEQQTMBGCCWxvY2FsaG9zdIcEfwAAATAfBgNVHSMEGDAWgBSU7Ml/aOgKwARM
+sN4KGw1xq7NbSjAdBgNVHQ4EFgQUDOGUxNEfxwKD2OvLl8jO0yWVJHwwCgYIKoZI
+zj0EAwIDRwAwRAIgL2nraTQGYiqR1Koo1ejSFLojEr1uTmLfI1y3E8Qw5r0CIHSc
+5uAhO1WTYpgIXXEK6TE6azHzzPL6aO4iFozp2k0d
+-----END CERTIFICATE-----
+";
+    const LEAF_KEY: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgN+3SntCvbYNF/htY
+Mm20aSvdXdKK3mvNaE6Jk0rGO2ihRANCAASAaEYNlg4FAog68n6BOjdZ4HSLSW49
+ub1J+7Q1hZD7O3nI3tgrd+4EnVy+zG8qldMU1YVjOK9vVUF/KE0Q7usw
+-----END PRIVATE KEY-----
+";
+
+    /// An implicit-TLS server that accepts AUTH PLAIN and answers RCPT
+    /// with 250, or with 550 plus a marker text once `refuse` is set.
+    async fn server(refuse: Arc<std::sync::atomic::AtomicBool>) -> u16 {
+        let certs: Vec<CertificateDer<'static>> =
+            CertificateDer::pem_slice_iter(LEAF_PEM.as_bytes())
+                .collect::<Result<_, _>>()
+                .unwrap();
+        let key = PrivateKeyDer::from_pem_slice(LEAF_KEY.as_bytes()).unwrap();
+        let config =
+            ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(certs, key)
+                .unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                let refuse = refuse.clone();
+                tokio::spawn(async move {
+                    let Ok(tls) = acceptor.accept(tcp).await else {
+                        return;
+                    };
+                    let mut stream = BufReader::new(tls);
+                    let greeting = format!("220 {MARKER}Greeting ESMTP\r\n");
+                    let _ = stream.get_mut().write_all(greeting.as_bytes()).await;
+                    loop {
+                        let mut line = String::new();
+                        if stream.read_line(&mut line).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let upper = line.trim_end().to_ascii_uppercase();
+                        let reply = if upper.starts_with("EHLO") {
+                            format!("250-{MARKER}Ehlo\r\n250 AUTH PLAIN\r\n")
+                        } else if upper.starts_with("AUTH PLAIN") {
+                            "235 ok\r\n".to_owned()
+                        } else if upper.starts_with("RCPT") {
+                            if refuse.load(std::sync::atomic::Ordering::Relaxed) {
+                                format!("550 5.1.1 {MARKER}ReplyText {}\r\n", line.trim_end())
+                            } else {
+                                "250 ok\r\n".to_owned()
+                            }
+                        } else if upper == "DATA" {
+                            let _ = stream.get_mut().write_all(b"354 go\r\n").await;
+                            loop {
+                                let mut line = String::new();
+                                if stream.read_line(&mut line).await.unwrap_or(0) == 0 {
+                                    return;
+                                }
+                                if line == ".\r\n" {
+                                    break;
+                                }
+                            }
+                            format!("250 {MARKER}Queued\r\n")
+                        } else if upper == "QUIT" {
+                            let _ = stream.get_mut().write_all(b"221 bye\r\n").await;
+                            return;
+                        } else {
+                            "250 ok\r\n".to_owned()
+                        };
+                        if stream.get_mut().write_all(reply.as_bytes()).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    pub async fn flows(
+        app: &Router,
+        store: &Store,
+        alice_auth: &str,
+        config: &Config,
+        secrets: &mut Vec<String>,
+    ) {
+        let refuse = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let port = server(refuse.clone()).await;
+        let dir = std::env::temp_dir().join(format!("calcraft-logs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let password = format!("{MARKER}SmtpPassword");
+        let user = format!("{MARKER}SmtpUser");
+        let password_file = dir.join("smtp-password");
+        std::fs::write(&password_file, format!("{password}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let ca_file = dir.join("ca.pem");
+        std::fs::write(&ca_file, CA_PEM).unwrap();
+        let mut config = config.clone();
+        config.smtp.enabled = true;
+        config.smtp.host = "127.0.0.1".to_owned();
+        config.smtp.port = Some(port);
+        config.smtp.tls = SmtpTls::Implicit;
+        config.smtp.username = Some(user.clone());
+        config.smtp.password_file = Some(password_file);
+        config.smtp.ca_file = Some(ca_file);
+        config.smtp.from = format!("{MARKER}sender@example.org").to_lowercase();
+        config.reminders.enabled = true;
+        config.reminders.default_mode = calcraft_server::config::ReminderDefault::All;
+        let reminders = Reminders::new(store.clone(), &config).unwrap();
+        reminders.prepare().await.unwrap();
+
+        let subject = format!("{MARKER}ReminderSubject");
+        let attendee = format!("{MARKER}attendee@elsewhere.example").to_lowercase();
+        secrets.extend([
+            password.clone(),
+            user.clone(),
+            STANDARD.encode(format!("\0{user}\0{password}")),
+            subject.clone(),
+            attendee.clone(),
+            config.smtp.from.clone(),
+            "alice@example.org".to_owned(),
+            format!("{MARKER}Greeting"),
+            format!("{MARKER}Ehlo"),
+            format!("{MARKER}ReplyText"),
+            format!("{MARKER}Queued"),
+            format!("{MARKER}ReminderUid"),
+        ]);
+        let event = format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\nBEGIN:VEVENT\r\n\
+             UID:{MARKER}ReminderUid\r\nDTSTAMP:20261001T000000Z\r\nDTSTART:20261201T100000Z\r\n\
+             DURATION:PT1H\r\nSUMMARY:{subject}\r\nBEGIN:VALARM\r\nACTION:EMAIL\r\n\
+             TRIGGER:-PT15M\r\nSUMMARY:{subject}\r\nDESCRIPTION:x\r\nATTENDEE:mailto:{attendee}\r\n\
+             END:VALARM\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT5M\r\n\
+             DESCRIPTION:x\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        );
+        let uri = "/dav/calendars/alice/default/reminder.ics";
+        let reply = dav(app, alice_auth, "PUT", uri, "text/calendar", event).await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+        // 2026-12-01 10:00 UTC; the first alarm at 09:45 is delivered, the
+        // second at 09:55 refused.
+        let start = 1_796_119_200;
+        reminders.run(start - 3600).await.unwrap();
+        let report = reminders.run(start - 900).await.unwrap();
+        assert_eq!(report.sent, 1, "{report:?}");
+        refuse.store(true, std::sync::atomic::Ordering::Relaxed);
+        let report = reminders.run(start - 300).await.unwrap();
+        assert_eq!(report.failed, 1, "{report:?}");
+        let alice = store
+            .user_by_name(&"alice".parse().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reminders.queue_test(&alice).await.unwrap(), Some(true));
+        reminders.run(calcraft_server::auth::now()).await.unwrap();
+        // Out of the calendar and the trash again.
+        let reply = dav(
+            app,
+            alice_auth,
+            "DELETE",
+            uri,
+            "text/calendar",
+            String::new(),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::NO_CONTENT);
+        let entries = store.trash_entries(alice.id, 100, 0).await.unwrap().entries;
+        let entry = entries
+            .iter()
+            .find(|e| e.name.as_deref() == Some("reminder.ics"))
+            .unwrap();
+        assert!(store.delete_trash_entry(alice.id, &entry.id).await.unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// Fails if a secret occurs in the logs. Timestamps are dropped first, so
 /// that six-digit TOTP codes cannot match their fractional seconds.
 fn assert_absent(logs: &str, secrets: &[String]) {
@@ -792,6 +1022,9 @@ async fn logs_contain_no_secrets_or_contents() {
     )
     .await;
 
+    #[cfg(feature = "smtp")]
+    mail::flows(&app, &store, &password_auth, &config, &mut secrets).await;
+
     // Lockout: repeated wrong guesses, then even the right password fails.
     secrets.push(dave_password.clone());
     for guess in 0..6 {
@@ -862,6 +1095,8 @@ async fn logs_contain_no_secrets_or_contents() {
     assert!(logs.contains("scheduling reply sent"), "{logs}");
     assert!(logs.contains("free/busy lookup"), "{logs}");
     assert!(logs.contains("INSERT INTO shares"), "{logs}");
+    #[cfg(feature = "smtp")]
+    assert!(logs.contains("sending a mail failed"), "{logs}");
     // The span of a public link has the path without the token.
     assert!(logs.contains("\"path\":\"/public/\""), "{logs}");
     assert!(logs.lines().count() > 50);

@@ -1,10 +1,14 @@
-//! RRULE and VTIMEZONE evaluation: indexing and time-range matching must
-//! never panic, must stay within their budgets, and the stored index must
-//! never exclude a time range the exact evaluation matches.
+//! RRULE and VTIMEZONE evaluation: indexing, time-range matching and alarm
+//! evaluation (e-mail reminders) must never panic, must stay within their
+//! budgets, and the stored index must never exclude a time range the exact
+//! evaluation matches. Alarm occurrences lie in their window, sorted, at
+//! most `MAX_OCCURRENCES`.
 #![no_main]
 
 use calcraft_ical::{
-    Budget, CalendarObject, OBJECT_BUDGET, exact_time_range_match, matches_time_range,
+    Budget, CalendarObject, OBJECT_BUDGET,
+    alarm::{MAX_OCCURRENCES, Selection, alarm_occurrences, next_alarm},
+    exact_time_range_match, matches_time_range,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -27,7 +31,9 @@ fn objects(text: &str) -> [String; 2] {
              DTSTART:19701025T030000\r\nRRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU\r\n\
              END:STANDARD\r\nEND:VTIMEZONE\r\n\
              BEGIN:VEVENT\r\nUID:f\r\nDTSTART;TZID=Z:20260329T023000\r\nDURATION:PT1H\r\n\
-             RRULE:{rule}\r\n{extra}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+             RRULE:{rule}\r\n{extra}\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\n\
+             TRIGGER;RELATED=END:-PT15M\r\nREPEAT:2\r\nDURATION:PT5M\r\nEND:VALARM\r\n\
+             END:VEVENT\r\nEND:VCALENDAR\r\n"
         ),
     ]
 }
@@ -61,6 +67,27 @@ fuzz_target!(|data: &[u8]| {
             let mut budget = Budget::new(OBJECT_BUDGET);
             let matched = matches_time_range(object.as_bytes(), start, end, &mut budget);
             assert!(exact.is_none() || exact == Some(matched));
+        }
+        let Ok(root) = calcraft_ical::parse(object.as_bytes()) else {
+            continue;
+        };
+        let zone = root.components.iter().find(|c| c.name == "VTIMEZONE");
+        for (after, until) in [(1_774_000_000 + shift, 1_774_900_000 + shift), (0, 86_400)] {
+            let mut budget = Budget::new(OBJECT_BUDGET);
+            if let Ok(found) =
+                alarm_occurrences(&root, after, until, zone, Selection::All, &mut budget)
+            {
+                assert!(found.len() <= MAX_OCCURRENCES);
+                assert!(found.iter().all(|o| o.trigger > after && o.trigger <= until));
+                assert!(found.windows(2).all(|w| w[0].trigger <= w[1].trigger));
+                assert!(found.iter().all(|o| o.component < root.components.len()));
+            }
+            let mut budget = Budget::new(OBJECT_BUDGET);
+            if let Ok(Some(next)) =
+                next_alarm(&root, after, 400 * 86_400, zone, Selection::All, &mut budget)
+            {
+                assert!(next > after && next <= after + 400 * 86_400);
+            }
         }
     }
 });

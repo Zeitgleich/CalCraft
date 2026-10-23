@@ -463,6 +463,20 @@ other addresses are set per user with `calcraft user set-email alice
 alice@example.com` (see [scheduling.md](scheduling.md)). Invitations to
 other servers are not sent by e-mail yet.
 
+E-mail reminders for alarms are off by default too. They need an SMTP
+server: put its password into a file only the service user can read, then
+enable `[smtp]` and `[reminders]` (see [reminders.md](reminders.md)):
+
+```bash
+sudo install -m 600 -o calcraft -g calcraft /dev/null /etc/calcraft/smtp-password
+sudoedit /etc/calcraft/smtp-password      # the password in the first line
+sudo -u calcraft env CALCRAFT_CONFIG=/etc/calcraft/calcraft.toml calcraft smtp test --to-self admin
+```
+
+Reminders go to the user's own address only (`set-email`, or
+`<user>@<scheduling.domain>`). Allow outgoing connections to the SMTP
+server's port (587 or 465) in your firewall.
+
 Coming from Synology Calendar/Contacts, Radicale, Baïkal or Nextcloud? Copy a
 user's calendars and address books with `calcraft migrate` (try `--dry-run`
 first), see [Migrating from another server](../README.md#migrating-from-another-server):

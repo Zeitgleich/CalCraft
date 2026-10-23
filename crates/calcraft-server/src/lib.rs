@@ -15,13 +15,19 @@ pub mod migrate;
 pub mod net;
 #[cfg(feature = "oidc")]
 pub mod oidc;
+#[cfg(any(feature = "migrate", feature = "smtp"))]
+pub mod password_file;
 pub mod publish;
 pub mod redact;
 pub mod reindex;
+#[cfg(feature = "smtp")]
+pub mod reminders;
 pub mod scheduling;
 pub mod sd_notify;
 pub mod secrets;
 pub mod security;
+#[cfg(feature = "smtp")]
+pub mod smtp;
 #[cfg(feature = "subscriptions")]
 pub mod subscriptions;
 pub mod telemetry;
@@ -48,3 +54,6 @@ pub const UPDATE_CHECK_COMPILED: bool = cfg!(feature = "update-check");
 
 /// Whether calendar subscriptions are compiled into this binary.
 pub const SUBSCRIPTIONS_COMPILED: bool = cfg!(feature = "subscriptions");
+
+/// Whether outgoing mail (SMTP, e-mail reminders) is compiled into this binary.
+pub const SMTP_COMPILED: bool = cfg!(feature = "smtp");

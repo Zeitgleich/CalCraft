@@ -43,7 +43,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [ical_object, dav_xml, recurrence, import, itip, attach]
+        target: [ical_object, dav_xml, recurrence, import, itip, attach, mail]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:

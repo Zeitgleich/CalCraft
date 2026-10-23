@@ -11,6 +11,7 @@
 //!
 //! This crate is free of I/O so it can be compiled for `wasm32`.
 
+pub mod alarm;
 pub mod attach;
 pub mod csv;
 mod datetime;

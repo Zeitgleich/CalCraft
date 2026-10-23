@@ -144,6 +144,22 @@ impl Span {
     }
 }
 
+/// Exact times of one instance, for alarms: only computed where start and
+/// end are exact UTC instants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Exact {
+    /// Start in UTC seconds.
+    pub start: i64,
+    /// End in UTC seconds (at least `start`); DUE for VTODOs.
+    pub end: i64,
+    /// Start in the instance's own local time (naive seconds).
+    pub local_start: i64,
+    /// End in the instance's own local time (naive seconds).
+    pub local_end: i64,
+    /// The instance is a whole day (DATE value).
+    pub is_date: bool,
+}
+
 struct Zones<'a> {
     root: &'a Component,
     cache: Vec<(&'a str, Option<Tz>)>,
@@ -151,6 +167,11 @@ struct Zones<'a> {
     /// busy answers, which must not report ±14 h around every all-day
     /// event).
     floating_utc: bool,
+    /// Read floating times and dates in this zone instead (alarms, with
+    /// the calendar's time zone); takes precedence over `floating_utc`.
+    floating_tz: Option<Tz>,
+    /// Compute [`Exact`] times for every instance (alarms).
+    want_exact: bool,
 }
 
 impl<'a> Zones<'a> {
@@ -159,6 +180,8 @@ impl<'a> Zones<'a> {
             root,
             cache: Vec::new(),
             floating_utc: false,
+            floating_tz: None,
+            want_exact: false,
         }
     }
 
@@ -216,6 +239,9 @@ impl<'a> Zones<'a> {
     fn bounds(&self, naive: i64, zone: Zone) -> (i64, i64) {
         let exact = match zone {
             Zone::Utc => Some(naive),
+            Zone::Floating if self.floating_tz.is_some() => {
+                self.floating_tz.as_ref().and_then(|tz| tz.to_utc(naive))
+            }
             Zone::Floating if self.floating_utc => Some(naive),
             Zone::Tz(index) => self.tz(index).and_then(|tz| tz.to_utc(naive)),
             Zone::Floating | Zone::Unresolved => None,
@@ -391,6 +417,41 @@ impl Series {
         }))
     }
 
+    /// Exact times of the instance starting at `start`; `None` unless start
+    /// and end are exact instants.
+    fn exact(&self, zones: &Zones<'_>, start: Value, end: Option<PeriodEnd>) -> Option<Exact> {
+        let (lo, hi) = zones.bounds(start.naive, start.zone);
+        if lo != hi {
+            return None;
+        }
+        let exact_at = |naive: i64, zone: Zone| {
+            let (a, b) = zones.bounds(naive, zone);
+            (a == b).then_some(a)
+        };
+        let (end_utc, local_end) = match end {
+            Some(PeriodEnd::At(end)) => (exact_at(end.naive, end.zone)?, end.naive),
+            Some(PeriodEnd::After(d)) => (
+                exact_at(start.naive.saturating_add(d), start.zone)?,
+                start.naive.saturating_add(d),
+            ),
+            None => match (self.nominal, self.exact) {
+                (Some(d), _) => (
+                    exact_at(start.naive.saturating_add(d), start.zone)?,
+                    start.naive.saturating_add(d),
+                ),
+                (None, Some(d)) => (lo.saturating_add(d), start.naive.saturating_add(d)),
+                (None, None) => (lo, start.naive),
+            },
+        };
+        Some(Exact {
+            start: lo,
+            end: end_utc.max(lo),
+            local_start: start.naive,
+            local_end: local_end.max(start.naive),
+            is_date: start.is_date,
+        })
+    }
+
     fn max_duration(&self) -> i64 {
         self.nominal.unwrap_or(0).max(self.exact.unwrap_or(0))
     }
@@ -468,33 +529,45 @@ impl Series {
         mode: Mode,
         overridden: &HashSet<Key>,
         shifts: &[Shift],
-        visit: &mut dyn FnMut(Span) -> bool,
+        visit: &mut dyn FnMut(Span, Option<Exact>) -> bool,
     ) -> Result<bool, Inexact> {
         // Each instance costs its time zone conversions plus one step per
         // THISANDFUTURE shift.
         let cost = INSTANCE_COST + u64::try_from(shifts.len()).unwrap_or(u64::MAX);
         let emit = |span: Span,
+                    exact: Option<Exact>,
                     key: Option<Key>,
                     budget: &mut Budget,
-                    visit: &mut dyn FnMut(Span) -> bool|
+                    visit: &mut dyn FnMut(Span, Option<Exact>) -> bool|
          -> Result<bool, Inexact> {
             budget.charge(cost)?;
             if key.is_some_and(|k| self.exdates.contains(&k) || overridden.contains(&k)) {
                 return Ok(false);
             }
-            if visit(span) {
+            if visit(span, exact) {
                 return Ok(true);
             }
+            // Shifted instances only have bounds, never exact times.
             Ok(shifts.iter().any(|shift| {
                 span.hi >= shift.rid_lo
-                    && visit(Span {
-                        lo: span.lo.saturating_add(shift.delta_lo),
-                        hi: span
-                            .hi
-                            .saturating_add(shift.delta_hi)
-                            .saturating_add(shift.len_hi),
-                    })
+                    && visit(
+                        Span {
+                            lo: span.lo.saturating_add(shift.delta_lo),
+                            hi: span
+                                .hi
+                                .saturating_add(shift.delta_hi)
+                                .saturating_add(shift.len_hi),
+                        },
+                        None,
+                    )
             }))
+        };
+        let exact = |value: Value, end: Option<PeriodEnd>| {
+            if zones.want_exact {
+                self.exact(zones, value, end)
+            } else {
+                None
+            }
         };
         // How far THISANDFUTURE shifts can move an instance: the window for
         // skipping ahead and stopping must be widened by as much.
@@ -511,6 +584,7 @@ impl Series {
             None => {
                 if emit(
                     self.instance(zones, self.start, None),
+                    exact(self.start, None),
                     zones.key(self.start),
                     budget,
                     visit,
@@ -534,7 +608,7 @@ impl Series {
                     .iter()
                     .map(|s| first.lo.saturating_add(s.delta_lo.min(0)))
                     .fold(first.lo, i64::min);
-                if visit(Span { lo, hi: i64::MAX }) {
+                if visit(Span { lo, hi: i64::MAX }, None) {
                     return Ok(true);
                 }
             }
@@ -576,7 +650,7 @@ impl Series {
                     if until_utc.is_some_and(|until| span.lo > until.saturating_add(1)) {
                         continue;
                     }
-                    if emit(span, zones.key(value), budget, visit)? {
+                    if emit(span, exact(value, None), zones.key(value), budget, visit)? {
                         return Ok(true);
                     }
                 }
@@ -585,6 +659,7 @@ impl Series {
         for &(value, end) in &self.rdates {
             if emit(
                 self.instance(zones, value, end),
+                exact(value, end),
                 zones.key(value),
                 budget,
                 visit,
@@ -615,10 +690,20 @@ fn walk(
     budget: &mut Budget,
     mode: Mode,
     floating_utc: bool,
-    visit: &mut dyn FnMut(&Component, Span) -> bool,
+    visit: &mut dyn FnMut(&Component, Span, Option<Exact>) -> bool,
 ) -> Result<bool, Inexact> {
     let mut zones = Zones::new(root);
     zones.floating_utc = floating_utc;
+    walk_in(&mut zones, budget, mode, visit)
+}
+
+fn walk_in<'a>(
+    zones: &mut Zones<'a>,
+    budget: &mut Budget,
+    mode: Mode,
+    visit: &mut dyn FnMut(&'a Component, Span, Option<Exact>) -> bool,
+) -> Result<bool, Inexact> {
+    let root = zones.root;
     let components: Vec<&Component> = root
         .components
         .iter()
@@ -631,7 +716,7 @@ fn walk(
     let mut series = Vec::new();
     for &component in &components {
         budget.charge(1)?;
-        let built = Series::build(&mut zones, component, budget)?;
+        let built = Series::build(zones, component, budget)?;
         let Some(rid_property) = component.property("RECURRENCE-ID") else {
             series.push((component, built, false));
             continue;
@@ -649,7 +734,7 @@ fn walk(
         });
         if this_and_future {
             let own = built.as_ref().ok_or(Inexact)?;
-            let first = own.instance(&zones, own.start, None);
+            let first = own.instance(zones, own.start, None);
             let (rid_lo, rid_hi) = zones.bounds(rid.naive, rid.zone);
             shifts.push(Shift {
                 rid_lo,
@@ -673,9 +758,14 @@ fn walk(
                 } else {
                     (&overridden, &shifts[..])
                 };
-                if s.walk(&zones, budget, mode, overridden, shifts, &mut |span| {
-                    visit(component, span)
-                })? {
+                if s.walk(
+                    zones,
+                    budget,
+                    mode,
+                    overridden,
+                    shifts,
+                    &mut |span, exact| visit(component, span, exact),
+                )? {
                     return Ok(true);
                 }
             }
@@ -690,6 +780,7 @@ fn walk(
                         lo: i64::MIN,
                         hi: i64::MAX,
                     },
+                    None,
                 ) {
                     return Ok(true);
                 }
@@ -705,7 +796,7 @@ pub(crate) fn span(root: &Component, budget: &mut Budget) -> Result<TimeRange, I
     let mut lo = i64::MAX;
     let mut hi = i64::MIN;
     let mut any = false;
-    walk(root, budget, Mode::Span, false, &mut |_, span| {
+    walk(root, budget, Mode::Span, false, &mut |_, span, _| {
         any = true;
         lo = lo.min(span.lo);
         hi = hi.max(span.hi);
@@ -732,7 +823,7 @@ pub(crate) fn overlaps(
         budget,
         Mode::Overlap(start, end),
         false,
-        &mut |_, span| span.overlaps(start, end),
+        &mut |_, span, _| span.overlaps(start, end),
     )
 }
 
@@ -752,7 +843,7 @@ pub(crate) fn busy_instances(
         budget,
         Mode::Overlap(Some(start), Some(end)),
         true,
-        &mut |component, span| {
+        &mut |component, span, _| {
             if component.name == "VEVENT"
                 && span.lo != i64::MIN
                 && span.overlaps(Some(start), Some(end))
@@ -763,6 +854,71 @@ pub(crate) fn busy_instances(
         },
     )?;
     Ok(())
+}
+
+/// How floating times and dates are read for alarms.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Floating<'a> {
+    /// In this VTIMEZONE (the calendar's time zone).
+    Zone(&'a Component),
+    /// As UTC.
+    Utc,
+}
+
+fn alarm_zones<'a>(
+    root: &'a Component,
+    floating: Floating<'_>,
+    budget: &mut Budget,
+) -> Result<Zones<'a>, Inexact> {
+    let mut zones = Zones::new(root);
+    zones.want_exact = true;
+    zones.floating_utc = true;
+    if let Floating::Zone(vtimezone) = floating {
+        zones.floating_tz = Tz::build(vtimezone, budget)?;
+    }
+    Ok(zones)
+}
+
+/// Instances near `[start, end)` with their exact times (`None` where they
+/// cannot be computed exactly), for alarms. The window works like a
+/// time-range query: every instance overlapping it is visited, and
+/// possibly some more around it.
+pub(crate) fn alarm_instances(
+    root: &Component,
+    start: i64,
+    end: i64,
+    floating: Floating<'_>,
+    budget: &mut Budget,
+    visit: &mut dyn FnMut(&Component, Option<Exact>),
+) -> Result<(), Inexact> {
+    let mut zones = alarm_zones(root, floating, budget)?;
+    walk_in(
+        &mut zones,
+        budget,
+        Mode::Overlap(Some(start), Some(end)),
+        &mut |component, span, exact| {
+            if span.overlaps(Some(start), Some(end)) {
+                visit(component, exact);
+            }
+            false
+        },
+    )?;
+    Ok(())
+}
+
+/// Exact times of the first instance of `component` (its DTSTART), for
+/// alarms with an absolute trigger.
+pub(crate) fn first_instance(
+    root: &Component,
+    component: &Component,
+    floating: Floating<'_>,
+    budget: &mut Budget,
+) -> Result<Option<Exact>, Inexact> {
+    let mut zones = alarm_zones(root, floating, budget)?;
+    let Some(series) = Series::build(&mut zones, component, budget)? else {
+        return Ok(None);
+    };
+    Ok(series.exact(&zones, series.start, None))
 }
 
 /// Identity of a RECURRENCE-ID or EXDATE value, comparable between two

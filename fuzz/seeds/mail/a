@@ -1,0 +1,15 @@
+220-mail.example.org ESMTP
+220 ready
+250-mail.example.org
+250-STARTTLS
+250-AUTH PLAIN LOGIN
+250 SIZE 1000000
+
+--
+CalCraft
+--
+Reminder: Weekly sync
+--
+When: Mon, 26 Oct 2026, 09:00
+.
+Location: Room 1

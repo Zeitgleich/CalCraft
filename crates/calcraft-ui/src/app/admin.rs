@@ -61,6 +61,7 @@ pub fn Admin() -> impl IntoView {
             }}
         </section>
         <CreateUserForm on_created=reload />
+        <super::reminders::ReminderQueue />
     }
 }
 

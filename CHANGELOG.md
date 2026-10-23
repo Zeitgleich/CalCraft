@@ -7,6 +7,47 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 
 ## [Unreleased]
 
+### Added
+
+- E-mail reminders for alarms (`[reminders]`, off by default, needs the new
+  `[smtp]` section; see [docs/reminders.md](docs/reminders.md)). `VALARM`s
+  of events and tasks in the users' own calendars send a plain-text mail to
+  the owner's own address (set by an administrator or derived from
+  `scheduling.domain`) – never to `ATTENDEE`s of the alarm. Per user:
+  e-mail alarms only (default, `reminders.default_mode`), all alarms
+  (also `DISPLAY`/`AUDIO`) or off, description included or not (off by
+  default). Relative (`RELATED=END`) and absolute triggers, `REPEAT`,
+  recurring events with overrides and EXDATE, time zones (the event's
+  VTIMEZONE, the calendar's `calendar-timezone` for floating times),
+  acknowledged alarms (`ACKNOWLEDGED`, `X-MOZ-LASTACK`), VTODO alarms;
+  subscriptions, shared calendars of other owners, cancelled events and
+  completed tasks send nothing. Changed objects are re-indexed within
+  seconds and only catch up on the last five minutes (no flood after
+  imports); missed alarms are sent up to `max_late_minutes` late.
+- Persistent mail queue with idempotent queueing (no duplicates after a
+  restart), retries with back-off, limits per user (hour, day) and for the
+  whole server (queue size, mails per minute); status for users (sent,
+  waiting, failed, not sent, last problem as a code) and administrators
+  (counts only).
+- Own SMTP client (no new crates): STARTTLS (mandatory where configured,
+  injected data before the handshake refused) or implicit TLS with rustls,
+  `tls = "none"` only for a relay on localhost without authentication,
+  AUTH PLAIN/LOGIN over TLS only, deadlines on every step, limits for reply
+  lines, lines per reply and reply size; the password only from
+  `password_file` (owner-only permissions checked), wiped from memory.
+  Message generation in `calcraft-core` (`mail`): RFC 2047 subjects,
+  quoted-printable body, `Auto-Submitted`, random `Message-ID`, header
+  injection impossible by construction and checked before sending.
+- REST API `GET`/`PATCH /api/v1/me/reminders`, `POST
+  /api/v1/me/reminders/test`, `GET /api/v1/admin/reminders`; web UI
+  *Settings → E-mail reminders* and *Administration → Reminder e-mails*;
+  CLI `calcraft smtp test --to-self <user>` (prints no address).
+- Cargo feature `smtp` (default on) for outgoing mail; fuzz target `mail`,
+  the `recurrence` target also evaluates alarms.
+- Database migration `0015_reminders` (tables `reminder_state`,
+  `reminder_cursors`, `reminder_index`, `mail_outbox`, columns
+  `users.reminder_mode`, `users.reminder_description`).
+
 ## [0.1.0-alpha.4] – 2026-10-23
 
 Fourth pre-release, for testing only – not for production use (open points:

@@ -46,7 +46,7 @@ fn instances(body: &str, from: &str, to: &str) -> Vec<(i64, i64)> {
         &mut Budget::new(OBJECT_BUDGET),
         Mode::Overlap(Some(from), Some(to)),
         false,
-        &mut |_, span| {
+        &mut |_, span, _| {
             if span.overlaps(Some(from), Some(to)) {
                 found.push((span.lo, span.hi));
             }

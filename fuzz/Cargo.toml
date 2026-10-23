@@ -10,6 +10,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4.13"
+calcraft-core = { path = "../crates/calcraft-core" }
 calcraft-dav = { path = "../crates/calcraft-dav" }
 calcraft-ical = { path = "../crates/calcraft-ical" }
 
@@ -54,6 +55,13 @@ bench = false
 [[bin]]
 name = "attach"
 path = "fuzz_targets/attach.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mail"
+path = "fuzz_targets/mail.rs"
 test = false
 doc = false
 bench = false

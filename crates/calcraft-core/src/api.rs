@@ -7,6 +7,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::CollectionKind;
 
+mod reminders;
+pub use reminders::{
+    AdminReminders, MailStatus, ReminderInfo, ReminderModeName, ReminderTest, UpdateReminders,
+};
+
 /// Header that every state-changing API request must carry (CSRF
 /// protection: cross-site forms cannot set custom headers, and CORS is off).
 pub const CSRF_HEADER: &str = "x-calcraft-request";

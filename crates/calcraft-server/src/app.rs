@@ -42,6 +42,9 @@ pub struct AppState {
     /// Calendar subscriptions, if enabled (`[subscriptions] enabled`).
     #[cfg(feature = "subscriptions")]
     pub subscriptions: Option<Arc<crate::subscriptions::Subscriptions>>,
+    /// E-mail reminders, if enabled (`[reminders] enabled`).
+    #[cfg(feature = "smtp")]
+    pub reminders: Option<Arc<crate::reminders::Reminders>>,
     /// Scheduling between users, if enabled (`[scheduling] enabled`);
     /// [`router`] sets it from the configuration.
     pub scheduling: Option<Arc<crate::scheduling::Scheduling>>,
@@ -75,6 +78,8 @@ impl AppState {
             updates: None,
             #[cfg(feature = "subscriptions")]
             subscriptions: None,
+            #[cfg(feature = "smtp")]
+            reminders: None,
             scheduling: None,
             attachments: None,
             max_vcard_bytes: crate::config::DEFAULT_MAX_VCARD_BYTES,

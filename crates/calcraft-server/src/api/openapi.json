@@ -322,6 +322,100 @@
         }
       }
     },
+    "/v1/me/reminders": {
+      "get": {
+        "summary": "E-mail reminder settings and status of the logged-in user",
+        "description": "Which alarms send an e-mail to the user's own address (never to addresses in the calendar data), whether the description is included, the address used (null: none is set, nothing is sent), objects with upcoming alarms and the mails of the last seven days as counts with the newest problem as a code. 404 if reminders are off on the server.",
+        "tags": [
+          "account"
+        ],
+        "responses": {
+          "200": {
+            "description": "Settings and status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReminderInfo"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "summary": "Change the e-mail reminder settings",
+        "description": "mode: off, email (alarms with ACTION:EMAIL only), all (also display and sound alarms) or default (the server default). The user's calendars are indexed again with the new mode. 404 if reminders are off on the server.",
+        "tags": [
+          "account"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateReminders"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Changed"
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me/reminders/test": {
+      "post": {
+        "summary": "Queue a test e-mail to the user's own address",
+        "description": "Counts towards the user's mail limits (queued: false if one was reached). 409 if no address is set for the account, 404 if reminders are off on the server.",
+        "tags": [
+          "account"
+        ],
+        "responses": {
+          "202": {
+            "description": "Queued (or dropped by a limit)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReminderTest"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/me/password": {
       "post": {
         "summary": "Change the password; ends all sessions",
@@ -943,6 +1037,37 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/UpdateInfo"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/reminders": {
+      "get": {
+        "summary": "State of the outgoing mail queue (admins only)",
+        "description": "Counts only: mails of the last 24 hours per state (pending: all), objects with upcoming alarms, and the time of the last successful delivery and the code of the last SMTP problem since the server started. No addresses, subjects or server replies. 404 if reminders are off.",
+        "tags": [
+          "admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "Queue state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminReminders"
                 }
               }
             }
@@ -2266,6 +2391,161 @@
           "accept_invitations"
         ],
         "additionalProperties": false
+      },
+      "ReminderMode": {
+        "type": "string",
+        "enum": [
+          "off",
+          "email",
+          "all"
+        ]
+      },
+      "MailStatus": {
+        "type": "object",
+        "properties": {
+          "pending": {
+            "type": "integer"
+          },
+          "sent": {
+            "type": "integer"
+          },
+          "failed": {
+            "type": "integer"
+          },
+          "dropped": {
+            "type": "integer",
+            "description": "Not sent because of a limit or a full queue"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Code of the newest problem: smtp_unavailable, smtp_rejected, smtp_tls, smtp_auth, limit, queue_full, expired, too_large, invalid_message"
+          },
+          "last_error_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "pending",
+          "sent",
+          "failed",
+          "dropped"
+        ]
+      },
+      "ReminderInfo": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "$ref": "#/components/schemas/ReminderMode"
+          },
+          "custom": {
+            "type": "boolean",
+            "description": "The user chose the mode; false: the server default applies"
+          },
+          "default_mode": {
+            "$ref": "#/components/schemas/ReminderMode"
+          },
+          "include_description": {
+            "type": "boolean"
+          },
+          "address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The user's own address the mails go to"
+          },
+          "scheduled": {
+            "type": "integer",
+            "description": "Objects with an upcoming alarm"
+          },
+          "status": {
+            "$ref": "#/components/schemas/MailStatus"
+          }
+        },
+        "required": [
+          "mode",
+          "custom",
+          "default_mode",
+          "include_description",
+          "scheduled",
+          "status"
+        ]
+      },
+      "UpdateReminders": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "off",
+              "email",
+              "all",
+              "default"
+            ]
+          },
+          "include_description": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReminderTest": {
+        "type": "object",
+        "properties": {
+          "queued": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "queued"
+        ]
+      },
+      "AdminReminders": {
+        "type": "object",
+        "properties": {
+          "default_mode": {
+            "$ref": "#/components/schemas/ReminderMode"
+          },
+          "scheduled": {
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/MailStatus"
+          },
+          "cancelled": {
+            "type": "integer"
+          },
+          "last_success_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "last_smtp_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_smtp_error_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "default_mode",
+          "scheduled",
+          "status",
+          "cancelled"
+        ]
       },
       "SsoLink": {
         "type": "object",

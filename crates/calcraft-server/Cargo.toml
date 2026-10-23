@@ -13,7 +13,7 @@ name = "calcraft"
 path = "src/main.rs"
 
 [features]
-default = ["web-ui", "api", "oidc", "update-check", "subscriptions", "migrate"]
+default = ["web-ui", "api", "oidc", "update-check", "subscriptions", "migrate", "smtp"]
 web-ui = ["dep:calcraft-web"]
 api = ["dep:futures-core"]
 # Single sign-on via OpenID Connect (outbound HTTPS client and JWT verification).
@@ -27,9 +27,11 @@ subscriptions = ["api", "https-client"]
 # `calcraft migrate`: copies calendars and address books from another
 # CalDAV/CardDAV server (outbound HTTPS client, no new crates).
 migrate = ["https-client", "dep:zeroize"]
-# Outbound HTTPS client used by `oidc`, `update-check`, `subscriptions` and
-# `migrate`; not
-# useful alone.
+# E-mail reminders for alarms over SMTP (`[smtp]`, `[reminders]`, both off
+# by default in the configuration): own SMTP client on rustls, no new crates.
+smtp = ["https-client", "dep:tokio-rustls", "dep:zeroize"]
+# Outbound HTTPS client used by `oidc`, `update-check`, `subscriptions`,
+# `migrate` and (for its TLS settings) `smtp`; not useful alone.
 https-client = [
     "dep:hyper-util",
     "dep:hyper-rustls",
@@ -62,12 +64,14 @@ hyper-rustls = { workspace = true, optional = true }
 ring = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 rustls-native-certs = { workspace = true, optional = true }
+# Already in the tree via hyper-rustls: TLS streams for the SMTP client.
+tokio-rustls = { workspace = true, optional = true }
 rpassword.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha1.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["time", "io-util"] }
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

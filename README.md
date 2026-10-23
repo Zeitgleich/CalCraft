@@ -423,6 +423,37 @@ size of a delivered copy, inbox size; deliveries count towards the
 recipient's quota. Every user can refuse invitations (*Settings*). Details, status codes and deviations from the RFC:
 [docs/scheduling.md](docs/scheduling.md).
 
+### E-mail reminders
+
+E-mails for alarms (`VALARM`) in the users' own calendars, **off by
+default**, over an SMTP server of your choice:
+
+```toml
+[smtp]
+enabled = true
+host = "smtp.example.org"
+tls = "starttls"                      # or "implicit"; "none" only for localhost
+username = "calcraft@example.org"
+password_file = "/etc/calcraft/smtp-password"   # chmod 600, never in this file
+from = "calcraft@example.org"
+
+[reminders]
+enabled = true
+# default_mode = "email"   # "all": also the display alarms most apps create
+```
+
+Mails go only to the calendar owner's own address (set by an administrator
+or `<user>@<scheduling.domain>`), never to attendees of an alarm or event;
+subscriptions and calendars shared with a user send nothing. Each user
+chooses which alarms send mail and whether the description is included
+(*Settings → E-mail reminders*). Plain text only, no tracking; recurring
+events, time zones, `REPEAT` and acknowledged alarms are handled; imports
+do not send old reminders. Delivery is queued in the database (no
+duplicates after a restart) with retries, per-user and server-wide limits.
+The SMTP client is CalCraft's own (no new dependencies): STARTTLS is
+mandatory where configured, AUTH only over TLS. `calcraft smtp test
+--to-self alice` checks the settings. Details: [docs/reminders.md](docs/reminders.md).
+
 ### Attachments (managed attachments)
 
 CalDAV managed attachments (RFC 8607), **off by default**: clients upload a
@@ -627,7 +658,8 @@ Integration suites of `calcraft-server` (`crates/calcraft-server/tests/`):
 - **Logs:** `log_secrets.rs` checks that passwords, tokens, TOTP and
   recovery codes, cookies, calendar/contact contents, scheduling
   messages and addresses, attachments (names, contents, ids), share
-  requests and public link tokens never reach the logs.
+  requests, public link tokens and reminder mails (SMTP credentials,
+  addresses, subjects, server replies) never reach the logs.
 - **Scheduling:** `scheduling.rs` (invitations, replies, cancellations,
   recurrence, Schedule-Tag, free/busy, limits, quota, disabled users,
   organizer spoofing, attendee tampering, UID hijacking, concurrent
@@ -644,6 +676,13 @@ Integration suites of `calcraft-server` (`crates/calcraft-server/tests/`):
   hostile file names, foreign managed ids in PUTs, attendee access and its
   end, garbage collection, MOVE/COPY, backup/restore, parallel uploads);
   the authorization matrix covers the download URLs and attachment POSTs.
+- **Reminders:** `reminders.rs` (REST API, 404 while off, an alarm written
+  by DAV delivered to a fake relay, to the owner only); the engine (index,
+  dispatch, retries, limits, restarts, imports) and the SMTP client
+  (STARTTLS/implicit TLS with a test CA, AUTH, injection after STARTTLS,
+  timeouts, oversized replies, 4xx/5xx) are unit tests in `src/reminders/`
+  and `src/smtp/`; `log_secrets.rs` and the authorization matrix cover them
+  too.
 - **Subscriptions:** `subscriptions.rs` (subscription calendars are
   read-only for every DAV client), `subscription_logs.rs` (feed URLs never
   reach the logs); the SSRF rules and fetches against a local server are
@@ -654,8 +693,9 @@ Integration suites of `calcraft-server` (`crates/calcraft-server/tests/`):
 
 Further checks:
 
-- **Fuzzing** (`fuzz/`, cargo-fuzz): 6 targets (`ical_object`, `dav_xml`,
-  `recurrence`, `import`, `itip`, `attach`). CI runs each of them for 60 s on every change
+- **Fuzzing** (`fuzz/`, cargo-fuzz): 7 targets (`ical_object`, `dav_xml`,
+  `recurrence` (also alarms), `import`, `itip`, `attach`, `mail` (SMTP
+  replies, message generation, dot-stuffing)). CI runs each of them for 60 s on every change
   and for 20 min nightly.
 - **CI** on Linux, macOS and Windows: `cargo fmt`, Clippy, all tests with
   all features and DAV-only, wasm build of the web UI, a client
@@ -707,6 +747,11 @@ German):
   of a sharee re-checks the share inside its transaction; public links are
   off by default, hashed, uniform `404`, rate-limited, never logged (see
   *Sharing and public links*).
+- **E-mail reminders:** off by default; only to the owner's own address
+  (never to addresses in calendar data), header injection excluded by
+  construction and checked again before sending, STARTTLS cannot be
+  skipped, SMTP password only from a file with checked permissions, server
+  replies never logged (see *E-mail reminders*).
 - **Calendar subscriptions:** off by default; the server fetches feeds only
   from public addresses it resolved and checked itself, pinned against DNS
   rebinding, with every redirect checked again (see *Calendar subscriptions*).

@@ -28,6 +28,7 @@ mod items;
 mod oidc;
 mod properties;
 mod publish;
+mod reminders;
 mod scheduling;
 mod sharing;
 mod subscriptions;
@@ -53,6 +54,11 @@ pub use items::{MAX_BYTES_PER_USER, MAX_ITEMS_PER_COLLECTION};
 pub use oidc::{ApprovedBinding, OidcBinding, OidcIdentityInfo};
 pub use properties::{DeadProperty, MAX_DEAD_PROPERTIES, MAX_DEAD_PROPERTY_BYTES, PropertyChange};
 pub use publish::{MAX_LINKS_PER_CALENDAR, NewPublishLink, PrivateEvents, PublishLink};
+pub use reminders::{
+    Completion, DirtyCalendar, DueReminder, IndexCandidate, IndexEntry, MAIL_RETENTION_SECS,
+    MAX_MAIL_BYTES, MailCounts, MailKind, MailLimits, NewMail, OutgoingMail, QueueOutcome,
+    ReminderMode, ReminderSettings,
+};
 pub use scheduling::{
     FreeBusyCandidate, InboxMessage, MAX_EMAIL_LEN, NewInboxMessage, SchedulingObject,
 };

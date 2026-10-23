@@ -336,6 +336,74 @@ fn attachments_are_off_by_default_and_validated() {
 }
 
 #[test]
+fn smtp_and_reminders_are_off_by_default_and_validated() {
+    let config = from_toml("").unwrap();
+    assert!(!config.smtp.enabled);
+    assert!(!config.reminders.enabled);
+    assert_eq!(config.smtp.tls, SmtpTls::Starttls);
+    assert_eq!(config.smtp.effective_port(), 587);
+    assert_eq!(config.reminders.default_mode, ReminderDefault::Email);
+    let config = from_toml(
+        "[smtp]\nenabled = true\nhost = \"smtp.example.org\"\ntls = \"implicit\"\n\
+         username = \"calcraft\"\npassword_file = \"/run/secrets/smtp\"\n\
+         from = \"Calendar@Example.org\"\n\
+         [reminders]\nenabled = true\ndefault_mode = \"all\"\nbase_url = \"https://cal.example.org/\"\n",
+    )
+    .unwrap();
+    assert_eq!(config.smtp.effective_port(), 465);
+    assert_eq!(
+        config.smtp.from_address().as_deref(),
+        Some("calendar@example.org")
+    );
+    assert_eq!(config.smtp.helo(), "example.org");
+    assert_eq!(config.reminders.base(), Some("https://cal.example.org"));
+    // A plain relay on this host, without authentication.
+    let config = from_toml(
+        "[smtp]\nenabled = true\nhost = \"localhost\"\ntls = \"none\"\nfrom = \"cal@example.org\"\n",
+    )
+    .unwrap();
+    assert_eq!(config.smtp.effective_port(), 25);
+    for bad in [
+        "[smtp]\nenabled = true\nfrom = \"cal@example.org\"",
+        "[smtp]\nenabled = true\nhost = \"smtp.example.org\"",
+        "[smtp]\nhost = \"smtp.example.org\"\nfrom = \"not an address\"",
+        "[smtp]\nhost = \"smtp.example.org\"\nfrom = \"cal@example.org\\r\\nBcc: x@y.z\"",
+        "[smtp]\nhost = \"smtp.example.org\\r\\nRCPT TO:x\"",
+        "[smtp]\nhost = \"Smtp.Example.org\"",
+        // No plain connections to other hosts, never passwords without TLS.
+        "[smtp]\nhost = \"smtp.example.org\"\ntls = \"none\"",
+        "[smtp]\nhost = \"10.0.0.1\"\ntls = \"none\"",
+        "[smtp]\nhost = \"localhost\"\ntls = \"none\"\nusername = \"u\"\npassword_file = \"/p\"",
+        "[smtp]\ntls = \"plain\"",
+        // The password only from a file.
+        "[smtp]\npassword = \"secret\"",
+        "[smtp]\nusername = \"u\"",
+        "[smtp]\npassword_file = \"/p\"",
+        "[smtp]\nusername = \"\"\npassword_file = \"/p\"",
+        "[smtp]\nusername = \"u\\r\\n\"\npassword_file = \"/p\"",
+        "[smtp]\nfrom_name = \"Cal\\r\\nBcc: x\"",
+        "[smtp]\nhelo_name = \"bad name\"",
+        "[smtp]\ntimeout_secs = 1",
+        "[smtp]\nmax_per_minute = 0",
+        "[smtp]\nport = 0",
+        "[reminders]\nenabled = true",
+        "[reminders]\nmax_per_user_per_hour = 0",
+        "[reminders]\nmax_per_user_per_hour = 100\nmax_per_user_per_day = 50",
+        "[reminders]\nmax_queue = 10",
+        "[reminders]\nmax_late_minutes = 0",
+        "[reminders]\ndefault_mode = \"sometimes\"",
+        "[reminders]\nbase_url = \"https://cal.example.org/app\"",
+    ] {
+        assert!(from_toml(bad).is_err(), "{bad}");
+    }
+    assert!(is_loopback_host("127.0.0.1"));
+    assert!(is_loopback_host("::1"));
+    assert!(is_loopback_host("localhost"));
+    assert!(!is_loopback_host("localhost.example.org"));
+    assert!(!is_loopback_host("10.0.0.1"));
+}
+
+#[test]
 fn example_configuration_is_valid() {
     let text = include_str!("../../../../calcraft.example.toml");
     from_toml(text).unwrap();

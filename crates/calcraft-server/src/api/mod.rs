@@ -11,6 +11,8 @@ mod collections;
 #[cfg(feature = "oidc")]
 mod oidc;
 mod publish;
+#[cfg(feature = "smtp")]
+mod reminders;
 mod sharing;
 #[cfg(feature = "subscriptions")]
 mod subscriptions;
@@ -55,6 +57,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("post", "/v1/me/totp/enable"),
     ("post", "/v1/me/totp/disable"),
     ("patch", "/v1/me/scheduling"),
+    ("get", "/v1/me/reminders"),
+    ("patch", "/v1/me/reminders"),
+    ("post", "/v1/me/reminders/test"),
     ("get", "/v1/app-passwords"),
     ("post", "/v1/app-passwords"),
     ("delete", "/v1/app-passwords/{id}"),
@@ -88,6 +93,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("delete", "/v1/admin/users/{username}/sso"),
     ("get", "/v1/admin/shares"),
     ("get", "/v1/admin/update"),
+    ("get", "/v1/admin/reminders"),
 ];
 
 /// Builds the API router, to be nested under `/api`.
@@ -157,6 +163,15 @@ pub fn router() -> Router<AppState> {
     let router = router
         .route("/v1/auth/oidc/login", get(oidc::login))
         .route("/v1/auth/oidc/callback", get(oidc::callback));
+    // Without the `smtp` feature these paths fall through to 404.
+    #[cfg(feature = "smtp")]
+    let router = router
+        .route(
+            "/v1/me/reminders",
+            get(reminders::get).patch(reminders::update),
+        )
+        .route("/v1/me/reminders/test", post(reminders::test))
+        .route("/v1/admin/reminders", get(reminders::admin));
     // Without the `subscriptions` feature these paths fall through to 404.
     #[cfg(feature = "subscriptions")]
     let router = router
