@@ -21,6 +21,7 @@ use sqlx::{
 };
 
 mod accounts;
+mod attachments;
 mod backup;
 mod health;
 mod items;
@@ -33,6 +34,9 @@ mod trash;
 
 pub use accounts::{
     AppPassword, MAX_APP_PASSWORDS, RECOVERY_CODES, Session, TotpEnableOutcome, TotpState,
+};
+pub use attachments::{
+    AttachmentMeta, MAX_REFS_PER_ITEM, NewAttachment, UNREFERENCED_GRACE_SECS, valid_managed_id,
 };
 pub use backup::{
     BackupInfo, DEFAULT_ACQUIRE_TIMEOUT, RestoreInfo, StoreOptions, backup_database,

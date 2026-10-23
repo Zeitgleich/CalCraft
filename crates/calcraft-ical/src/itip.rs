@@ -715,6 +715,21 @@ pub fn apply_replies(
 fn override_of(master: &Component, value: &str) -> Component {
     let mut component = cleaned(master);
     component.components.clear();
+    retime(&mut component, master, value);
+    component
+}
+
+/// A copy of the master for the instance starting at `value`, keeping its
+/// alarms and parameters (an override the owner's client could have
+/// written, e.g. for an attachment of one instance).
+pub(crate) fn instance_override(master: &Component, value: &str) -> Component {
+    let mut component = master.clone();
+    retime(&mut component, master, value);
+    component
+}
+
+/// Turns a copy of the master into the override starting at `value`.
+fn retime(component: &mut Component, master: &Component, value: &str) {
     let start = master.property("DTSTART");
     let duration = match (start, master.property("DTEND"), master.property("DUE")) {
         (Some(start), Some(end), _) | (Some(start), None, Some(end)) => {
@@ -766,7 +781,6 @@ fn override_of(master: &Component, value: &str) -> Component {
         };
         component.properties.push(simple("DURATION", &value));
     }
-    component
 }
 
 /// The REPLY message for the components at `indices` of the organizer's

@@ -117,6 +117,22 @@ fn role(tree: &Component, is_me: &dyn Fn(&str) -> bool) -> Result<Role, Response
     })
 }
 
+/// Whether the user is an attendee (not the organizer) of `tree`: their
+/// copy of somebody else's invitation. Only organizers may add, update or
+/// remove managed attachments (RFC 8607 §3.6).
+pub(super) async fn is_attendee(
+    ctx: Ctx<'_>,
+    scheduling: &Scheduling,
+    tree: &Component,
+) -> Result<bool, Response> {
+    let me = scheduling
+        .addresses(&ctx.state.store, ctx.user)
+        .await
+        .map_err(store_error)?;
+    let is_me = |v: &str| me.contains(&normalize(v));
+    Ok(role(tree, &is_me)? == Role::Attendee)
+}
+
 /// Result of one attempt: a response, or "the object changed, try again".
 enum Attempt {
     Done(Response),
@@ -157,6 +173,7 @@ async fn store_object(
         index_version: INDEX_VERSION,
         etag: &etag,
         content: &body,
+        attachments: &validated.managed_ids,
     };
     match ctx
         .state

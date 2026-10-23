@@ -72,7 +72,8 @@ pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request, mode: Mo
         | Resource::Home(_)
         | Resource::Inbox
         | Resource::InboxItem(_)
-        | Resource::Outbox => return method_not_allowed(),
+        | Resource::Outbox
+        | Resource::Attachment(_) => return method_not_allowed(),
     };
     // Objects cannot be moved out of a subscription (copies are fine).
     if mode == Mode::Move && source.read_only {

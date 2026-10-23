@@ -69,6 +69,18 @@ async fn purge_and_log(store: &Store) {
             tracing::warn!(%err, sqlite_code = err.sqlite_code(), "purging the trash failed");
         }
     }
+    // Uploads of managed attachments that no object references (an
+    // aborted or failed POST): removed once their grace period is over.
+    match store
+        .purge_unreferenced_attachments(now(), PURGE_BATCH)
+        .await
+    {
+        Ok(0) => {}
+        Ok(attachments) => tracing::info!(attachments, "removed unreferenced attachment uploads"),
+        Err(err) => {
+            tracing::warn!(%err, sqlite_code = err.sqlite_code(), "removing unreferenced attachments failed");
+        }
+    }
 }
 
 /// Purges expired entries now, then every [`PURGE_INTERVAL`], and within

@@ -10,7 +10,7 @@ use calcraft_dav::{Depth, MAX_PROPFIND_BODY, Multistatus, Propfind};
 use super::{
     Ctx, bad_request, dav_error, multistatus, not_found,
     paths::{Resource, collection_href, href_of, item_href},
-    props::{dead_properties, item_properties, properties, respond},
+    props::{AttachmentLimits, dead_properties, item_properties, properties, respond},
     read_body, store_error,
 };
 
@@ -33,6 +33,10 @@ pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
 
     let user = ctx.user;
     let username = &user.username;
+    let limits = ctx.state.attachments.as_ref().map(|a| AttachmentLimits {
+        max_size: a.config.max_bytes,
+        max_per_resource: a.config.max_per_object,
+    });
     let mut responses = Vec::new();
     match &resource {
         Resource::Unmapped(..) => return not_found(),
@@ -56,7 +60,7 @@ pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
             Err(err) => return store_error(err),
         },
         _ => {
-            let mut props = properties(&resource, user, ctx.state.max_vcard_bytes);
+            let mut props = properties(&resource, user, ctx.state.max_vcard_bytes, limits);
             if let (Resource::Principal, Some(scheduling)) = (&resource, &ctx.state.scheduling) {
                 match scheduling.address_set(&ctx.state.store, user).await {
                     Ok(addresses) => {
@@ -93,6 +97,7 @@ pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
                         &Resource::Collection(collection),
                         user,
                         ctx.state.max_vcard_bytes,
+                        limits,
                     );
                     props.extend(dead_properties(
                         id,

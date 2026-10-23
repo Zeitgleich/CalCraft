@@ -95,6 +95,8 @@ pub struct CalendarObject {
     /// `range` is only their hull: time-range queries check candidates with
     /// [`crate::matches_time_range`].
     pub recurring: bool,
+    /// Managed attachments (RFC 8607) the instance components reference.
+    pub managed_ids: Vec<String>,
 }
 
 impl CalendarObject {
@@ -176,6 +178,7 @@ impl CalendarObject {
             kind,
             range,
             recurring,
+            managed_ids: crate::attach::managed_ids(&calendar),
         })
     }
 }

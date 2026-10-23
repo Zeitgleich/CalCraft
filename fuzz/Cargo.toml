@@ -50,3 +50,10 @@ path = "fuzz_targets/itip.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "attach"
+path = "fuzz_targets/attach.rs"
+test = false
+doc = false
+bench = false

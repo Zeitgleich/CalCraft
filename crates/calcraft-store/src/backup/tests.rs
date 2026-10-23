@@ -99,6 +99,7 @@ async fn put(store: &Store, collection: i64, name: &str, etag: &str) {
                 index_version: 0,
                 etag,
                 content: &content,
+                attachments: &[],
             },
             &Precondition::None,
         )

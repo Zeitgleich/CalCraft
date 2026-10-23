@@ -309,6 +309,33 @@ fn scheduling_is_off_by_default_and_validated() {
 }
 
 #[test]
+fn attachments_are_off_by_default_and_validated() {
+    let config = from_toml("").unwrap();
+    assert!(!config.attachments.enabled);
+    assert_eq!(config.attachments.max_bytes, 10 * 1024 * 1024);
+    let config = from_toml(
+        "[attachments]\nenabled = true\nbase_url = \"https://cal.example.org\"\nmax_bytes = 2048\n",
+    )
+    .unwrap();
+    assert_eq!(config.attachments.base(), "https://cal.example.org");
+    for bad in [
+        "enabled = true",
+        "enabled = true\nbase_url = \"https://cal.example.org/sub\"",
+        "base_url = \"javascript:alert(1)\"",
+        "max_bytes = 1",
+        "max_bytes = 104857601",
+        "max_per_object = 101",
+        "max_bytes_per_user = 100",
+        "enable = true",
+    ] {
+        assert!(
+            from_toml(&format!("[attachments]\n{bad}\n")).is_err(),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
 fn example_configuration_is_valid() {
     let text = include_str!("../../../../calcraft.example.toml");
     from_toml(text).unwrap();

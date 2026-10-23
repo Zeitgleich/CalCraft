@@ -26,6 +26,7 @@ fn item<'a>(uid: &'a str, etag: &'a str, content: &'a [u8]) -> NewItem<'a> {
         index_version: 0,
         etag,
         content,
+        attachments: &[],
     }
 }
 

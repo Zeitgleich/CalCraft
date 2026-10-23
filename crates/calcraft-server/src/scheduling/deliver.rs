@@ -13,7 +13,7 @@
 
 use std::time::Duration;
 
-use calcraft_ical::{Component, INDEX_VERSION, itip, parse, write::to_string};
+use calcraft_ical::{Component, INDEX_VERSION, attach, itip, parse, write::to_string};
 use calcraft_store::{
     Collection, NewInboxMessage, NewItem, Precondition, ScheduleTag, StoreError, User,
 };
@@ -109,6 +109,9 @@ async fn store_text(
         index_version: INDEX_VERSION,
         etag: &etag,
         content: body,
+        // Recorded only where allowed: the organizer's own attachments, or
+        // those of the organizer's object this copy is derived from.
+        attachments: &validated.managed_ids,
     };
     state
         .store
@@ -342,11 +345,15 @@ pub async fn cancel(
                 Err(err) => return Err(err.into()),
             }
         }
+        // The kept copy no longer references the organizer's managed
+        // attachments (RFC 8607): the cancellation ends the access.
+        let mut kept = itip::cancelled(&old);
+        attach::strip_managed(&mut kept);
         match store_tree(
             state,
             &object.collection,
             &object.name,
-            &itip::cancelled(&old),
+            &kept,
             &guard,
             Some(&new_schedule_tag()),
             origin,
@@ -359,11 +366,9 @@ pub async fn cancel(
             Err(err) => return Err(err.into()),
         }
     }
-    let message = serialize(&itip::message(
-        "CANCEL",
-        &itip::cancelled(projection),
-        &dtstamp(),
-    ))?;
+    let mut cancelled = itip::cancelled(projection);
+    attach::strip_managed(&mut cancelled);
+    let message = serialize(&itip::message("CANCEL", &cancelled, &dtstamp()))?;
     if scheduling.allow_bytes(
         recipient.id,
         u64::try_from(message.len()).unwrap_or(u64::MAX),

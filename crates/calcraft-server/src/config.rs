@@ -35,6 +35,7 @@ pub struct Config {
     pub updates: UpdatesConfig,
     pub subscriptions: SubscriptionsConfig,
     pub scheduling: SchedulingConfig,
+    pub attachments: AttachmentsConfig,
     pub logging: LoggingConfig,
 }
 
@@ -770,6 +771,120 @@ impl SchedulingConfig {
     }
 }
 
+/// Bounds of `attachments.max_bytes` (1 KiB to 100 MiB).
+pub const ATTACHMENT_MAX_BYTES: std::ops::RangeInclusive<usize> = 1024..=100 * 1024 * 1024;
+/// Bounds of `attachments.max_per_object`.
+pub const ATTACHMENTS_PER_OBJECT: std::ops::RangeInclusive<u32> = 1..=100;
+
+/// CalDAV managed attachments (RFC 8607): files uploaded with
+/// `POST …?action=attachment-add` and served below `/dav/attachments/`.
+/// Off by default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AttachmentsConfig {
+    /// Accept uploads and serve attachments.
+    pub enabled: bool,
+    /// Scheme and host clients reach the server at, e.g.
+    /// `https://cal.example.org` (no path). The attachment URLs in
+    /// calendar objects are built from it, never from the request's `Host`
+    /// header. Required when enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Largest attachment in bytes (1 KiB to 100 MiB). Only uploads may be
+    /// this large; `server.max_body_bytes` still applies to everything else.
+    pub max_bytes: usize,
+    /// Most managed attachments of one calendar object (1 to 100).
+    pub max_per_object: u32,
+    /// Bytes of attachments one user may own in total (at least
+    /// `max_bytes`). They also count towards the storage quota.
+    pub max_bytes_per_user: u64,
+}
+
+impl Default for AttachmentsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: None,
+            max_bytes: 10 * 1024 * 1024,
+            max_per_object: 20,
+            max_bytes_per_user: 256 * 1024 * 1024,
+        }
+    }
+}
+
+/// Whether `url` is `http(s)://host[:port]` (lower-case host name or IP
+/// literal, no user info, path, query or fragment).
+fn valid_base_url(url: &str) -> bool {
+    let Some(authority) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let authority = authority.strip_suffix('/').unwrap_or(authority);
+    let (host_ok, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let Some((ip, after)) = rest.split_once(']') else {
+            return false;
+        };
+        let port = match after {
+            "" => None,
+            after => match after.strip_prefix(':') {
+                Some(port) => Some(port),
+                None => return false,
+            },
+        };
+        (ip.parse::<std::net::Ipv6Addr>().is_ok(), port)
+    } else {
+        let (host, port) = match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        };
+        let ok = host.parse::<std::net::Ipv4Addr>().is_ok()
+            || (!host.starts_with("*.") && !host.starts_with('.') && valid_host_pattern(host));
+        (ok, port)
+    };
+    let port_ok = port.is_none_or(|p| p.parse::<u16>().is_ok_and(|p| p > 0));
+    host_ok && port_ok
+}
+
+impl AttachmentsConfig {
+    /// `base_url` without a trailing slash.
+    pub fn base(&self) -> &str {
+        self.base_url
+            .as_deref()
+            .map_or("", |url| url.strip_suffix('/').unwrap_or(url))
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !ATTACHMENT_MAX_BYTES.contains(&self.max_bytes) {
+            return Err(ConfigError::Invalid(
+                "attachments.max_bytes must be between 1024 and 104857600 (100 MiB)",
+            ));
+        }
+        if !ATTACHMENTS_PER_OBJECT.contains(&self.max_per_object) {
+            return Err(ConfigError::Invalid(
+                "attachments.max_per_object must be between 1 and 100",
+            ));
+        }
+        if self.max_bytes_per_user < u64::try_from(self.max_bytes).unwrap_or(u64::MAX)
+            || self.max_bytes_per_user > 1 << 40
+        {
+            return Err(ConfigError::Invalid(
+                "attachments.max_bytes_per_user must be between attachments.max_bytes and 1 TiB",
+            ));
+        }
+        match &self.base_url {
+            Some(url) if !valid_base_url(url) => Err(ConfigError::Invalid(
+                "attachments.base_url: use scheme and host only, like https://cal.example.org",
+            )),
+            None if self.enabled => Err(ConfigError::Invalid(
+                "attachments.base_url is required when attachments are enabled",
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
@@ -918,6 +1033,7 @@ impl Config {
         }
         self.subscriptions.validate()?;
         self.scheduling.validate()?;
+        self.attachments.validate()?;
         self.oidc.validate()
     }
 }

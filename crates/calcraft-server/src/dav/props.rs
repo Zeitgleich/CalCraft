@@ -175,12 +175,21 @@ pub fn components(collection: &Collection) -> Vec<&str> {
         .collect()
 }
 
+/// Limits of managed attachments (RFC 8607 §6.2, §6.3), reported on
+/// writable calendars while attachments are enabled.
+#[derive(Debug, Clone, Copy)]
+pub struct AttachmentLimits {
+    pub max_size: usize,
+    pub max_per_resource: u32,
+}
+
 /// All live properties of a collection-level resource; `max_vcard_bytes`
 /// is reported as the address books' `CARDDAV:max-resource-size`.
 pub fn properties(
     resource: &Resource,
     user: &User,
     max_vcard_bytes: usize,
+    attachments: Option<AttachmentLimits>,
 ) -> Vec<(PropName, PropValue)> {
     let username = &user.username;
     let principal = principal_href(username);
@@ -213,11 +222,19 @@ pub fn properties(
                 ),
             ]);
         }
-        Resource::Home(_) => {
+        Resource::Home(kind) => {
             props.extend([
                 resourcetype(&[(NS_DAV, "collection")]),
                 prop(NS_DAV, "owner", PropValue::Href(principal)),
             ]);
+            // Empty: attachments live on this server (RFC 8607 §6.1).
+            if *kind == CollectionKind::Calendar && attachments.is_some() {
+                props.push(prop(
+                    NS_CALDAV,
+                    "managed-attachments-server-URL",
+                    PropValue::Empty,
+                ));
+            }
         }
         Resource::Collection(collection) => {
             props.extend(collection_properties(
@@ -225,13 +242,31 @@ pub fn properties(
                 principal,
                 max_vcard_bytes,
             ));
+            if let Some(limits) = attachments
+                && collection.kind == CollectionKind::Calendar
+                && !collection.read_only
+            {
+                props.extend([
+                    prop(
+                        NS_CALDAV,
+                        "max-attachment-size",
+                        PropValue::Text(limits.max_size.to_string()),
+                    ),
+                    prop(
+                        NS_CALDAV,
+                        "max-attachments-per-resource",
+                        PropValue::Text(limits.max_per_resource.to_string()),
+                    ),
+                ]);
+            }
         }
         // Unmapped paths and items are handled elsewhere.
         Resource::Unmapped(..)
         | Resource::Item(..)
         | Resource::Inbox
         | Resource::InboxItem(_)
-        | Resource::Outbox => {}
+        | Resource::Outbox
+        | Resource::Attachment(_) => {}
     }
     props
 }

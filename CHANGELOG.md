@@ -39,6 +39,24 @@ follow [Semantic Versioning](https://semver.org/). Release process:
   like unknown addresses.
 - Fuzz target `itip`; the client compatibility CI job also runs a
   python-caldav scheduling session.
+- CalDAV managed attachments (RFC 8607), off by default (`[attachments]
+  enabled = true` and `base_url`, see
+  [docs/attachments.md](docs/attachments.md)): `POST <object>?action=
+  attachment-add|attachment-update|attachment-remove` with `managed-id` and
+  `rid` (recurrence instances, overrides created as needed),
+  `Cal-Managed-ID`, `calendar-managed-attachments` in the DAV header,
+  `managed-attachments-server-URL`, `max-attachment-size` and
+  `max-attachments-per-resource`. Files are stored in the database (part of
+  backups and the trash), owned by the uploader and counted in their quota
+  (`max_bytes`, `max_per_object`, `max_bytes_per_user`), and removed when
+  no object or trash entry references them. Downloads below
+  `/dav/attachments/<managed-id>` for the uploader and for users whose own
+  objects reference the file (invitations), always as `Content-Disposition:
+  attachment` with `nosniff`, `default-src 'none'; sandbox` and only
+  allowlisted media types; sanitised file names. PUTs may keep their own
+  attachments (rewritten to the server's form) but not reference somebody
+  else's (`CALDAV:valid-managed-id-parameter`); cancelled attendee copies
+  lose the organizer's attachments. Fuzz target `attach`.
 
 ### Changed
 
@@ -47,6 +65,12 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 - Migration `0011_scheduling` (columns `users.email`,
   `users.accept_invitations`, `users.inbox_revision`, `items.schedule_tag`,
   table `schedule_inbox`).
+- Migration `0012_attachments` (tables `attachments` and `attachment_refs`,
+  a trigger that removes unreferenced attachments).
+- `server.max_body_bytes` is enforced by an own middleware (same behaviour:
+  `413` for a larger `Content-Length`); only attachment uploads get
+  `attachments.max_bytes` instead. `MOVE` now moves the stored row (same
+  result for clients).
 
 ## [0.1.0-alpha.2] – 2026-10-22
 
