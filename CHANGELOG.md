@@ -76,6 +76,10 @@ default). New configuration sections `[scheduling]` and `[attachments]`
 
 ### Changed
 
+- Dependency update: `ctutils` 0.4.5 (RUSTSEC-2026-0385, constant-time mask
+  generation; used through `argon2`/`hmac`).
+- sqlx's "slow statement" messages (which contain SQL text) are logged at
+  debug level instead of warn, so warnings and errors never contain SQL.
 - `POST` is part of the DAV `Allow` header (only the scheduling outbox
   accepts it).
 - Migration `0011_scheduling` (columns `users.email`,

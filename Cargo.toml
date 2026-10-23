@@ -50,6 +50,8 @@ tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros", "net", "s
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.1", features = ["trace", "timeout", "limit", "catch-panic"] }
 tracing = "0.1.44"
+# Only for the level type of sqlx's statement logging (already a dependency of sqlx).
+log = { version = "0.4.34", default-features = false }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
 
 [workspace.lints.rust]
