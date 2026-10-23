@@ -27,10 +27,16 @@ follow [Semantic Versioning](https://semver.org/). Release process:
   administrators (`calcraft user set-email`, `calcraft user add --email`,
   `email` in the admin REST API and web UI), unique across users, plus
   `mailto:<username>@<scheduling.domain>`. Never taken from SSO claims.
-- Limits: `max_attendees`, `max_recipients_per_hour`, `inbox_max_messages`,
+- Limits: `max_attendees`, `max_recipients_per_hour` (every delivery, every
+  new attendee and every free/busy recipient), `max_delivered_bytes_per_hour`
+  and `max_delivered_object_bytes` per recipient, `inbox_max_messages`,
   `max_freebusy_days`; deliveries count towards the recipient's quota and are
   refused with 5.1 instead of failing the organizer's request; disabled users
-  are treated like unknown ones.
+  are treated like unknown ones. Cancelled invitations the attendee never
+  touched are removed instead of kept.
+- Users can refuse invitations (web UI *Settings*, `PATCH
+  /api/v1/me/scheduling`, `calcraft user set-invitations`); they then look
+  like unknown addresses.
 - Fuzz target `itip`; the client compatibility CI job also runs a
   python-caldav scheduling session.
 
@@ -39,7 +45,8 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 - `POST` is part of the DAV `Allow` header (only the scheduling outbox
   accepts it).
 - Migration `0011_scheduling` (columns `users.email`,
-  `users.inbox_revision`, `items.schedule_tag`, table `schedule_inbox`).
+  `users.accept_invitations`, `users.inbox_revision`, `items.schedule_tag`,
+  table `schedule_inbox`).
 
 ## [0.1.0-alpha.2] – 2026-10-22
 

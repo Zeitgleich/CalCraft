@@ -8,6 +8,8 @@
 // built once per request and returned right away.
 #![allow(clippy::result_large_err)]
 
+use std::collections::HashSet;
+
 use axum::{
     body::{Body, Bytes},
     extract::Request,
@@ -46,7 +48,7 @@ use super::{
 use crate::{
     auth::now,
     scheduling::{
-        Resolution, Scheduling, default_calendar,
+        Grant, Resolution, Scheduling, default_calendar,
         deliver::{self, ReplyEffect, ReplySource},
         freebusy, new_schedule_tag, normalize,
     },
@@ -167,6 +169,7 @@ async fn store_object(
             &ScheduleTag {
                 set: Some(tag),
                 if_match: None,
+                requires: None,
             },
         )
         .await
@@ -260,6 +263,7 @@ pub(super) async fn put(
         let tags = ScheduleTag {
             set: None,
             if_match: if_tag.as_deref(),
+            requires: None,
         };
         return match store
             .put_item_scheduled(collection.id, name, &item, &precondition, &tags)
@@ -276,7 +280,12 @@ pub(super) async fn put(
         };
     }
     let uid = item.uid;
-    for _ in 0..ATTEMPTS {
+    // Recipients are charged once per request, not once per attempt.
+    let mut grant = Grant::default();
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            deliver::backoff(attempt).await;
+        }
         let old = match store.item_with_schedule_tag(collection.id, name).await {
             Ok(old) => old,
             Err(err) => return store_error(err),
@@ -311,17 +320,21 @@ pub(super) async fn put(
             None => Precondition::MustNotExist,
         };
         let old_tree = old.as_ref().and_then(|(item, _)| parse(&item.content).ok());
+        let target = Target {
+            collection,
+            name,
+            guard: &guard,
+        };
         let attempt = match role {
             Role::Organizer => {
                 organizer_put(
                     ctx,
                     scheduling,
-                    collection,
-                    name,
+                    &target,
                     tree.clone(),
                     old_tree.as_ref(),
-                    &guard,
                     &me,
+                    &mut grant,
                 )
                 .await
             }
@@ -329,12 +342,11 @@ pub(super) async fn put(
                 attendee_put(
                     ctx,
                     scheduling,
-                    collection,
-                    name,
+                    &target,
                     tree.clone(),
                     old_tree.as_ref(),
-                    &guard,
                     &me,
+                    &mut grant,
                 )
                 .await
             }
@@ -347,9 +359,17 @@ pub(super) async fn put(
     StatusCode::PRECONDITION_FAILED.into_response()
 }
 
+/// Where a PUT stores its object.
+struct Target<'a> {
+    collection: &'a Collection,
+    name: &'a str,
+    /// Precondition matching the object as read for this attempt.
+    guard: &'a Precondition,
+}
+
 /// A message for one attendee.
 enum Action {
-    Request(Component),
+    Request,
     Cancel(Component),
 }
 
@@ -357,6 +377,11 @@ struct Recipient {
     /// Normalised address.
     address: String,
     action: Action,
+    /// Not invited before this change.
+    new: bool,
+    /// The times changed for this attendee: the organizer may reset their
+    /// answer to NEEDS-ACTION.
+    rescheduled: bool,
     resolution: Resolution,
     /// Within the sender's rate limit.
     allowed: bool,
@@ -383,7 +408,8 @@ fn attendee_agent(tree: &Component, address: &str) -> Option<Agent> {
 
 /// Works out the messages of an organizer's change: an invitation (or
 /// update) for every attendee whose view changed or who is new, a
-/// cancellation for every attendee removed.
+/// cancellation for every attendee removed. A user who does not accept
+/// invitations counts as unknown for invitations (not for cancellations).
 async fn recipients(
     ctx: Ctx<'_>,
     scheduling: &Scheduling,
@@ -410,21 +436,31 @@ async fn recipients(
         let new_view = itip::project(tree, &matches);
         let old_view = old.and_then(|old| itip::project(old, &matches));
         let forced = itip::force_send(tree, "ATTENDEE", &matches, "REQUEST");
+        let new = old_view.is_none();
+        let rescheduled =
+            matches!((&new_view, &old_view), (Some(n), Some(o)) if itip::rescheduled(n, o));
         let action = match (new_view, old_view) {
-            (Some(new), None) => Action::Request(new),
+            (Some(_), None) => Action::Request,
             (Some(new), Some(old)) if forced || !itip::same_for_attendee(&new, &old) => {
-                Action::Request(new)
+                Action::Request
             }
             (None, Some(old)) => Action::Cancel(old),
             _ => continue,
         };
-        let resolution = scheduling.resolve(&ctx.state.store, &address).await?;
+        let mut resolution = scheduling.resolve(&ctx.state.store, &address).await?;
         if matches!(&resolution, Resolution::Local(u) if u.id == ctx.user.id) {
             continue;
+        }
+        if let (Resolution::Local(user), Action::Request) = (&resolution, &action)
+            && !ctx.state.store.accepts_invitations(user.id).await?
+        {
+            resolution = Resolution::Unknown;
         }
         out.push(Recipient {
             address,
             action,
+            new,
+            rescheduled,
             resolution,
             allowed: false,
         });
@@ -432,16 +468,27 @@ async fn recipients(
     Ok(out)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Whether a recipient costs from the sender's hourly budget: every
+/// delivery to a user, and every new attendee whatever their address
+/// resolves to, so that probing addresses (3.7 against 1.2) is limited
+/// like free/busy lookups.
+fn charged(recipient: &Recipient) -> bool {
+    match recipient.resolution {
+        Resolution::Local(_) => true,
+        Resolution::Unknown | Resolution::External => {
+            recipient.new && matches!(recipient.action, Action::Request)
+        }
+    }
+}
+
 async fn organizer_put(
     ctx: Ctx<'_>,
     scheduling: &Scheduling,
-    collection: &Collection,
-    name: &str,
+    target: &Target<'_>,
     mut tree: Component,
     old: Option<&Component>,
-    guard: &Precondition,
     me: &[String],
+    grant: &mut Grant,
 ) -> Attempt {
     let is_me = |v: &str| me.contains(&normalize(v));
     let max = usize::try_from(scheduling.config.max_attendees).unwrap_or(usize::MAX);
@@ -455,16 +502,20 @@ async fn organizer_put(
         Ok(recipients) => recipients,
         Err(err) => return Attempt::Done(store_error(err)),
     };
-    let local = recipients
-        .iter()
-        .filter(|r| matches!(r.resolution, Resolution::Local(_)))
-        .count();
-    let mut granted = scheduling.allow(ctx.user.id, u32::try_from(local).unwrap_or(u32::MAX));
+    let wanted = recipients.iter().filter(|r| charged(r)).count();
+    let mut granted = grant.take(
+        scheduling,
+        ctx.user.id,
+        u32::try_from(wanted).unwrap_or(u32::MAX),
+    );
     for recipient in &mut recipients {
-        if matches!(recipient.resolution, Resolution::Local(_)) && granted > 0 {
-            recipient.allowed = true;
-            granted -= 1;
-        }
+        recipient.allowed = if charged(recipient) {
+            let allowed = granted > 0;
+            granted = granted.saturating_sub(1);
+            allowed
+        } else {
+            true
+        };
     }
 
     itip::strip_requests(&mut tree);
@@ -472,33 +523,35 @@ async fn organizer_put(
     itip::restore_statuses(&mut tree, old, &|p| {
         p.name == "ATTENDEE" && itip::agent(p) == Agent::Client
     });
+    // Participation statuses of server-scheduled attendees come from their
+    // replies only: kept from the stored copy, NEEDS-ACTION for new ones.
     if let Some(old) = old {
-        let local_attendee = |v: &str| {
-            let address = normalize(v);
-            recipients
-                .iter()
-                .any(|r| r.address == address && matches!(r.resolution, Resolution::Local(_)))
-                || (!is_me(v)
-                    && attendee_agent(old, &address) == Some(Agent::Server)
-                    && !recipients.iter().any(|r| r.address == address))
-        };
+        let scheduled =
+            |v: &str| !is_me(v) && attendee_agent(old, &normalize(v)) == Some(Agent::Server);
         let rescheduled = |v: &str| {
             let address = normalize(v);
             recipients
                 .iter()
-                .any(|r| r.address == address && matches!(r.action, Action::Request(_)))
+                .any(|r| r.address == address && r.rescheduled)
         };
-        itip::preserve_partstats(&mut tree, old, &local_attendee, &rescheduled);
+        itip::preserve_partstats(&mut tree, old, &scheduled, &rescheduled);
+    }
+    for recipient in recipients
+        .iter()
+        .filter(|r| r.new && matches!(r.action, Action::Request))
+    {
+        let address = &recipient.address;
+        itip::reset_partstat(&mut tree, &|v: &str| normalize(v) == *address);
     }
     for recipient in &recipients {
-        if !matches!(recipient.action, Action::Request(_)) {
+        if !matches!(recipient.action, Action::Request) {
             continue;
         }
         let status = match (&recipient.resolution, recipient.allowed) {
+            (_, false) => status::NOT_DELIVERED,
             (Resolution::Local(_), true) => status::DELIVERED,
-            (Resolution::Local(_), false) => status::NOT_DELIVERED,
-            (Resolution::Unknown, _) => status::INVALID_USER,
-            (Resolution::External, _) => status::NO_SCHEDULING,
+            (Resolution::Unknown, true) => status::INVALID_USER,
+            (Resolution::External, true) => status::NO_SCHEDULING,
         };
         let address = &recipient.address;
         itip::set_parameter(
@@ -511,9 +564,23 @@ async fn organizer_put(
     }
 
     let tag = new_schedule_tag();
-    let outcome = match store_object(ctx, collection, name, &tree, guard, &tag).await {
+    let outcome = match store_object(
+        ctx,
+        target.collection,
+        target.name,
+        &tree,
+        target.guard,
+        &tag,
+    )
+    .await
+    {
         Ok((outcome, _)) => outcome,
         Err(attempt) => return attempt,
+    };
+    let origin = deliver::Origin {
+        collection_id: target.collection.id,
+        name: target.name,
+        tag: &tag,
     };
 
     let sender = itip::organizer(&tree)
@@ -531,29 +598,38 @@ async fn organizer_put(
         if !recipient.allowed {
             continue;
         }
+        let address = &recipient.address;
         let result = match &recipient.action {
-            Action::Request(view) => {
-                deliver::request(ctx.state, scheduling, me, &sender, user, view).await
-            }
+            // The view of the tree as stored (statuses as recorded).
+            Action::Request => match itip::project(&tree, &|v: &str| normalize(v) == *address) {
+                Some(view) => {
+                    deliver::request(ctx.state, scheduling, me, &sender, user, &view, origin).await
+                }
+                None => continue,
+            },
             Action::Cancel(view) => {
-                deliver::cancel(ctx.state, scheduling, me, &sender, user, view).await
+                deliver::cancel(ctx.state, scheduling, me, &sender, user, view, Some(origin)).await
             }
         };
         match result {
             Ok(()) => delivered += 1,
             Err(failure) => {
-                if matches!(recipient.action, Action::Request(_)) {
-                    let status = match failure {
-                        deliver::Failure::NoAuthority => status::NOT_DELIVERED,
-                        failure => failure.status(),
-                    };
-                    failed.push((recipient.address.clone(), status));
+                if matches!(recipient.action, Action::Request) {
+                    failed.push((Some(recipient.address.clone()), failure.status()));
                 }
             }
         }
     }
     if !failed.is_empty() {
-        deliver::record_statuses(ctx.state, collection, name, &tag, &failed).await;
+        deliver::record_statuses(
+            ctx.state,
+            target.collection,
+            target.name,
+            &tag,
+            "ATTENDEE",
+            &failed,
+        )
+        .await;
     }
     tracing::info!(
         user = %ctx.user.username,
@@ -594,16 +670,14 @@ fn own_statuses(tree: &Component, is_me: &dyn Fn(&str) -> bool) -> Vec<String> {
     out
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn attendee_put(
     ctx: Ctx<'_>,
     scheduling: &Scheduling,
-    collection: &Collection,
-    name: &str,
+    target: &Target<'_>,
     mut tree: Component,
     old: Option<&Component>,
-    guard: &Precondition,
     me: &[String],
+    grant: &mut Grant,
 ) -> Attempt {
     let is_me = |v: &str| me.contains(&normalize(v));
     let Ok(Some(organizer)) = itip::organizer(&tree).map(|o| o.cloned()) else {
@@ -612,7 +686,12 @@ async fn attendee_put(
     let forced = itip::force_send(&tree, "ORGANIZER", &|_| true, "REPLY");
     itip::strip_requests(&mut tree);
     itip::restore_statuses(&mut tree, old, &|_| false);
-    let changed = old.is_none_or(|old| own_statuses(old, &is_me) != own_statuses(&tree, &is_me));
+    // A reply that failed before (5.x) is sent again with the next PUT.
+    let failed_before = old
+        .and_then(itip::organizer_status)
+        .is_some_and(|s| s.starts_with('5'));
+    let changed = failed_before
+        || old.is_none_or(|old| own_statuses(old, &is_me) != own_statuses(&tree, &is_me));
     let uid = itip::uid(&tree).unwrap_or_default().to_owned();
 
     let mut plan = None;
@@ -631,24 +710,31 @@ async fn attendee_put(
                     Ok(addresses) => addresses,
                     Err(err) => return Attempt::Done(store_error(err)),
                 };
-                match deliver::check_reply(
-                    ctx.state,
-                    &organizer_user,
-                    &addresses,
-                    me,
-                    &uid,
-                    ReplySource::Copy(&tree),
-                    forced,
-                )
-                .await
-                {
-                    Ok(ReplyEffect::Changes) if scheduling.allow(ctx.user.id, 1) == 1 => {
-                        plan = Some((organizer_user, addresses));
-                        Some(status::DELIVERED)
+                if grant.take(scheduling, ctx.user.id, 1) == 0 {
+                    Some(status::NOT_DELIVERED)
+                } else {
+                    let source = ReplySource::Copy(tree.clone());
+                    match deliver::check_reply(
+                        ctx.state,
+                        &organizer_user,
+                        &addresses,
+                        me,
+                        &uid,
+                        &source,
+                        forced,
+                    )
+                    .await
+                    {
+                        Ok(ReplyEffect::Changes) => {
+                            plan = Some((organizer_user, addresses));
+                            Some(status::DELIVERED)
+                        }
+                        // Nothing to send; a failure recorded before is
+                        // over, the organizer's copy already agrees.
+                        Ok(ReplyEffect::Unchanged) if failed_before => Some(status::DELIVERED),
+                        Ok(ReplyEffect::Unchanged) => None,
+                        Err(failure) => Some(failure.status()),
                     }
-                    Ok(ReplyEffect::Changes) => Some(status::NOT_DELIVERED),
-                    Ok(ReplyEffect::Unchanged) => None,
-                    Err(failure) => Some(failure.status()),
                 }
             }
             Resolution::Local(_) => None,
@@ -667,7 +753,16 @@ async fn attendee_put(
     }
 
     let tag = new_schedule_tag();
-    let outcome = match store_object(ctx, collection, name, &tree, guard, &tag).await {
+    let outcome = match store_object(
+        ctx,
+        target.collection,
+        target.name,
+        &tree,
+        target.guard,
+        &tag,
+    )
+    .await
+    {
         Ok((outcome, _)) => outcome,
         Err(attempt) => return attempt,
     };
@@ -681,10 +776,23 @@ async fn attendee_put(
             me,
             &sender,
             &uid,
-            ReplySource::Copy(&tree),
+            &ReplySource::Copy(tree),
             forced,
         )
         .await;
+        if let Err(failure) = &result {
+            // Recorded in the attendee's copy, so that the next PUT sends
+            // the reply again instead of losing it.
+            deliver::record_statuses(
+                ctx.state,
+                target.collection,
+                target.name,
+                &tag,
+                "ORGANIZER",
+                &[(None, failure.status())],
+            )
+            .await;
+        }
         tracing::info!(
             user = %ctx.user.username,
             delivered = result.is_ok(),
@@ -695,9 +803,11 @@ async fn attendee_put(
 }
 
 /// DELETE of a calendar object with scheduling enabled: into the trash as
-/// usual, then a cancellation to the attendees (organizer) or a decline to
+/// usual, with a cancellation to the attendees (organizer) or a decline to
 /// the organizer (attendee) – only for objects the server scheduled (with
-/// a Schedule-Tag), never for imported ones.
+/// a Schedule-Tag), never for imported ones. The decline is sent before
+/// the object goes, so that a failure can still be logged with it intact;
+/// the deletion happens either way.
 pub(super) async fn delete(
     ctx: Ctx<'_>,
     scheduling: &Scheduling,
@@ -707,7 +817,11 @@ pub(super) async fn delete(
     if_tag: Option<String>,
 ) -> Response {
     let store = &ctx.state.store;
-    for _ in 0..ATTEMPTS {
+    let mut declined = false;
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            deliver::backoff(attempt).await;
+        }
         let (item, tag) = match store.item_with_schedule_tag(collection.id, name).await {
             Ok(Some(found)) => found,
             Ok(None) => return not_found(),
@@ -720,6 +834,13 @@ pub(super) async fn delete(
             && tag.as_deref() != Some(expected.as_str())
         {
             return StatusCode::PRECONDITION_FAILED.into_response();
+        }
+        let tree = tag.as_ref().and_then(|_| parse(&item.content).ok());
+        if let Some(tree) = &tree
+            && !declined
+        {
+            declined = true;
+            decline(ctx, scheduling, tree).await;
         }
         let kind = collection.kind;
         match store
@@ -737,91 +858,106 @@ pub(super) async fn delete(
             Err(StoreError::PreconditionFailed) => continue,
             Err(err) => return store_error(err),
         }
-        if tag.is_some()
-            && let Ok(tree) = parse(&item.content)
-        {
-            after_delete(ctx, scheduling, &tree).await;
+        if let Some(tree) = &tree {
+            cancel_all(ctx, scheduling, tree).await;
         }
         return StatusCode::NO_CONTENT.into_response();
     }
     StatusCode::PRECONDITION_FAILED.into_response()
 }
 
-async fn after_delete(ctx: Ctx<'_>, scheduling: &Scheduling, tree: &Component) {
+/// The user's addresses and role in a deleted object.
+async fn deleted_role(
+    ctx: Ctx<'_>,
+    scheduling: &Scheduling,
+    tree: &Component,
+) -> Option<(Vec<String>, Role, String)> {
+    let me = scheduling
+        .addresses(&ctx.state.store, ctx.user)
+        .await
+        .ok()?;
+    let is_me = |v: &str| me.contains(&normalize(v));
+    let role = role(tree, &is_me).ok()?;
+    let organizer = itip::organizer(tree).ok()??;
+    let sender = normalize(&organizer.value);
+    Some((me, role, sender))
+}
+
+/// An attendee deletes their copy: everything declined.
+async fn decline(ctx: Ctx<'_>, scheduling: &Scheduling, tree: &Component) {
     let store = &ctx.state.store;
-    let Ok(me) = scheduling.addresses(store, ctx.user).await else {
+    let Some((me, Role::Attendee, sender)) = deleted_role(ctx, scheduling, tree).await else {
         return;
     };
-    let is_me = |v: &str| me.contains(&normalize(v));
-    let Ok(role) = role(tree, &is_me) else { return };
     let Ok(Some(organizer)) = itip::organizer(tree) else {
         return;
     };
-    let sender = normalize(&organizer.value);
-    match role {
-        Role::Organizer => {
-            let Ok(recipients) =
-                recipients(ctx, scheduling, &Component::default(), Some(tree), &is_me).await
-            else {
-                return;
-            };
-            let local: Vec<&Recipient> = recipients
-                .iter()
-                .filter(|r| matches!(r.resolution, Resolution::Local(_)))
-                .collect();
-            let granted =
-                scheduling.allow(ctx.user.id, u32::try_from(local.len()).unwrap_or(u32::MAX));
-            let mut delivered = 0usize;
-            for recipient in local
-                .into_iter()
-                .take(usize::try_from(granted).unwrap_or(0))
-            {
-                let (Resolution::Local(user), Action::Cancel(view)) =
-                    (&recipient.resolution, &recipient.action)
-                else {
-                    continue;
-                };
-                if deliver::cancel(ctx.state, scheduling, &me, &sender, user, view)
-                    .await
-                    .is_ok()
-                {
-                    delivered += 1;
-                }
-            }
-            tracing::info!(user = %ctx.user.username, delivered, "scheduling cancellations sent");
-        }
-        Role::Attendee => {
-            if itip::is_cancelled(tree) || itip::agent(organizer) != Agent::Server {
-                return;
-            }
-            let Ok(Resolution::Local(organizer_user)) = scheduling.resolve(store, &sender).await
-            else {
-                return;
-            };
-            if organizer_user.id == ctx.user.id || scheduling.allow(ctx.user.id, 1) == 0 {
-                return;
-            }
-            let Ok(addresses) = scheduling.addresses(store, &organizer_user).await else {
-                return;
-            };
-            let uid = itip::uid(tree).unwrap_or_default().to_owned();
-            let own = me.first().cloned().unwrap_or_default();
-            let result = deliver::reply(
-                ctx.state,
-                scheduling,
-                &organizer_user,
-                &addresses,
-                &me,
-                &own,
-                &uid,
-                ReplySource::DeclineAll,
-                false,
-            )
-            .await;
-            tracing::info!(user = %ctx.user.username, delivered = result.is_ok(), "scheduling reply sent");
-        }
-        Role::None => {}
+    if itip::is_cancelled(tree) || itip::agent(organizer) != Agent::Server {
+        return;
     }
+    let Ok(Resolution::Local(organizer_user)) = scheduling.resolve(store, &sender).await else {
+        return;
+    };
+    if organizer_user.id == ctx.user.id || scheduling.allow(ctx.user.id, 1) == 0 {
+        return;
+    }
+    let Ok(addresses) = scheduling.addresses(store, &organizer_user).await else {
+        return;
+    };
+    let uid = itip::uid(tree).unwrap_or_default().to_owned();
+    let own = me.first().cloned().unwrap_or_default();
+    let result = deliver::reply(
+        ctx.state,
+        scheduling,
+        &organizer_user,
+        &addresses,
+        &me,
+        &own,
+        &uid,
+        &ReplySource::DeclineAll,
+        false,
+    )
+    .await;
+    if result.is_err() {
+        tracing::warn!(user = %ctx.user.username, "decline of a deleted invitation not delivered");
+    }
+    tracing::info!(user = %ctx.user.username, delivered = result.is_ok(), "scheduling reply sent");
+}
+
+/// An organizer deleted the object: everybody is cancelled.
+async fn cancel_all(ctx: Ctx<'_>, scheduling: &Scheduling, tree: &Component) {
+    let Some((me, Role::Organizer, sender)) = deleted_role(ctx, scheduling, tree).await else {
+        return;
+    };
+    let is_me = |v: &str| me.contains(&normalize(v));
+    let Ok(recipients) =
+        recipients(ctx, scheduling, &Component::default(), Some(tree), &is_me).await
+    else {
+        return;
+    };
+    let local: Vec<&Recipient> = recipients
+        .iter()
+        .filter(|r| matches!(r.resolution, Resolution::Local(_)))
+        .collect();
+    let granted = scheduling.allow(ctx.user.id, u32::try_from(local.len()).unwrap_or(u32::MAX));
+    let mut delivered = 0usize;
+    for recipient in local
+        .into_iter()
+        .take(usize::try_from(granted).unwrap_or(0))
+    {
+        let (Resolution::Local(user), Action::Cancel(view)) =
+            (&recipient.resolution, &recipient.action)
+        else {
+            continue;
+        };
+        if deliver::cancel(ctx.state, scheduling, &me, &sender, user, view, None)
+            .await
+            .is_ok()
+        {
+            delivered += 1;
+        }
+    }
+    tracing::info!(user = %ctx.user.username, delivered, "scheduling cancellations sent");
 }
 
 // --- properties ---------------------------------------------------------------
@@ -1167,26 +1303,9 @@ pub(super) async fn report(ctx: Ctx<'_>, request: Request) -> Response {
     let store = &ctx.state.store;
     let user = ctx.user;
     let base = inbox_href(&user.username);
-    let (props, names): (Propfind, Vec<Result<String, String>>) = match report {
-        Report::CalendarMultiget { props, hrefs } => {
-            let mut seen = Vec::new();
-            let names = hrefs
-                .into_iter()
-                .filter(|href| {
-                    let new = !seen.contains(href);
-                    seen.push(href.clone());
-                    new
-                })
-                .map(|href| item_name_from_href(&href, &base).ok_or(href))
-                .collect();
-            (props, names)
-        }
-        Report::CalendarQuery { props, .. } => {
-            match store.inbox_messages(user.id, MAX_INBOX_LISTING).await {
-                Ok(messages) => (props, messages.into_iter().map(|m| Ok(m.name)).collect()),
-                Err(err) => return store_error(err),
-            }
-        }
+    let (props, multiget) = match report {
+        Report::CalendarMultiget { props, hrefs } => (props, Some(hrefs)),
+        Report::CalendarQuery { props, .. } => (props, None),
         _ => return dav_error(StatusCode::FORBIDDEN, "<d:supported-report/>"),
     };
     let with_data = match &props {
@@ -1194,21 +1313,76 @@ pub(super) async fn report(ctx: Ctx<'_>, request: Request) -> Response {
         Propfind::PropName => false,
         Propfind::Prop(names) => names.iter().any(|n| n.is(NS_CALDAV, "calendar-data")),
     };
+    // The same limits as REPORTs on calendars: results and returned bytes.
+    let fits = |count: usize, bytes: i64| {
+        count <= super::report::MAX_RESULTS
+            && (!with_data || bytes <= super::report::MAX_DATA_BYTES)
+    };
     let mut responses = Vec::new();
-    for name in names {
-        let name = match name {
-            Ok(name) => name,
-            Err(href) => {
-                responses.push(DavResponse::with_status(href, 404));
-                continue;
+    let mut found: Vec<calcraft_store::ItemMeta> = Vec::new();
+    let mut bytes = 0i64;
+    match multiget {
+        Some(hrefs) => {
+            // Deduplicated by the message they name, not by the href text
+            // (scheme and host are ignored when resolving).
+            let mut seen_names = HashSet::new();
+            let mut seen_hrefs = HashSet::new();
+            for href in hrefs {
+                let Some(name) = item_name_from_href(&href, &base) else {
+                    if seen_hrefs.insert(href.clone()) {
+                        responses.push(DavResponse::with_status(href, 404));
+                    }
+                    continue;
+                };
+                if !seen_names.insert(name.clone()) {
+                    continue;
+                }
+                match store.inbox_message_meta(user.id, &name).await {
+                    Ok(Some(meta)) => {
+                        bytes = bytes.saturating_add(meta.size);
+                        found.push(meta);
+                        if !fits(found.len(), bytes) {
+                            return dav_error(
+                                StatusCode::INSUFFICIENT_STORAGE,
+                                "<d:number-of-matches-within-limits/>",
+                            );
+                        }
+                    }
+                    Ok(None) => {
+                        responses.push(DavResponse::with_status(format!("{base}{name}"), 404))
+                    }
+                    Err(err) => return store_error(err),
+                }
             }
-        };
-        let href = format!("{base}{name}");
-        match store.inbox_message(user.id, &name).await {
+        }
+        None => {
+            let limit = u32::try_from(super::report::MAX_RESULTS + 1).unwrap_or(u32::MAX);
+            let messages = match store.inbox_messages(user.id, limit).await {
+                Ok(messages) => messages,
+                Err(err) => return store_error(err),
+            };
+            for meta in messages {
+                if !fits(found.len() + 1, bytes.saturating_add(meta.size)) {
+                    // Truncated like a calendar-query (RFC 4791 §7.9).
+                    responses.push(DavResponse::with_status(base.clone(), 507));
+                    break;
+                }
+                bytes = bytes.saturating_add(meta.size);
+                found.push(meta);
+            }
+        }
+    }
+    for meta in found {
+        let href = format!("{base}{}", meta.name);
+        if !with_data {
+            let props_found = message_properties(user, &meta.etag, meta.size, None);
+            responses.push(respond(&href, &props_found, &props));
+            continue;
+        }
+        match store.inbox_message(user.id, &meta.name).await {
             Ok(Some(item)) => {
                 let size = i64::try_from(item.content.len()).unwrap_or(i64::MAX);
-                let content = with_data.then_some(item.content.as_slice());
-                let props_found = message_properties(user, &item.etag, size, content);
+                let props_found = message_properties(user, &item.etag, size, Some(&item.content));
                 responses.push(respond(&href, &props_found, &props));
             }
             Ok(None) => responses.push(DavResponse::with_status(href, 404)),
@@ -1272,9 +1446,11 @@ fn parse_freebusy(body: &[u8]) -> Result<FreeBusyRequest, &'static str> {
         .ok_or("<c:organizer-allowed/>")?
         .value
         .clone();
+    // Deduplicated by normalised address: case variants are one recipient.
     let mut recipients: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
     for attendee in component.properties_named("ATTENDEE") {
-        if !recipients.contains(&attendee.value) {
+        if seen.insert(normalize(&attendee.value)) {
             recipients.push(attendee.value.clone());
         }
     }
@@ -1377,6 +1553,8 @@ pub(super) async fn post(ctx: Ctx<'_>, scheduling: &Scheduling, request: Request
         ctx.user.id,
         u32::try_from(request.recipients.len()).unwrap_or(u32::MAX),
     );
+    // One work budget for the whole request, shared by its recipients.
+    let mut lookup = freebusy::Lookup::new();
     let mut xml = String::from(
         r#"<?xml version="1.0" encoding="utf-8"?><c:schedule-response xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">"#,
     );
@@ -1391,13 +1569,22 @@ pub(super) async fn post(ctx: Ctx<'_>, scheduling: &Scheduling, request: Request
         } else {
             granted -= 1;
             match scheduling.resolve(store, &normalize(recipient)).await {
-                Ok(Resolution::Local(user)) => {
+                Ok(Resolution::Local(user))
+                    if store.accepts_invitations(user.id).await.unwrap_or(false) =>
+                {
                     let addresses = match scheduling.addresses(store, &user).await {
                         Ok(addresses) => addresses,
                         Err(err) => return store_error(err),
                     };
-                    match freebusy::busy(ctx.state, &user, &addresses, request.start, request.end)
-                        .await
+                    match freebusy::busy(
+                        ctx.state,
+                        &user,
+                        &addresses,
+                        request.start,
+                        request.end,
+                        &mut lookup,
+                    )
+                    .await
                     {
                         Ok(busy) => (
                             status::SUCCESS.to_owned(),
@@ -1406,7 +1593,8 @@ pub(super) async fn post(ctx: Ctx<'_>, scheduling: &Scheduling, request: Request
                         Err(err) => return store_error(err),
                     }
                 }
-                Ok(Resolution::Unknown) => (
+                // Users who do not accept invitations look like unknown ones.
+                Ok(Resolution::Unknown | Resolution::Local(_)) => (
                     status::INVALID_USER.to_owned() + ";Invalid calendar user",
                     None,
                 ),

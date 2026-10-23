@@ -84,6 +84,10 @@ pub enum StoreError {
     /// The calendar user address is already used by another user.
     #[error("address already in use")]
     AddressTaken,
+    /// A scheduling delivery was refused because the organizer's object
+    /// changed since (a newer delivery follows).
+    #[error("superseded by a newer change")]
+    Superseded,
     #[error("corrupt data in database: {0}")]
     Corrupt(String),
     #[error("failed to set permissions on database file: {0}")]

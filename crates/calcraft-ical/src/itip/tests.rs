@@ -312,3 +312,108 @@ fn merging_periods() {
     );
     assert_eq!(utc_stamp(0).as_deref(), Some("19700101T000000Z"));
 }
+
+/// The series of SERIES, but daily for a long time.
+fn long_series() -> Component {
+    cal(&SERIES.replace("RRULE:FREQ=DAILY;COUNT=5", "RRULE:FREQ=DAILY;COUNT=5000"))
+}
+
+#[test]
+fn many_exdates_are_cheap_and_bounded() {
+    let organizer_copy = long_series();
+    let bob = is("mailto:bob@example.org");
+    // 40 000 EXDATE values (most of them not even instances).
+    let start = parse_date_or_datetime("20261001T100000Z").unwrap().seconds;
+    let values: Vec<String> = (0..40_000)
+        .map(|i| utc_stamp(start + i * 3600).unwrap())
+        .collect();
+    let attendee = cal(&SERIES.replace(
+        "RRULE:FREQ=DAILY;COUNT=5",
+        &format!("RRULE:FREQ=DAILY;COUNT=5000\r\nEXDATE:{}", values.join(",")),
+    ));
+    let started = std::time::Instant::now();
+    let replies = replies(&attendee, &organizer_copy, &bob);
+    assert!(replies.len() <= MAX_EXDATE_REPLIES + 1, "{}", replies.len());
+    let mut merged = organizer_copy.clone();
+    let changed = apply_replies(&mut merged, &bob, &replies);
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    // At most a few overrides per reply: the organizer's object stays small.
+    assert!(changed.len() <= MAX_NEW_OVERRIDES);
+    assert!(merged.components.len() <= organizer_copy.components.len() + MAX_NEW_OVERRIDES);
+}
+
+#[test]
+fn overrides_are_only_added_for_a_different_answer() {
+    let mut organizer_copy = long_series();
+    let bob = is("mailto:bob@example.org");
+    // Bob already declined the series: declining single instances again
+    // (EXDATEs) adds nothing.
+    set_parameter(
+        &mut organizer_copy,
+        "ATTENDEE",
+        &bob,
+        "PARTSTAT",
+        Some("DECLINED"),
+    );
+    let attendee = cal(&SERIES.replace(
+        "RRULE:FREQ=DAILY;COUNT=5",
+        "RRULE:FREQ=DAILY;COUNT=5000\r\nEXDATE:20261002T100000Z,20261003T100000Z",
+    ))
+    .clone();
+    let mut attendee = attendee;
+    set_parameter(
+        &mut attendee,
+        "ATTENDEE",
+        &bob,
+        "PARTSTAT",
+        Some("DECLINED"),
+    );
+    let replies = replies(&attendee, &organizer_copy, &bob);
+    assert!(apply_replies(&mut organizer_copy, &bob, &replies).is_empty());
+    assert_eq!(organizer_copy.components.len(), 1);
+}
+
+#[test]
+fn reset_untouched_and_rescheduled() {
+    let mut c = cal(&SERIES.replace("PARTSTAT=NEEDS-ACTION", "PARTSTAT=ACCEPTED"));
+    let bob = is("mailto:bob@example.org");
+    reset_partstat(&mut c, &bob);
+    assert_eq!(
+        partstat(&c.components[0], &bob).as_deref(),
+        Some("NEEDS-ACTION")
+    );
+    let view = project(&c, &bob).unwrap();
+    assert!(untouched(&view, &view, &bob));
+    let mut answered = view.clone();
+    set_parameter(
+        &mut answered,
+        "ATTENDEE",
+        &bob,
+        "PARTSTAT",
+        Some("ACCEPTED"),
+    );
+    assert!(!untouched(&answered, &view, &bob));
+    let with_alarm = attendee_copy(&view, Some(&cal(SERIES)));
+    assert!(!untouched(&with_alarm, &view, &bob));
+    let renamed = project(
+        &cal(&SERIES.replace("SUMMARY:Daily", "SUMMARY:Other")),
+        &bob,
+    )
+    .unwrap();
+    assert!(!rescheduled(&renamed, &view));
+    let moved = project(
+        &cal(&SERIES.replace("DTSTART:20261001T100000Z", "DTSTART:20261001T110000Z")),
+        &bob,
+    )
+    .unwrap();
+    assert!(rescheduled(&moved, &view));
+    let mut status = cal(SERIES);
+    set_parameter(
+        &mut status,
+        "ORGANIZER",
+        &|_| true,
+        "SCHEDULE-STATUS",
+        Some("5.1"),
+    );
+    assert_eq!(organizer_status(&status).as_deref(), Some("5.1"));
+}

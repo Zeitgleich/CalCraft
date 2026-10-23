@@ -7,6 +7,9 @@
 ALTER TABLE users ADD COLUMN email TEXT CHECK (email IS NULL OR (email = lower(email) AND length(email) <= 254));
 CREATE UNIQUE INDEX users_by_email ON users (email) WHERE email IS NOT NULL;
 
+-- Whether the user accepts invitations from other users (set by the user).
+ALTER TABLE users ADD COLUMN accept_invitations INTEGER NOT NULL DEFAULT 1 CHECK (accept_invitations IN (0, 1));
+
 -- Revision of the user's scheduling inbox (its getctag), bumped by every
 -- delivery and deletion.
 ALTER TABLE users ADD COLUMN inbox_revision INTEGER NOT NULL DEFAULT 0;

@@ -29,6 +29,13 @@ pub enum UserCommand {
         #[command(flatten)]
         password: PasswordInput,
     },
+    /// Let other users invite this user (and see their busy times), or not.
+    SetInvitations {
+        username: String,
+        /// Refuse invitations instead of accepting them.
+        #[arg(long)]
+        refuse: bool,
+    },
     /// Set or remove the e-mail address used for scheduling (calendar user
     /// address). Addresses are unique; SSO never sets them.
     SetEmail {
@@ -140,6 +147,15 @@ pub async fn run(store: &Store, config: &Config, command: UserCommand) -> anyhow
                 "created user {username}{}",
                 if admin { " (admin)" } else { "" }
             );
+        }
+        UserCommand::SetInvitations { username, refuse } => {
+            let username = parse_username(&username)?;
+            let Some(user) = store.user_by_name(&username).await? else {
+                bail!("user {username} does not exist");
+            };
+            store.set_accept_invitations(user.id, !refuse).await?;
+            let state = if refuse { "refuses" } else { "accepts" };
+            println!("{username} {state} invitations");
         }
         UserCommand::SetEmail {
             username,

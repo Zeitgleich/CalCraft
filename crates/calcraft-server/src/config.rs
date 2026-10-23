@@ -666,6 +666,12 @@ pub const SCHEDULING_MAX_ATTENDEES: std::ops::RangeInclusive<u32> = 1..=1000;
 pub const SCHEDULING_RECIPIENTS_PER_HOUR: std::ops::RangeInclusive<u32> = 1..=100_000;
 /// Bounds of `scheduling.inbox_max_messages`.
 pub const SCHEDULING_INBOX_MESSAGES: std::ops::RangeInclusive<u32> = 10..=100_000;
+/// Bounds of `scheduling.max_delivered_bytes_per_hour`.
+pub const SCHEDULING_DELIVERED_BYTES: std::ops::RangeInclusive<u64> =
+    64 * 1024..=1024 * 1024 * 1024;
+/// Bounds of `scheduling.max_delivered_object_bytes`.
+pub const SCHEDULING_OBJECT_BYTES: std::ops::RangeInclusive<usize> =
+    4 * 1024..=calcraft_ical::MAX_OBJECT_SIZE;
 /// Bounds of `scheduling.max_freebusy_days`.
 pub const SCHEDULING_FREEBUSY_DAYS: std::ops::RangeInclusive<u32> = 1..=1830;
 
@@ -696,6 +702,13 @@ pub struct SchedulingConfig {
     pub inbox_max_messages: u32,
     /// Longest time range of a free/busy lookup in days (1 to 1830).
     pub max_freebusy_days: u32,
+    /// Bytes of invitations (calendar copies plus inbox messages) one
+    /// user may receive per hour from all senders together (64 KiB to
+    /// 1 GiB); beyond that deliveries are refused (5.1).
+    pub max_delivered_bytes_per_hour: u64,
+    /// Largest calendar copy delivered to an attendee (4 KiB to 1 MiB);
+    /// larger invitations are not delivered (5.1).
+    pub max_delivered_object_bytes: usize,
 }
 
 impl Default for SchedulingConfig {
@@ -708,6 +721,8 @@ impl Default for SchedulingConfig {
             max_recipients_per_hour: 1000,
             inbox_max_messages: 1000,
             max_freebusy_days: 366,
+            max_delivered_bytes_per_hour: 16 * 1024 * 1024,
+            max_delivered_object_bytes: 256 * 1024,
         }
     }
 }
@@ -734,6 +749,16 @@ impl SchedulingConfig {
         if !SCHEDULING_INBOX_MESSAGES.contains(&self.inbox_max_messages) {
             return Err(ConfigError::Invalid(
                 "scheduling.inbox_max_messages must be between 10 and 100000",
+            ));
+        }
+        if !SCHEDULING_DELIVERED_BYTES.contains(&self.max_delivered_bytes_per_hour) {
+            return Err(ConfigError::Invalid(
+                "scheduling.max_delivered_bytes_per_hour must be between 65536 and 1073741824",
+            ));
+        }
+        if !SCHEDULING_OBJECT_BYTES.contains(&self.max_delivered_object_bytes) {
+            return Err(ConfigError::Invalid(
+                "scheduling.max_delivered_object_bytes must be between 4096 and 1048576",
             ));
         }
         if !SCHEDULING_FREEBUSY_DAYS.contains(&self.max_freebusy_days) {

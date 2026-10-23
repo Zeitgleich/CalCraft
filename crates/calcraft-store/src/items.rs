@@ -138,6 +138,12 @@ pub struct ScheduleTag<'a> {
     pub set: Option<&'a str>,
     /// `If-Schedule-Tag-Match`: the stored tag must be exactly this one.
     pub if_match: Option<&'a str>,
+    /// Another object (collection id, name) that must still carry this
+    /// Schedule-Tag, checked in the same transaction: a delivery derived
+    /// from an organizer's object is only written while that object is
+    /// unchanged, so an older delivery can never overwrite a newer one
+    /// ([`StoreError::Superseded`]).
+    pub requires: Option<(i64, &'a str, &'a str)>,
 }
 
 impl Precondition {
@@ -577,6 +583,21 @@ impl Store {
                         .flatten();
                     if current.as_deref() != Some(expected) {
                         return Err(StoreError::PreconditionFailed);
+                    }
+                }
+                if let Some((guard_collection, guard_name, guard_tag)) = schedule.requires {
+                    let current: Option<String> = sqlx::query(
+                        "SELECT schedule_tag FROM items WHERE collection_id = ? AND name = ?",
+                    )
+                    .bind(guard_collection)
+                    .bind(guard_name)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .map(|row| row.try_get::<Option<String>, _>("schedule_tag"))
+                    .transpose()?
+                    .flatten();
+                    if current.as_deref() != Some(guard_tag) {
+                        return Err(StoreError::Superseded);
                     }
                 }
 

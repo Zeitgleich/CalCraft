@@ -854,4 +854,51 @@ async fn admin_sets_scheduling_email() {
         patch(json!({"email": "bob@example.org"})).await,
         StatusCode::NO_CONTENT
     );
+
+    // Each user decides whether they accept invitations.
+    let bob = cookie_of(&login(&app, BOB, None).await);
+    let me = call(&app, Method::GET, "/api/v1/me", Some(&bob), None).await;
+    assert_eq!(me.json["scheduling"]["accept_invitations"], true);
+    assert_eq!(
+        me.json["scheduling"]["addresses"],
+        json!(["mailto:bob@example.org"])
+    );
+    let refuse = call(
+        &app,
+        Method::PATCH,
+        "/api/v1/me/scheduling",
+        Some(&bob),
+        Some(json!({"accept_invitations": false})),
+    )
+    .await;
+    assert_eq!(refuse.status, StatusCode::NO_CONTENT);
+    let me = call(&app, Method::GET, "/api/v1/me", Some(&bob), None).await;
+    assert_eq!(me.json["scheduling"]["accept_invitations"], false);
+    let unknown = call(
+        &app,
+        Method::PATCH,
+        "/api/v1/me/scheduling",
+        Some(&bob),
+        Some(json!({"accept_invitations": false, "other": 1})),
+    )
+    .await;
+    assert_eq!(unknown.status, StatusCode::BAD_REQUEST);
+}
+
+/// Without scheduling the setting does not exist.
+#[tokio::test]
+async fn scheduling_settings_need_scheduling() {
+    let app = app().await;
+    let alice = cookie_of(&login(&app, ALICE, None).await);
+    let me = call(&app, Method::GET, "/api/v1/me", Some(&alice), None).await;
+    assert_eq!(me.json["scheduling"], Value::Null);
+    let reply = call(
+        &app,
+        Method::PATCH,
+        "/api/v1/me/scheduling",
+        Some(&alice),
+        Some(json!({"accept_invitations": false})),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
 }

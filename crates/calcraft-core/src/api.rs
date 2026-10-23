@@ -45,6 +45,26 @@ pub struct Me {
     /// SSO is not configured. Never contains the IdP subject.
     #[serde(default)]
     pub sso: Option<SsoLink>,
+    /// Scheduling settings of the user; `None` if scheduling is off.
+    #[serde(default)]
+    pub scheduling: Option<SchedulingInfo>,
+}
+
+/// The user's scheduling settings (`GET /api/v1/me`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulingInfo {
+    /// Other users may invite this user (and see their busy times).
+    pub accept_invitations: bool,
+    /// The user's calendar user addresses (e-mail first).
+    #[serde(default)]
+    pub addresses: Vec<String>,
+}
+
+/// `PATCH /api/v1/me/scheduling`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateScheduling {
+    pub accept_invitations: bool,
 }
 
 /// Whether an account is bound to an identity of the configured OpenID

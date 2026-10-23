@@ -418,8 +418,9 @@ Further addresses are e-mail addresses set by an administrator
 `PATCH /api/v1/admin/users/{username}`), never taken from SSO. Only a user's
 own address can be ORGANIZER of what they schedule; attendees can change only
 their own participation status in the organizer's event. Limits: attendees
-per event, recipients per user and hour, inbox size; deliveries count towards
-the recipient's quota. Details, status codes and deviations from the RFC:
+per event, recipients per user and hour, bytes received per user and hour,
+size of a delivered copy, inbox size; deliveries count towards the
+recipient's quota. Every user can refuse invitations (*Settings*). Details, status codes and deviations from the RFC:
 [docs/scheduling.md](docs/scheduling.md).
 
 ### Import and export

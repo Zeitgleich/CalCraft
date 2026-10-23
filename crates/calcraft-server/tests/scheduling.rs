@@ -391,6 +391,31 @@ async fn invitation_reply_update_and_cancel() {
 
     // Alice's client saw neither the reply nor the new ETag: with her
     // Schedule-Tag the update goes through and bob's answer is kept.
+    let renamed = meeting("m1", "20261101T100000Z", "Planning v2", &attendees);
+    let reply = put(
+        &fx.app,
+        "alice",
+        &uri,
+        &renamed,
+        &[("if-schedule-tag-match", &tag)],
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+    let tag = reply.headers["schedule-tag"].to_str().unwrap().to_owned();
+    let organizer = unfold(&send(&fx.app, "alice", "GET", &uri, &[], "").await.body);
+    assert!(
+        organizer
+            .contains("PARTSTAT=ACCEPTED;RSVP=TRUE;SCHEDULE-STATUS=1.2:mailto:bob@example.org"),
+        "{organizer}"
+    );
+    let bob_now = unfold(&copy(&fx, &fx.bob, "m1").await.unwrap());
+    assert!(bob_now.contains("SUMMARY:Planning v2"), "{bob_now}");
+    assert!(
+        bob_now.contains("PARTSTAT=ACCEPTED;RSVP=TRUE:mailto:bob@example.org"),
+        "{bob_now}"
+    );
+
+    // Rescheduled with NEEDS-ACTION: the organizer asks again.
     let moved = meeting("m1", "20261101T140000Z", "Planning", &attendees);
     let reply = put(
         &fx.app,
@@ -401,10 +426,22 @@ async fn invitation_reply_update_and_cancel() {
     )
     .await;
     assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
-    let organizer = unfold(&send(&fx.app, "alice", "GET", &uri, &[], "").await.body);
-    assert!(organizer.contains("PARTSTAT=ACCEPTED"), "{organizer}");
     let bob_now = unfold(&copy(&fx, &fx.bob, "m1").await.unwrap());
     assert!(bob_now.contains("DTSTART:20261101T140000Z"), "{bob_now}");
+    assert!(
+        bob_now.contains("PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:bob@example.org"),
+        "{bob_now}"
+    );
+    // Bob accepts the new time (an alarm of his own as well).
+    let bob_uri = copy_href(&fx, &fx.bob, "m1").await;
+    let again = bob_now
+        .replace(
+            "PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:bob@example.org",
+            "PARTSTAT=ACCEPTED;RSVP=TRUE:mailto:bob@example.org",
+        )
+        .replacen("END:VEVENT", "BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT5M\r\nDESCRIPTION:x\r\nEND:VALARM\r\nEND:VEVENT", 1);
+    let reply = put(&fx.app, "bob", &bob_uri, &again, &[]).await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
     // A stale Schedule-Tag fails.
     let reply = put(
         &fx.app,
@@ -416,15 +453,17 @@ async fn invitation_reply_update_and_cancel() {
     .await;
     assert_eq!(reply.status, StatusCode::PRECONDITION_FAILED);
 
-    // Carol is removed: her copy is cancelled, bob's is not.
+    // Carol is removed: she never answered, so her copy goes away (it was
+    // never hers); bob's stays.
     let without_carol = meeting("m1", "20261101T140000Z", "Planning", BOB_LINE);
     let reply = put(&fx.app, "alice", &uri, &without_carol, &[]).await;
     assert_eq!(reply.status, StatusCode::NO_CONTENT);
+    assert!(copy(&fx, &fx.carol, "m1").await.is_none());
     assert!(
-        copy(&fx, &fx.carol, "m1")
+        inbox(&fx, &fx.carol)
             .await
-            .unwrap()
-            .contains("STATUS:CANCELLED")
+            .iter()
+            .any(|m| m.contains("METHOD:CANCEL"))
     );
     assert!(
         !copy(&fx, &fx.bob, "m1")
@@ -1275,13 +1314,24 @@ async fn emails_resolve_and_ambiguous_addresses_are_refused() {
     )
     .await;
     assert!(copy(&fx, &fx.bob, "e1").await.is_some());
+    // The address is mallory's derived one: carol's conflicting e-mail
+    // address is ignored, never shared.
     assert!(copy(&fx, &fx.carol, "e1").await.is_none());
-    assert!(copy(&fx, &fx.mallory, "e1").await.is_none());
-    let stored = unfold(&send(&fx.app, "alice", "GET", &uri, &[], "").await.body);
-    assert!(
-        stored.contains("SCHEDULE-STATUS=3.7:mailto:mallory@example.org"),
-        "{stored}"
+    assert!(copy(&fx, &fx.mallory, "e1").await.is_some());
+    // Carol cannot act as mallory@example.org either.
+    let as_carol = calendar(
+        "BEGIN:VEVENT\r\nUID:e2\r\nDTSTART:20261101T100000Z\r\nORGANIZER:mailto:mallory@example.org\r\nATTENDEE:mailto:bob@example.org\r\nEND:VEVENT\r\n",
     );
+    let reply = put(
+        &fx.app,
+        "carol",
+        "/dav/calendars/carol/default/e2.ics",
+        &as_carol,
+        &[],
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::CREATED);
+    assert!(copy(&fx, &fx.bob, "e2").await.is_none());
 }
 
 #[tokio::test]
@@ -1311,12 +1361,9 @@ async fn trash_restore_does_not_resend() {
         .await
         .unwrap();
     assert_eq!(fx.store.inbox_revision(fx.bob.id).await.unwrap(), revision);
-    assert!(
-        copy(&fx, &fx.bob, "t1")
-            .await
-            .unwrap()
-            .contains("STATUS:CANCELLED")
-    );
+    // Bob never answered: his copy was removed by the cancellation and is
+    // not brought back.
+    assert!(copy(&fx, &fx.bob, "t1").await.is_none());
 }
 
 #[tokio::test]
@@ -1437,10 +1484,322 @@ async fn removing_every_attendee_cancels() {
     );
     let reply = put(&fx.app, "alice", &uri, &alone, &[]).await;
     assert_eq!(reply.status, StatusCode::NO_CONTENT);
+    // Untouched: removed.
+    assert!(copy(&fx, &fx.bob, "all1").await.is_none());
+}
+
+const MULTIGET_HEAD: &str = r#"<c:calendar-multiget xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><d:getetag/><c:calendar-data/></d:prop>"#;
+
+#[tokio::test]
+async fn inbox_multiget_counts_each_message_once() {
+    let fx = fixture().await;
+    put(
+        &fx.app,
+        "alice",
+        &format!("{ALICE_CAL}mg.ics"),
+        &meeting("mg1", "20261101T100000Z", "M", BOB_LINE),
+        &[],
+    )
+    .await;
+    let name = fx.store.inbox_messages(fx.bob.id, 10).await.unwrap()[0]
+        .name
+        .clone();
+    // The same message under 300 hosts and schemes.
+    let hrefs: String = (0..300)
+        .map(|i| {
+            format!("<d:href>https://host{i}.example/dav/scheduling/bob/inbox/{name}</d:href>")
+        })
+        .collect();
+    let body = format!("{MULTIGET_HEAD}{hrefs}</c:calendar-multiget>");
+    let reply = send(
+        &fx.app,
+        "bob",
+        "REPORT",
+        "/dav/scheduling/bob/inbox/",
+        &[("depth", "1")],
+        &body,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::MULTI_STATUS);
+    assert_eq!(
+        reply.body.matches("METHOD:REQUEST").count(),
+        1,
+        "{}",
+        reply.body.len()
+    );
+}
+
+#[tokio::test]
+async fn organizer_written_answers_of_new_attendees_are_reset() {
+    let fx = fixture().await;
+    let uri = format!("{ALICE_CAL}fake.ics");
+    let attendees = "ATTENDEE;PARTSTAT=ACCEPTED:mailto:bob@example.org\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:carol@example.org\r\n";
+    put(
+        &fx.app,
+        "alice",
+        &uri,
+        &meeting("fake1", "20261101T100000Z", "F", attendees),
+        &[],
+    )
+    .await;
+    let organizer = unfold(&send(&fx.app, "alice", "GET", &uri, &[], "").await.body);
     assert!(
-        copy(&fx, &fx.bob, "all1")
+        organizer.contains("PARTSTAT=NEEDS-ACTION;SCHEDULE-STATUS=1.2:mailto:bob@example.org"),
+        "{organizer}"
+    );
+    for user in [&fx.bob, &fx.carol] {
+        let copy = unfold(&copy(&fx, user, "fake1").await.unwrap());
+        assert!(!copy.contains("PARTSTAT=ACCEPTED:mailto:bob"), "{copy}");
+        assert!(!copy.contains("PARTSTAT=ACCEPTED:mailto:carol"), "{copy}");
+    }
+    // The organizer cannot claim an answer later either.
+    let claimed =
+        meeting("fake1", "20261101T100000Z", "F", attendees).replace("SUMMARY:F", "SUMMARY:F2");
+    put(&fx.app, "alice", &uri, &claimed, &[]).await;
+    let bob = unfold(&copy(&fx, &fx.bob, "fake1").await.unwrap());
+    assert!(
+        bob.contains("PARTSTAT=NEEDS-ACTION:mailto:bob@example.org"),
+        "{bob}"
+    );
+    // Free/busy: an unanswered invitation is only tentative.
+    let request = freebusy_request(
+        "mailto:alice@example.org",
+        &["mailto:bob@example.org"],
+        "20261101T000000Z",
+        "20261102T000000Z",
+    );
+    let reply = send(
+        &fx.app,
+        "alice",
+        "POST",
+        "/dav/scheduling/alice/outbox/",
+        &[("content-type", "text/calendar")],
+        &request,
+    )
+    .await;
+    assert!(
+        unfold(&reply.body).contains("FBTYPE=BUSY-TENTATIVE:20261101T100000Z/20261101T110000Z"),
+        "{}",
+        reply.body
+    );
+}
+
+#[tokio::test]
+async fn failed_replies_are_recorded_and_sent_again() {
+    let fx = fixture().await;
+    let uri = format!("{ALICE_CAL}rs.ics");
+    let series = calendar(&format!(
+        "BEGIN:VEVENT\r\nUID:rs1\r\nDTSTART:20261101T100000Z\r\nDURATION:PT1H\r\nRRULE:FREQ=DAILY;COUNT=5\r\nSUMMARY:S\r\nORGANIZER:mailto:alice@example.org\r\n{BOB_LINE}END:VEVENT\r\n"
+    ));
+    put(&fx.app, "alice", &uri, &series, &[]).await;
+    // Alice's storage is full: a reply that adds an override cannot land.
+    // (Bob, with less data, still has room for his own copy.)
+    let filler = calendar(&format!(
+        "BEGIN:VEVENT\r\nUID:filler\r\nDTSTART:20261101T100000Z\r\nDESCRIPTION:{}\r\nEND:VEVENT\r\n",
+        "x".repeat(5000)
+    ));
+    put(
+        &fx.app,
+        "alice",
+        &format!("{ALICE_CAL}filler.ics"),
+        &filler,
+        &[],
+    )
+    .await;
+    let mut used = 0i64;
+    for calendar in fx
+        .store
+        .collections(fx.alice.id, CollectionKind::Calendar)
+        .await
+        .unwrap()
+    {
+        for meta in fx.store.items(calendar.id).await.unwrap() {
+            used += meta.size;
+        }
+    }
+    let bob_uri = copy_href(&fx, &fx.bob, "rs1").await;
+    let bob_copy = unfold(&send(&fx.app, "bob", "GET", &bob_uri, &[], "").await.body);
+    let master_end = bob_copy.rfind("END:VEVENT").unwrap() + "END:VEVENT\r\n".len();
+    let decline = "BEGIN:VEVENT\r\nUID:rs1\r\nRECURRENCE-ID:20261102T100000Z\r\nDTSTART:20261102T100000Z\r\nDURATION:PT1H\r\nORGANIZER:mailto:alice@example.org\r\nATTENDEE;PARTSTAT=DECLINED:mailto:bob@example.org\r\nEND:VEVENT\r\n";
+    let changed = format!(
+        "{}{decline}{}",
+        &bob_copy[..master_end],
+        &bob_copy[master_end..]
+    );
+    fx.store.set_quota_for_tests(used + 10);
+    let reply = put(&fx.app, "bob", &bob_uri, &changed, &[]).await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+    let stored = unfold(&send(&fx.app, "bob", "GET", &bob_uri, &[], "").await.body);
+    assert!(
+        stored.contains("SCHEDULE-STATUS=5.1:mailto:alice@example.org"),
+        "{stored}"
+    );
+    assert!(
+        !unfold(&send(&fx.app, "alice", "GET", &uri, &[], "").await.body).contains("RECURRENCE-ID")
+    );
+    // Room again: the next PUT (unchanged) sends the reply.
+    fx.store.set_quota_for_tests(0);
+    let reply = put(&fx.app, "bob", &bob_uri, &stored, &[]).await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT);
+    let organizer = unfold(&send(&fx.app, "alice", "GET", &uri, &[], "").await.body);
+    assert!(
+        organizer.contains("RECURRENCE-ID:20261102T100000Z"),
+        "{organizer}"
+    );
+    let stored = unfold(&send(&fx.app, "bob", "GET", &bob_uri, &[], "").await.body);
+    assert!(
+        stored.contains("SCHEDULE-STATUS=1.2:mailto:alice@example.org"),
+        "{stored}"
+    );
+}
+
+#[tokio::test]
+async fn delivery_size_and_volume_limits() {
+    let fx = fixture_with(SchedulingConfig {
+        max_delivered_object_bytes: 8 * 1024,
+        max_delivered_bytes_per_hour: 64 * 1024,
+        ..enabled()
+    })
+    .await;
+    let big = |uid: &str, size: usize| {
+        meeting(uid, "20261101T100000Z", "Big", BOB_LINE).replace(
+            "SUMMARY:Big",
+            &format!("SUMMARY:Big\r\nDESCRIPTION:{}", "x".repeat(size)),
+        )
+    };
+    let status = |fx: &Fx, uri: String| {
+        let app = fx.app.clone();
+        async move { unfold(&send(&app, "alice", "GET", &uri, &[], "").await.body) }
+    };
+    // Larger than a delivered copy may be.
+    put(
+        &fx.app,
+        "alice",
+        &format!("{ALICE_CAL}huge.ics"),
+        &big("huge", 20_000),
+        &[],
+    )
+    .await;
+    assert!(
+        status(&fx, format!("{ALICE_CAL}huge.ics"))
             .await
-            .unwrap()
-            .contains("STATUS:CANCELLED")
+            .contains("SCHEDULE-STATUS=5.1:mailto:bob")
+    );
+    assert!(copy(&fx, &fx.bob, "huge").await.is_none());
+    // Many medium invitations: bob receives at most 64 KiB per hour.
+    let mut refused = 0;
+    for i in 0..12 {
+        let uid = format!("vol{i}");
+        let uri = format!("{ALICE_CAL}{uid}.ics");
+        put(&fx.app, "alice", &uri, &big(&uid, 3_000), &[]).await;
+        if status(&fx, uri)
+            .await
+            .contains("SCHEDULE-STATUS=5.1:mailto:bob")
+        {
+            refused += 1;
+            assert!(copy(&fx, &fx.bob, &uid).await.is_none());
+        }
+    }
+    assert!(refused >= 3, "{refused}");
+}
+
+#[tokio::test]
+async fn users_can_refuse_invitations() {
+    let fx = fixture().await;
+    fx.store
+        .set_accept_invitations(fx.bob.id, false)
+        .await
+        .unwrap();
+    let uri = format!("{ALICE_CAL}no.ics");
+    put(
+        &fx.app,
+        "alice",
+        &uri,
+        &meeting("no1", "20261101T100000Z", "N", BOB_LINE),
+        &[],
+    )
+    .await;
+    let stored = unfold(&send(&fx.app, "alice", "GET", &uri, &[], "").await.body);
+    // Like an address nobody has.
+    assert!(
+        stored.contains("SCHEDULE-STATUS=3.7:mailto:bob@example.org"),
+        "{stored}"
+    );
+    assert!(copy(&fx, &fx.bob, "no1").await.is_none());
+    let request = freebusy_request(
+        "mailto:alice@example.org",
+        &["mailto:bob@example.org"],
+        "20261101T000000Z",
+        "20261102T000000Z",
+    );
+    let reply = send(
+        &fx.app,
+        "alice",
+        "POST",
+        "/dav/scheduling/alice/outbox/",
+        &[("content-type", "text/calendar")],
+        &request,
+    )
+    .await;
+    assert!(
+        reply.body.contains("3.7;Invalid calendar user"),
+        "{}",
+        reply.body
+    );
+}
+
+#[tokio::test]
+async fn probing_addresses_costs_rate_limit() {
+    let fx = fixture_with(SchedulingConfig {
+        max_recipients_per_hour: 2,
+        ..enabled()
+    })
+    .await;
+    let attendees = "ATTENDEE:mailto:a@example.org\r\nATTENDEE:mailto:b@example.org\r\nATTENDEE:mailto:c@example.org\r\n";
+    let uri = format!("{ALICE_CAL}probe.ics");
+    put(
+        &fx.app,
+        "alice",
+        &uri,
+        &meeting("probe1", "20261101T100000Z", "P", attendees),
+        &[],
+    )
+    .await;
+    let stored = unfold(&send(&fx.app, "alice", "GET", &uri, &[], "").await.body);
+    assert_eq!(stored.matches("SCHEDULE-STATUS=3.7").count(), 2, "{stored}");
+    // Beyond the limit the answer does not tell whether the address exists.
+    assert!(
+        stored.contains("SCHEDULE-STATUS=5.1:mailto:c@example.org"),
+        "{stored}"
+    );
+}
+
+#[tokio::test]
+async fn free_busy_recipients_are_deduplicated() {
+    let fx = fixture().await;
+    let request = freebusy_request(
+        "mailto:alice@example.org",
+        &[
+            "mailto:bob@example.org",
+            "MAILTO:Bob@Example.ORG",
+            "mailto:BOB@example.org",
+        ],
+        "20261101T000000Z",
+        "20261102T000000Z",
+    );
+    let reply = send(
+        &fx.app,
+        "alice",
+        "POST",
+        "/dav/scheduling/alice/outbox/",
+        &[("content-type", "text/calendar")],
+        &request,
+    )
+    .await;
+    assert_eq!(
+        reply.body.matches("<c:response>").count(),
+        1,
+        "{}",
+        reply.body
     );
 }

@@ -93,6 +93,33 @@ impl Store {
             .flatten())
     }
 
+    /// Whether the user accepts invitations (their own setting).
+    pub async fn accepts_invitations(&self, user_id: i64) -> Result<bool> {
+        let row = sqlx::query("SELECT accept_invitations FROM users WHERE id = ?")
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row
+            .map(|row| row.try_get::<bool, _>("accept_invitations"))
+            .transpose()?
+            .unwrap_or(false))
+    }
+
+    /// Changes whether the user accepts invitations.
+    pub async fn set_accept_invitations(&self, user_id: i64, accept: bool) -> Result<bool> {
+        self.observe(
+            async {
+                let done = sqlx::query("UPDATE users SET accept_invitations = ? WHERE id = ?")
+                    .bind(accept)
+                    .bind(user_id)
+                    .execute(&self.writer)
+                    .await?;
+                Ok(done.rows_affected() == 1)
+            }
+            .await,
+        )
+    }
+
     /// All users' e-mail addresses (`(user id, address)`), for listings.
     pub async fn user_emails(&self) -> Result<Vec<(i64, String)>> {
         let rows = sqlx::query("SELECT id, email FROM users WHERE email IS NOT NULL ORDER BY id")

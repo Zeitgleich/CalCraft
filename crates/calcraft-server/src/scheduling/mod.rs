@@ -45,8 +45,63 @@ const MAX_TRACKED_USERS: usize = 100_000;
 #[derive(Debug)]
 pub struct Scheduling {
     pub config: SchedulingConfig,
-    /// Per user: start of the current window and recipients used in it.
-    usage: Mutex<HashMap<i64, (Instant, u32)>>,
+    /// Per sender: recipients reached in the current window.
+    recipients: Window,
+    /// Per recipient: bytes delivered to them in the current window.
+    delivered: Window,
+}
+
+/// Amounts per user in fixed one-hour windows.
+#[derive(Debug, Default)]
+struct Window(Mutex<HashMap<i64, (Instant, u64)>>);
+
+impl Window {
+    /// Takes up to `wanted` of `limit` for `user_id`; returns what was
+    /// taken. With `whole`, takes all of it or nothing.
+    fn take(&self, user_id: i64, wanted: u64, limit: u64) -> u64 {
+        self.take_with(user_id, wanted, limit, false)
+    }
+
+    fn take_with(&self, user_id: i64, wanted: u64, limit: u64, whole: bool) -> u64 {
+        let now = Instant::now();
+        let mut usage = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if usage.len() >= MAX_TRACKED_USERS && !usage.contains_key(&user_id) {
+            usage.retain(|_, (start, _)| now.duration_since(*start) < RATE_WINDOW);
+            if usage.len() >= MAX_TRACKED_USERS {
+                return 0;
+            }
+        }
+        let entry = usage.entry(user_id).or_insert((now, 0));
+        if now.duration_since(entry.0) >= RATE_WINDOW {
+            *entry = (now, 0);
+        }
+        let left = limit.saturating_sub(entry.1);
+        if whole && wanted > left {
+            return 0;
+        }
+        let granted = wanted.min(left);
+        entry.1 += granted;
+        granted
+    }
+}
+
+/// Recipients already granted to one request, so that retries of the
+/// same request are not charged again.
+#[derive(Debug, Default)]
+pub struct Grant(u32);
+
+impl Grant {
+    /// Grants `wanted` recipients for this request: what was granted before
+    /// counts, only the rest is taken from the sender's hourly budget.
+    pub fn take(&mut self, scheduling: &Scheduling, user_id: i64, wanted: u32) -> u32 {
+        if wanted > self.0 {
+            self.0 += scheduling.allow(user_id, wanted - self.0);
+        }
+        wanted.min(self.0)
+    }
 }
 
 /// What a calendar user address refers to.
@@ -144,8 +199,25 @@ impl Scheduling {
     pub fn new(config: &SchedulingConfig) -> Self {
         Self {
             config: config.clone(),
-            usage: Mutex::new(HashMap::new()),
+            recipients: Window::default(),
+            delivered: Window::default(),
         }
+    }
+
+    /// Charges `bytes` delivered to `recipient_id` against their hourly
+    /// limit; `false` (nothing charged) if they would exceed it.
+    pub fn allow_bytes(&self, recipient_id: i64, bytes: u64) -> bool {
+        let limit = self.config.max_delivered_bytes_per_hour;
+        // All or nothing: a delivery is never cut in half.
+        let granted = self.delivered.take_with(recipient_id, bytes, limit, true);
+        if granted < bytes {
+            tracing::warn!(
+                recipient_id,
+                "scheduling delivery limit of recipient reached"
+            );
+            return false;
+        }
+        true
     }
 
     /// The address `mailto:<username>@<domain>`, if a domain is configured.
@@ -158,15 +230,38 @@ impl Scheduling {
 
     /// The user's calendar user addresses as shown to clients
     /// (`calendar-user-address-set`), preferred first.
+    ///
+    /// Addresses that would also belong to another user (possible after
+    /// `scheduling.domain` changed, or for accounts created before) are
+    /// left out, exactly as [`Scheduling::resolve`] refuses them: nobody
+    /// can organize, reply or be reached with an ambiguous address.
     pub async fn address_set(&self, store: &Store, user: &User) -> Result<Vec<String>, StoreError> {
         let mut set = Vec::new();
         if let Some(email) = store.user_email(user.id).await? {
-            set.push(format!("mailto:{email}"));
+            let foreign = match (&self.config.domain, email.rsplit_once('@')) {
+                (Some(domain), Some((local, host))) if host == domain => {
+                    local != user.username.as_str()
+                }
+                _ => false,
+            };
+            if foreign {
+                tracing::warn!(user = %user.username, "e-mail address is in the scheduling domain but not the user's; ignored");
+            } else {
+                set.push(format!("mailto:{email}"));
+            }
         }
         if let Some(derived) = self.derived_address(&user.username)
             && !set.contains(&derived)
         {
-            set.push(derived);
+            let taken = store
+                .user_by_email(derived.trim_start_matches("mailto:"))
+                .await?
+                .is_some_and(|other| other.id != user.id);
+            if taken {
+                tracing::warn!(user = %user.username, "derived address is another user's e-mail address; ignored");
+            } else {
+                set.push(derived);
+            }
         }
         set.push(crate::dav::principal_href(&user.username));
         Ok(set)
@@ -215,6 +310,15 @@ impl Scheduling {
                 .rsplit_once('@')
                 .is_some_and(|(_, host)| host == domain)
         });
+        // An explicit address in the scheduling domain that is not its
+        // owner's derived address is ignored (see `address_set`).
+        let explicit =
+            explicit.filter(|user| match (&self.config.domain, email.rsplit_once('@')) {
+                (Some(domain), Some((local, host))) if host == domain => {
+                    local == user.username.as_str()
+                }
+                _ => true,
+            });
         Ok(match (explicit, derived) {
             (Some(a), Some(b)) if a.id != b.id => {
                 tracing::warn!(
@@ -233,24 +337,9 @@ impl Scheduling {
     /// Takes up to `wanted` recipients from the user's hourly budget and
     /// returns how many were granted.
     pub fn allow(&self, user_id: i64, wanted: u32) -> u32 {
-        let limit = self.config.max_recipients_per_hour;
-        let now = Instant::now();
-        let mut usage = self
-            .usage
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if usage.len() >= MAX_TRACKED_USERS && !usage.contains_key(&user_id) {
-            usage.retain(|_, (start, _)| now.duration_since(*start) < RATE_WINDOW);
-            if usage.len() >= MAX_TRACKED_USERS {
-                return 0;
-            }
-        }
-        let entry = usage.entry(user_id).or_insert((now, 0));
-        if now.duration_since(entry.0) >= RATE_WINDOW {
-            *entry = (now, 0);
-        }
-        let granted = wanted.min(limit.saturating_sub(entry.1));
-        entry.1 += granted;
+        let limit = u64::from(self.config.max_recipients_per_hour);
+        let granted = self.recipients.take(user_id, u64::from(wanted), limit);
+        let granted = u32::try_from(granted).unwrap_or(0);
         if granted < wanted {
             tracing::warn!(user_id, wanted, granted, "scheduling rate limit reached");
         }

@@ -767,7 +767,7 @@ pub(crate) fn busy_instances(
 
 /// Identity of a RECURRENCE-ID or EXDATE value, comparable between two
 /// objects (e.g. an organizer's and an attendee's copy of one event).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum InstantKey {
     /// An exact instant.
     Utc(i64),

@@ -229,6 +229,19 @@ async fn map_user(state: &AppState, oidc: &Oidc, token: &IdToken) -> Result<User
                 tracing::warn!(user = %username, "SSO login rejected: identity bound to another account");
                 return Err(Failure::LoginFailed);
             }
+            // The new account's scheduling address must not be another
+            // user's e-mail address (like for accounts created by admins).
+            let domain = state
+                .scheduling
+                .as_ref()
+                .and_then(|s| s.config.domain.as_deref());
+            if crate::scheduling::derived_address_taken(&state.store, domain, &username)
+                .await
+                .map_err(store_failure)?
+            {
+                tracing::warn!(user = %username, "SSO login rejected: scheduling address of the new account is another user's e-mail address");
+                return Err(Failure::LoginFailed);
+            }
             let user = state
                 .store
                 .create_user_with_role(

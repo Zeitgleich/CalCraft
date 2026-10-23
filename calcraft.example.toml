@@ -179,6 +179,11 @@ max_recipients_per_hour = 1000
 inbox_max_messages = 1000
 # Longest free/busy lookup in days (1-1830).
 max_freebusy_days = 366
+# Bytes of invitations (calendar copies plus inbox messages) one user may receive
+# per hour from all senders together (64 KiB to 1 GiB); beyond: not delivered.
+max_delivered_bytes_per_hour = 16777216
+# Largest calendar copy delivered to an attendee (4 KiB to 1 MiB).
+max_delivered_object_bytes = 262144
 
 [logging]
 # Filter syntax of tracing-subscriber; RUST_LOG takes precedence.

@@ -256,6 +256,11 @@ pub const USERNAME_HINT: &str =
     "Lowercase letters a-z, digits and . _ -, starting with a letter or digit.";
 pub const MAKE_ADMIN: &str = "Administrator";
 pub const EMAIL: &str = "E-mail address";
+pub const INVITATIONS: &str = "Invitations";
+pub const ACCEPT_INVITATIONS: &str =
+    "Other users of this server may invite me and see when I am busy";
+pub const INVITATIONS_HINT: &str = "Off: their invitations are not delivered and free/busy lookups are refused, as if this account did not exist.";
+pub const SCHEDULING_ADDRESSES: &str = "Calendar addresses";
 pub const EMAIL_HINT: &str = "Optional. Used as the calendar address for invitations between users of this server ([scheduling] in the configuration).";
 pub const SET_EMAIL: &str = "E-mail…";
 

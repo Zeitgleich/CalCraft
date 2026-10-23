@@ -4,8 +4,14 @@
 //! into the recipient's scheduling inbox.
 //!
 //! Every change of an existing object is a read–modify–write guarded by
-//! its entity tag and retried on conflicts, so concurrent replies of
-//! several attendees never overwrite each other.
+//! its entity tag and retried (with a short random back-off) on conflicts,
+//! so concurrent replies of several attendees never overwrite each other.
+//! Copies derived from an organizer's object are only written while that
+//! object still has the Schedule-Tag they were derived from
+//! ([`Origin`]), so a slower delivery of an older version can never
+//! overwrite a newer one.
+
+use std::time::Duration;
 
 use calcraft_ical::{Component, INDEX_VERSION, itip, parse, write::to_string};
 use calcraft_store::{
@@ -26,13 +32,15 @@ const ATTEMPTS: usize = 5;
 /// Why a delivery did not happen.
 #[derive(Debug)]
 pub enum Failure {
-    /// Quota, object limits, an invalid result or a storage error (5.1).
+    /// Quota, object or delivery limits, an invalid result, a conflicting
+    /// object or a storage error (5.1).
     NotDelivered,
     /// The recipient has no writable calendar for the component (5.3).
     NoCalendar,
-    /// The recipient's object with this UID belongs to another organizer,
-    /// or the organizer has no such event with this attendee (3.8 for
-    /// replies, 5.1 for invitations so that nothing is revealed).
+    /// A reply to an event the organizer does not have with this attendee
+    /// (3.8). Invitations never use it: a conflicting object of the
+    /// recipient is answered like a full quota (5.1), so that it is no
+    /// oracle for UIDs in their calendars.
     NoAuthority,
 }
 
@@ -56,16 +64,38 @@ impl From<StoreError> for Failure {
     }
 }
 
-/// Stores `tree` as object `name` of `collection` (validated like a PUT).
-async fn store_tree(
+/// The organizer's object a delivery is derived from: collection id,
+/// resource name and the Schedule-Tag it was stored with.
+#[derive(Debug, Clone, Copy)]
+pub struct Origin<'a> {
+    pub collection_id: i64,
+    pub name: &'a str,
+    pub tag: &'a str,
+}
+
+/// Waits a few random milliseconds before attempt `attempt + 1`, so that
+/// competing writers do not collide again and again.
+pub async fn backoff(attempt: usize) {
+    let jitter = u64::from(crate::secrets::random_bytes::<1>()[0] % 20);
+    let base = 5 * u64::try_from(attempt + 1).unwrap_or(1);
+    tokio::time::sleep(Duration::from_millis(base + jitter)).await;
+}
+
+/// Serialises a tree for storage.
+fn serialize(tree: &Component) -> Result<String, StoreError> {
+    to_string(tree).map_err(|_| StoreError::Limit("invalid scheduling object"))
+}
+
+/// Stores `text` as object `name` of `collection` (validated like a PUT).
+async fn store_text(
     state: &AppState,
     collection: &Collection,
     name: &str,
-    tree: &Component,
+    text: &str,
     precondition: &Precondition,
     tag: Option<&str>,
+    origin: Option<Origin<'_>>,
 ) -> Result<(), StoreError> {
-    let text = to_string(tree).map_err(|_| StoreError::Limit("invalid scheduling object"))?;
     let body = text.as_bytes();
     let validated = check_object(collection, body, state.max_vcard_bytes)
         .map_err(|_| StoreError::Limit("invalid scheduling object"))?;
@@ -90,10 +120,25 @@ async fn store_tree(
             &ScheduleTag {
                 set: tag,
                 if_match: None,
+                requires: origin.map(|o| (o.collection_id, o.name, o.tag)),
             },
         )
         .await?;
     Ok(())
+}
+
+/// Stores `tree` as object `name` of `collection`.
+async fn store_tree(
+    state: &AppState,
+    collection: &Collection,
+    name: &str,
+    tree: &Component,
+    precondition: &Precondition,
+    tag: Option<&str>,
+    origin: Option<Origin<'_>>,
+) -> Result<(), StoreError> {
+    let text = serialize(tree)?;
+    store_text(state, collection, name, &text, precondition, tag, origin).await
 }
 
 /// Puts a message into the recipient's inbox; failures (quota) only cost
@@ -104,11 +149,8 @@ async fn to_inbox(
     recipient: &User,
     uid: &str,
     sender: &str,
-    message: &Component,
+    text: &str,
 ) {
-    let Ok(text) = to_string(message) else {
-        return;
-    };
     let name = new_resource_name();
     let content = text.as_bytes();
     let tag = etag(content);
@@ -138,6 +180,24 @@ fn organized_by(tree: &Component, addresses: &[String]) -> bool {
     matches!(itip::organizer(tree), Ok(Some(o)) if addresses.contains(&normalize(&o.value)))
 }
 
+/// Charges a delivery of `bytes` to the recipient's limits (size of one
+/// copy, bytes per hour).
+fn admit(
+    scheduling: &Scheduling,
+    recipient: &User,
+    copy: usize,
+    total: usize,
+) -> Result<(), Failure> {
+    if copy > scheduling.config.max_delivered_object_bytes {
+        return Err(Failure::NotDelivered);
+    }
+    let bytes = u64::try_from(total).unwrap_or(u64::MAX);
+    if !scheduling.allow_bytes(recipient.id, bytes) {
+        return Err(Failure::NotDelivered);
+    }
+    Ok(())
+}
+
 /// Delivers an invitation (or an update of it) to a user of this server:
 /// `projection` is what the recipient sees of the organizer's object.
 pub async fn request(
@@ -147,13 +207,19 @@ pub async fn request(
     sender: &str,
     recipient: &User,
     projection: &Component,
+    origin: Origin<'_>,
 ) -> Result<(), Failure> {
     let uid = itip::uid(projection)
         .ok_or(Failure::NotDelivered)?
         .to_owned();
-    for _ in 0..ATTEMPTS {
+    let message = serialize(&itip::message("REQUEST", projection, &dtstamp()))?;
+    let mut admitted = false;
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            backoff(attempt).await;
+        }
         let existing = state.store.scheduling_object(recipient.id, &uid).await?;
-        let result = match existing {
+        let (collection, name, text, guard) = match existing {
             Some(object) => {
                 let old = parse(&object.content).ok();
                 // Another organizer's (or the recipient's own) object with
@@ -162,18 +228,15 @@ pub async fn request(
                     .as_ref()
                     .is_some_and(|old| organized_by(old, organizer_addresses))
                 {
-                    return Err(Failure::NoAuthority);
+                    return Err(Failure::NotDelivered);
                 }
                 let copy = itip::attendee_copy(projection, old.as_ref());
-                store_tree(
-                    state,
-                    &object.collection,
-                    &object.name,
-                    &copy,
-                    &Precondition::IfMatch(vec![object.etag.clone()]),
-                    Some(&new_schedule_tag()),
+                (
+                    object.collection,
+                    object.name,
+                    serialize(&copy)?,
+                    Precondition::IfMatch(vec![object.etag]),
                 )
-                .await
             }
             None => {
                 let component = projection
@@ -187,23 +250,41 @@ pub async fn request(
                 else {
                     return Err(Failure::NoCalendar);
                 };
-                store_tree(
-                    state,
-                    &calendar,
-                    &new_resource_name(),
-                    projection,
-                    &Precondition::MustNotExist,
-                    Some(&new_schedule_tag()),
+                (
+                    calendar,
+                    new_resource_name(),
+                    serialize(projection)?,
+                    Precondition::MustNotExist,
                 )
-                .await
             }
         };
+        if !admitted {
+            admit(
+                scheduling,
+                recipient,
+                text.len(),
+                text.len() + message.len(),
+            )?;
+            admitted = true;
+        }
+        let result = store_text(
+            state,
+            &collection,
+            &name,
+            &text,
+            &guard,
+            Some(&new_schedule_tag()),
+            Some(origin),
+        )
+        .await;
         match result {
             Ok(()) => {
-                let message = itip::message("REQUEST", projection, &dtstamp());
                 to_inbox(state, scheduling, recipient, &uid, sender, &message).await;
                 return Ok(());
             }
+            // The organizer changed the object again: that newer version
+            // is delivered by its own request.
+            Err(StoreError::Superseded) => return Ok(()),
             // Changed or created concurrently: read again.
             Err(StoreError::PreconditionFailed | StoreError::UidConflict(_)) => continue,
             Err(err) => return Err(err.into()),
@@ -212,8 +293,11 @@ pub async fn request(
     Err(Failure::NotDelivered)
 }
 
-/// Delivers a cancellation: the recipient's copy is kept, marked
-/// `STATUS:CANCELLED` (RFC 5546 §3.2.5), so that they see it was called off.
+/// Delivers a cancellation. A copy the recipient never touched (no answer,
+/// no alarms, no change since it was delivered for `projection`) is
+/// removed; otherwise it is kept, marked `STATUS:CANCELLED` (RFC 5546
+/// §3.2.5), so that they see it was called off. `origin` is the organizer's
+/// object if it still exists (an attendee removed from it).
 pub async fn cancel(
     state: &AppState,
     scheduling: &Scheduling,
@@ -221,11 +305,17 @@ pub async fn cancel(
     sender: &str,
     recipient: &User,
     projection: &Component,
+    origin: Option<Origin<'_>>,
 ) -> Result<(), Failure> {
     let uid = itip::uid(projection)
         .ok_or(Failure::NotDelivered)?
         .to_owned();
-    for _ in 0..ATTEMPTS {
+    let recipient_addresses = scheduling.addresses(&state.store, recipient).await?;
+    let is_recipient = |v: &str| recipient_addresses.contains(&normalize(v));
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            backoff(attempt).await;
+        }
         let Some(object) = state.store.scheduling_object(recipient.id, &uid).await? else {
             // Nothing to cancel (already deleted by the attendee).
             break;
@@ -234,51 +324,62 @@ pub async fn cancel(
             return Err(Failure::NotDelivered);
         };
         if !organized_by(&old, organizer_addresses) {
-            return Err(Failure::NoAuthority);
+            return Err(Failure::NotDelivered);
         }
         if itip::is_cancelled(&old) {
             break;
+        }
+        let guard = Precondition::IfMatch(vec![object.etag.clone()]);
+        if itip::untouched(&old, projection, &is_recipient) {
+            // Not into the trash: it was never the recipient's.
+            match state
+                .store
+                .delete_item(object.collection.id, &object.name, &guard)
+                .await
+            {
+                Ok(_) => break,
+                Err(StoreError::PreconditionFailed) => continue,
+                Err(err) => return Err(err.into()),
+            }
         }
         match store_tree(
             state,
             &object.collection,
             &object.name,
             &itip::cancelled(&old),
-            &Precondition::IfMatch(vec![object.etag.clone()]),
+            &guard,
             Some(&new_schedule_tag()),
+            origin,
         )
         .await
         {
             Ok(()) => break,
+            Err(StoreError::Superseded) => return Ok(()),
             Err(StoreError::PreconditionFailed) => {}
             Err(err) => return Err(err.into()),
         }
     }
-    let message = itip::message("CANCEL", &itip::cancelled(projection), &dtstamp());
-    to_inbox(state, scheduling, recipient, &uid, sender, &message).await;
+    let message = serialize(&itip::message(
+        "CANCEL",
+        &itip::cancelled(projection),
+        &dtstamp(),
+    ))?;
+    if scheduling.allow_bytes(
+        recipient.id,
+        u64::try_from(message.len()).unwrap_or(u64::MAX),
+    ) {
+        to_inbox(state, scheduling, recipient, &uid, sender, &message).await;
+    }
     Ok(())
 }
 
 /// What an attendee replies with.
-#[derive(Debug, Clone, Copy)]
-pub enum ReplySource<'a> {
+#[derive(Debug, Clone)]
+pub enum ReplySource {
     /// The participation statuses in the attendee's copy.
-    Copy(&'a Component),
+    Copy(Component),
     /// The attendee deleted their copy: everything declined.
     DeclineAll,
-}
-
-impl ReplySource<'_> {
-    fn replies(
-        self,
-        organizer_copy: &Component,
-        is_attendee: &dyn Fn(&str) -> bool,
-    ) -> Vec<itip::Reply> {
-        match self {
-            Self::Copy(copy) => itip::replies(copy, organizer_copy, is_attendee),
-            Self::DeclineAll => itip::decline_all(organizer_copy),
-        }
-    }
 }
 
 /// What a reply would do to the organizer's copy.
@@ -309,6 +410,35 @@ async fn organizer_copy(
     Ok(Some((object, tree)))
 }
 
+/// The organizer's copy after merging the reply, and the changed
+/// components; `None` if the attendee is not invited. CPU work (parsing
+/// time zones, recurrence checks) runs on the blocking pool, at most as
+/// many at a time as recurrence checks of REPORTs.
+async fn merge(
+    state: &AppState,
+    mut tree: Component,
+    source: &ReplySource,
+    attendee_addresses: &[String],
+) -> Option<(Component, Vec<usize>)> {
+    let permit = state.expansion.clone().acquire_owned().await.ok()?;
+    let source = source.clone();
+    let addresses = attendee_addresses.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let is_attendee = |v: &str| addresses.contains(&normalize(v));
+        itip::project(&tree, &is_attendee)?;
+        let replies = match &source {
+            ReplySource::Copy(copy) => itip::replies(copy, &tree, &is_attendee),
+            ReplySource::DeclineAll => itip::decline_all(&tree),
+        };
+        let changed = itip::apply_replies(&mut tree, &is_attendee, &replies);
+        Some((tree, changed))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Checks a reply without changing anything (to set `SCHEDULE-STATUS` in
 /// the attendee's copy before it is stored).
 pub async fn check_reply(
@@ -317,19 +447,15 @@ pub async fn check_reply(
     organizer_addresses: &[String],
     attendee_addresses: &[String],
     uid: &str,
-    source: ReplySource<'_>,
+    source: &ReplySource,
     forced: bool,
 ) -> Result<ReplyEffect, Failure> {
-    let is_attendee = |v: &str| attendee_addresses.contains(&normalize(v));
-    let Some((_, mut tree)) = organizer_copy(state, organizer, organizer_addresses, uid).await?
-    else {
+    let Some((_, tree)) = organizer_copy(state, organizer, organizer_addresses, uid).await? else {
         return Err(Failure::NoAuthority);
     };
-    if itip::project(&tree, &is_attendee).is_none() {
+    let Some((_, changed)) = merge(state, tree, source, attendee_addresses).await else {
         return Err(Failure::NoAuthority);
-    }
-    let replies = source.replies(&tree, &is_attendee);
-    let changed = itip::apply_replies(&mut tree, &is_attendee, &replies);
+    };
     Ok(if changed.is_empty() && !forced {
         ReplyEffect::Unchanged
     } else {
@@ -349,27 +475,29 @@ pub async fn reply(
     attendee_addresses: &[String],
     sender: &str,
     uid: &str,
-    source: ReplySource<'_>,
+    source: &ReplySource,
     forced: bool,
 ) -> Result<ReplyEffect, Failure> {
     let is_attendee = |v: &str| attendee_addresses.contains(&normalize(v));
-    for _ in 0..ATTEMPTS {
-        let Some((object, mut tree)) =
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            backoff(attempt).await;
+        }
+        let Some((object, tree)) =
             organizer_copy(state, organizer, organizer_addresses, uid).await?
         else {
             return Err(Failure::NoAuthority);
         };
-        if itip::project(&tree, &is_attendee).is_none() {
+        let Some((tree, changed)) = merge(state, tree, source, attendee_addresses).await else {
             return Err(Failure::NoAuthority);
-        }
-        let replies = source.replies(&tree, &is_attendee);
-        let changed = itip::apply_replies(&mut tree, &is_attendee, &replies);
+        };
         if changed.is_empty() {
             if forced {
                 let all: Vec<usize> = (0..tree.components.len())
                     .filter(|&i| tree.components[i].name != "VTIMEZONE")
                     .collect();
-                let message = itip::reply_message(&tree, &all, &is_attendee, &dtstamp());
+                let message =
+                    serialize(&itip::reply_message(&tree, &all, &is_attendee, &dtstamp()))?;
                 to_inbox(state, scheduling, organizer, uid, sender, &message).await;
                 return Ok(ReplyEffect::Changes);
             }
@@ -382,11 +510,17 @@ pub async fn reply(
             &tree,
             &Precondition::IfMatch(vec![object.etag.clone()]),
             object.schedule_tag.as_deref(),
+            None,
         )
         .await
         {
             Ok(()) => {
-                let message = itip::reply_message(&tree, &changed, &is_attendee, &dtstamp());
+                let message = serialize(&itip::reply_message(
+                    &tree,
+                    &changed,
+                    &is_attendee,
+                    &dtstamp(),
+                ))?;
                 to_inbox(state, scheduling, organizer, uid, sender, &message).await;
                 return Ok(ReplyEffect::Changes);
             }
@@ -397,17 +531,23 @@ pub async fn reply(
     Err(Failure::NotDelivered)
 }
 
-/// Sets `SCHEDULE-STATUS` of the given attendees in the organizer's copy
-/// after deliveries failed, keeping its Schedule-Tag. Best effort: if the
-/// object changed meanwhile under another tag, it is left alone.
+/// Sets `SCHEDULE-STATUS` on the properties `kind` (ATTENDEE or ORGANIZER)
+/// matching the given addresses (`None`: every one) in an object stored
+/// under Schedule-Tag `tag`, keeping the tag: the organizer's copy after
+/// deliveries failed, the attendee's copy after a reply failed. Best effort:
+/// if the object changed meanwhile under another tag, it is left alone.
 pub async fn record_statuses(
     state: &AppState,
     collection: &Collection,
     name: &str,
     tag: &str,
-    failed: &[(String, &'static str)],
+    kind: &str,
+    statuses: &[(Option<String>, &'static str)],
 ) {
-    for _ in 0..ATTEMPTS {
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            backoff(attempt).await;
+        }
         let Ok(Some((item, Some(current)))) = state
             .store
             .item_with_schedule_tag(collection.id, name)
@@ -421,11 +561,11 @@ pub async fn record_statuses(
         let Ok(mut tree) = parse(&item.content) else {
             return;
         };
-        for (address, status) in failed {
+        for (address, status) in statuses {
             itip::set_parameter(
                 &mut tree,
-                "ATTENDEE",
-                &|v: &str| normalize(v) == *address,
+                kind,
+                &|v: &str| address.as_ref().is_none_or(|a| normalize(v) == *a),
                 "SCHEDULE-STATUS",
                 Some(status),
             );
@@ -437,6 +577,7 @@ pub async fn record_statuses(
             &tree,
             &Precondition::IfMatch(vec![item.etag]),
             Some(tag),
+            None,
         )
         .await
         {

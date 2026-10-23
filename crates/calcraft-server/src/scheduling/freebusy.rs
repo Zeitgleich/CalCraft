@@ -18,12 +18,51 @@ use calcraft_store::{StoreError, User};
 use super::normalize;
 use crate::app::AppState;
 
-/// Work for one user's lookup (see [`calcraft_ical::Budget`]).
+/// Work for one free/busy request, all recipients together (see
+/// [`calcraft_ical::Budget`]).
 const LOOKUP_WORK: u64 = 2_000_000;
-/// Objects evaluated exactly per lookup; further ones count as busy.
+/// Objects evaluated exactly per request; further ones count as busy.
 const MAX_OBJECTS: usize = 2_000;
-/// Bytes of object data read per lookup.
+/// Bytes of object data read per request.
 const MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// What is left of the limits of one free/busy request.
+#[derive(Debug)]
+pub struct Lookup {
+    work: u64,
+    objects: usize,
+    bytes: usize,
+}
+
+impl Lookup {
+    pub fn new() -> Self {
+        Self {
+            work: LOOKUP_WORK,
+            objects: MAX_OBJECTS,
+            bytes: MAX_BYTES,
+        }
+    }
+}
+
+impl Default for Lookup {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Keeps at most [`MAX_PERIODS`] periods without ever turning busy time
+/// into free time: everything from the last kept period on becomes one
+/// busy period up to the latest end.
+pub(crate) fn bounded(mut periods: Vec<(i64, i64, BusyType)>) -> Vec<(i64, i64, BusyType)> {
+    if periods.len() <= MAX_PERIODS {
+        return periods;
+    }
+    let tail = periods.split_off(MAX_PERIODS - 1);
+    let lo = tail.iter().map(|p| p.0).min().unwrap_or(0);
+    let hi = tail.iter().map(|p| p.1).max().unwrap_or(lo);
+    periods.push((lo, hi, BusyType::Busy));
+    periods
+}
 /// Candidates fetched per query.
 const PAGE: u32 = 500;
 /// Most busy periods reported per user.
@@ -36,13 +75,15 @@ fn transparent(value: &str) -> bool {
         .is_ok_and(|node| node.is(NS_CALDAV, "transparent"))
 }
 
-/// The busy periods of `user` in `[start, end)`, merged and sorted.
+/// The busy periods of `user` in `[start, end)`, merged and sorted,
+/// within what is left of `lookup`.
 pub async fn busy(
     state: &AppState,
     user: &User,
     addresses: &[String],
     start: i64,
     end: i64,
+    lookup: &mut Lookup,
 ) -> Result<Vec<(i64, i64, BusyType)>, StoreError> {
     let store = &state.store;
     let calendars = store.collections(user.id, CollectionKind::Calendar).await?;
@@ -75,7 +116,7 @@ pub async fn busy(
                     candidate.range_end.unwrap_or(end).min(end),
                     BusyType::Busy,
                 );
-                if contents.len() >= MAX_OBJECTS || bytes >= MAX_BYTES {
+                if contents.len() >= lookup.objects || bytes >= lookup.bytes {
                     periods.push(conservative);
                     continue;
                 }
@@ -90,14 +131,18 @@ pub async fn busy(
         }
     }
 
+    lookup.objects = lookup.objects.saturating_sub(contents.len());
+    lookup.bytes = lookup.bytes.saturating_sub(bytes);
     let Ok(permit) = state.expansion.clone().acquire_owned().await else {
-        return Ok(merge_periods(periods));
+        periods.extend(contents.into_iter().map(|(_, conservative)| conservative));
+        return Ok(bounded(merge_periods(periods)));
     };
+    let available = lookup.work;
     let addresses = addresses.to_vec();
     let exact = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let is_user = |v: &str| addresses.contains(&normalize(v));
-        let mut work = LOOKUP_WORK;
+        let mut work = available;
         let mut out = Vec::new();
         for (content, conservative) in contents {
             let granted = OBJECT_BUDGET.min(work);
@@ -108,13 +153,17 @@ pub async fn busy(
             }
             work = work.saturating_sub(granted.saturating_sub(budget.remaining()));
         }
-        out
+        (out, work)
     })
-    .await
-    .unwrap_or_default();
-    periods.extend(exact);
+    .await;
+    match exact {
+        Ok((exact, left)) => {
+            lookup.work = left;
+            periods.extend(exact);
+        }
+        // Cannot happen (no panics); if it did, the whole range is busy.
+        Err(_) => periods.push((start, end, BusyType::Busy)),
+    }
     periods.retain(|(lo, hi, _)| hi > lo);
-    let mut merged = merge_periods(periods);
-    merged.truncate(MAX_PERIODS);
-    Ok(merged)
+    Ok(bounded(merge_periods(periods)))
 }

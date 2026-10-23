@@ -308,6 +308,10 @@ async fn snapshot(store: &Store, user: &User, session: &str) -> String {
     }
     out += &format!("{:?}\n", store.subscriptions(user.id).await.unwrap());
     out += &format!("inbox {}\n", store.inbox_revision(user.id).await.unwrap());
+    out += &format!(
+        "invitations {}\n",
+        store.accepts_invitations(user.id).await.unwrap()
+    );
     for meta in store.inbox_messages(user.id, 1000).await.unwrap() {
         out += &format!(
             "{:?}\n",
@@ -1866,6 +1870,8 @@ mod api_matrix {
             case("post", "/v1/me/totp/enable", 401).body(json!({"code": "zzzzzz"})),
             case("post", "/v1/me/totp/disable", 409)
                 .body(json!({"password": BOB_PW, "code": "123456"})),
+            // Only ever the session's own setting (scheduling is on here).
+            case("patch", "/v1/me/scheduling", 204).body(json!({"accept_invitations": true})),
             case("get", "/v1/app-passwords", 200),
             case("post", "/v1/app-passwords", 201).body(json!({"name": "zzattack"})),
             case("delete", "/v1/app-passwords/{id}", 404)

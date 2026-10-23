@@ -454,7 +454,7 @@ sudo -u calcraft env CALCRAFT_CONFIG=/etc/calcraft/calcraft.toml calcraft user a
 
 Further users can be created in the web UI (admin page) or with the same
 command without `--admin`. Other commands: `calcraft user list`,
-`passwd`, `disable`, `enable`, `set-admin`, `set-email`.
+`passwd`, `disable`, `enable`, `set-admin`, `set-email`, `set-invitations`.
 
 Invitations between users (CalDAV scheduling) are off by default. To use
 them, add `[scheduling] enabled = true` and, if your users' addresses are

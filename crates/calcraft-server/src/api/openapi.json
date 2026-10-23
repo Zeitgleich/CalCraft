@@ -288,6 +288,40 @@
         }
       }
     },
+    "/v1/me/scheduling": {
+      "patch": {
+        "summary": "Accept or refuse invitations from other users",
+        "description": "Off: other users' invitations are not delivered and free/busy lookups are refused; the user then looks like an unknown address (3.7). 404 if scheduling is off on the server.",
+        "tags": [
+          "account"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateScheduling"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Changed"
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/me/password": {
       "post": {
         "summary": "Change the password; ends all sessions",
@@ -1649,6 +1683,17 @@
                 "type": "null"
               }
             ]
+          },
+          "scheduling": {
+            "description": "Scheduling settings; null if scheduling is off on the server.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SchedulingInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -1656,6 +1701,36 @@
           "is_admin",
           "totp_enabled"
         ]
+      },
+      "SchedulingInfo": {
+        "type": "object",
+        "properties": {
+          "accept_invitations": {
+            "type": "boolean"
+          },
+          "addresses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The user's mailto: calendar user addresses."
+          }
+        },
+        "required": [
+          "accept_invitations"
+        ]
+      },
+      "UpdateScheduling": {
+        "type": "object",
+        "properties": {
+          "accept_invitations": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "accept_invitations"
+        ],
+        "additionalProperties": false
       },
       "SsoLink": {
         "type": "object",

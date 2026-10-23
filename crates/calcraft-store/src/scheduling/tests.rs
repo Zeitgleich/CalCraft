@@ -99,6 +99,7 @@ async fn schedule_tag_is_stored_and_checked() {
     let tags = ScheduleTag {
         set: Some("\"t1\""),
         if_match: None,
+        requires: None,
     };
     let outcome = store
         .put_item_scheduled(
@@ -122,6 +123,7 @@ async fn schedule_tag_is_stored_and_checked() {
     let wrong = ScheduleTag {
         set: Some("\"t2\""),
         if_match: Some("\"other\""),
+        requires: None,
     };
     assert!(matches!(
         store
@@ -138,6 +140,7 @@ async fn schedule_tag_is_stored_and_checked() {
     let right = ScheduleTag {
         set: Some("\"t2\""),
         if_match: Some("\"t1\""),
+        requires: None,
     };
     store
         .put_item_scheduled(
@@ -393,4 +396,85 @@ async fn freebusy_candidates_by_range() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn deliveries_of_superseded_versions_are_refused() {
+    let store = Store::in_memory().await.unwrap();
+    let alice = store.create_user(&name("alice"), "h", None).await.unwrap();
+    let bob = store.create_user(&name("bob"), "h", None).await.unwrap();
+    let alice_cal = default_calendar(&store, alice.id).await;
+    let bob_cal = default_calendar(&store, bob.id).await;
+    let content = event("u1");
+    let tag = |set| ScheduleTag {
+        set: Some(set),
+        if_match: None,
+        requires: None,
+    };
+    store
+        .put_item_scheduled(
+            alice_cal.id,
+            "o.ics",
+            &item("u1", "\"e1\"", &content),
+            &Precondition::None,
+            &tag("\"a\""),
+        )
+        .await
+        .unwrap();
+    // Derived from version "a": accepted while "a" is current.
+    let derived = |from| ScheduleTag {
+        set: Some("\"c\""),
+        if_match: None,
+        requires: Some((alice_cal.id, "o.ics", from)),
+    };
+    store
+        .put_item_scheduled(
+            bob_cal.id,
+            "c.ics",
+            &item("u1", "\"c1\"", &content),
+            &Precondition::None,
+            &derived("\"a\""),
+        )
+        .await
+        .unwrap();
+    // The organizer writes version "b"; a late delivery of "a" is refused.
+    store
+        .put_item_scheduled(
+            alice_cal.id,
+            "o.ics",
+            &item("u1", "\"e2\"", &content),
+            &Precondition::None,
+            &tag("\"b\""),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        store
+            .put_item_scheduled(
+                bob_cal.id,
+                "c.ics",
+                &item("u1", "\"c2\"", &content),
+                &Precondition::None,
+                &derived("\"a\""),
+            )
+            .await,
+        Err(StoreError::Superseded)
+    ));
+    let (copy, _) = store
+        .item_with_schedule_tag(bob_cal.id, "c.ics")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(copy.etag, "\"c1\"");
+}
+
+#[tokio::test]
+async fn invitations_can_be_refused() {
+    let store = Store::in_memory().await.unwrap();
+    let alice = store.create_user(&name("alice"), "h", None).await.unwrap();
+    assert!(store.accepts_invitations(alice.id).await.unwrap());
+    assert!(store.set_accept_invitations(alice.id, false).await.unwrap());
+    assert!(!store.accepts_invitations(alice.id).await.unwrap());
+    assert!(!store.accepts_invitations(9999).await.unwrap());
+    assert!(!store.set_accept_invitations(9999, true).await.unwrap());
 }

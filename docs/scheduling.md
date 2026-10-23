@@ -37,9 +37,19 @@ removes it; `email` in `POST /api/v1/admin/users`).
 | `domain` | unset | Derived addresses `mailto:<username>@<domain>`. |
 | `free_busy` | `true` | Free/busy lookups between users (busy periods only). |
 | `max_attendees` | 100 | Distinct attendees per scheduled object (1–1000); more: 403 `CALDAV:max-attendees-per-instance`. |
-| `max_recipients_per_hour` | 1000 | Recipients one user may reach per hour (invitations, cancellations, replies, free/busy lookups; 1–100 000). Beyond that: 5.1, the sender's own object is still stored. |
+| `max_recipients_per_hour` | 1000 | Recipients one user may reach per hour (1–100 000): every delivery to a user of this server (invitations, updates, cancellations, replies), every *new* attendee whatever the address (also unknown and external ones) and every free/busy recipient. Beyond that: 5.1, the sender's own object is still stored. |
+| `max_delivered_bytes_per_hour` | 16 MiB | Bytes one user may *receive* per hour from all senders together (calendar copies plus inbox messages; 64 KiB–1 GiB). Beyond that: 5.1. |
+| `max_delivered_object_bytes` | 256 KiB | Largest calendar copy delivered to an attendee (4 KiB–1 MiB); larger invitations: 5.1. |
 | `inbox_max_messages` | 1000 | Messages kept per inbox (10–100 000); the oldest are dropped. |
 | `max_freebusy_days` | 366 | Longest free/busy range (1–1830); longer: 403. |
+
+Every user can refuse invitations (web UI *Settings → Invitations*,
+`PATCH /api/v1/me/scheduling` with `{"accept_invitations": false}`,
+`calcraft user set-invitations alice --refuse`). Their address then looks
+exactly like one nobody has: invitations get 3.7 and free/busy lookups
+3.7 (so the setting itself reveals nothing). Cancellations of earlier
+invitations still arrive, and their own invitations and replies work as
+before.
 
 Clients find everything through the principal: `calendar-user-address-set`,
 `calendar-user-type` (`INDIVIDUAL`), `schedule-inbox-URL`
@@ -60,8 +70,20 @@ Addresses are compared case-insensitively (ASCII; internationalised
 addresses are not accepted). E-mail addresses are unique (database
 constraint, stored in lower case). Within the scheduling domain only a
 user's own derived address can be set, so an administrator cannot hand
-one user's address to another; should an address still match two users
-(e.g. after changing `domain`), it matches nobody and a warning is logged.
+one user's address to another. Should an e-mail address still collide
+with another user's derived address (an older e-mail address after
+`domain` was set or changed), the derived address wins: the e-mail
+address is ignored – for receiving, organizing and replying alike (the
+same rule for `calendar-user-address-set`, the organizer check and
+delivery) – and a warning is logged. A new account whose derived address
+is already another user's e-mail address is refused (CLI, admin API and
+SSO auto-creation alike).
+
+Principal URLs count with any scheme and host (`https://other.example/dav/principals/bob/`
+is bob): such a value is written by the organizer's own client and only
+ever names a user of this server, so it gives nobody anything they could
+not get with `/dav/principals/bob/`. Stage B (iMIP) has to treat absolute
+URLs of other hosts as external addresses instead.
 
 **Addresses are never taken from SSO.** An e-mail claim of the identity
 provider can be changed by whoever controls the IdP account (or the IdP);
@@ -88,7 +110,19 @@ everybody else.
 * **Deliveries never overwrite foreign objects**: an invitation updates the
   recipient's object with that UID only if it has the same organizer;
   otherwise (another organizer's event, the recipient's own event) the
-  delivery is refused with 5.1.
+  delivery is refused with 5.1 – the same status as a full quota, so it
+  is no oracle for UIDs in other users' calendars.
+* **Answers come from attendees only**: a newly invited attendee always
+  starts with `PARTSTAT=NEEDS-ACTION` (whatever the organizer's client
+  wrote), in the organizer's copy and in every attendee's view; later the
+  server keeps the status recorded from the attendee's replies. Only a
+  rescheduling (changed times) lets the organizer set it back to
+  `NEEDS-ACTION`.
+* **Replies are bounded**: at most 1000 replies per attendee copy (100 of
+  them from EXDATEs), at most 10 overrides added to the organizer's copy
+  per reply and none once it has 200 components, and only for instances
+  whose answer differs from the series. The work runs on the blocking
+  pool, at most as many at a time as recurrence checks of REPORTs.
 * Only one scheduling object per UID and user: a second one in another
   calendar gets 403 `CALDAV:unique-scheduling-object-resource`.
 * `SCHEDULE-AGENT=CLIENT` and `NONE` are respected; unknown values count
@@ -102,11 +136,11 @@ everybody else.
 | Action | Effect |
 |---|---|
 | Organizer PUT, new or changed for an attendee | REQUEST: the attendee's copy is created in their default calendar (`schedule-default-calendar-URL`: the writable calendar `default`, else the first writable one for the component) or updated; their alarms are kept. Inbox message. `SCHEDULE-STATUS` 1.2. |
-| Organizer PUT, attendee removed | CANCEL: the attendee's copy is marked `STATUS:CANCELLED` (kept, so the attendee sees it). |
+| Organizer PUT, attendee removed | CANCEL: an attendee's copy they never touched (no answer, no alarm, unchanged since delivery) is removed – it was never theirs, so cancelled invitations cannot pile up in a calendar; otherwise it is marked `STATUS:CANCELLED` and kept. Inbox message either way. |
 | Organizer PUT without a relevant change | Nothing is sent. Relevant are all properties except `DTSTAMP`, `LAST-MODIFIED`, `CREATED`, `SEQUENCE`, `X-` properties and the participation status of attendees. |
-| Organizer DELETE | CANCEL to every attendee. The object goes to the trash as usual. |
-| Attendee PUT with a new `PARTSTAT` | REPLY: the organizer's copy gets the new status; the organizer's Schedule-Tag stays. `SCHEDULE-STATUS` on the attendee's ORGANIZER property. |
-| Attendee DELETE | REPLY `DECLINED` (not for cancelled events). |
+| Organizer DELETE | CANCEL to every attendee (as above). The object goes to the trash as usual. |
+| Attendee PUT with a new `PARTSTAT` | REPLY: the organizer's copy gets the new status; the organizer's Schedule-Tag stays. `SCHEDULE-STATUS` on the attendee's ORGANIZER property: 1.2, or the failure (e.g. 5.1 when the organizer's quota is full) – a failed reply is sent again with the attendee's next PUT. |
+| Attendee DELETE | REPLY `DECLINED` (not for cancelled events), sent before the object goes to the trash; if it cannot be delivered it is logged and the object is deleted anyway. |
 
 Each attendee receives only the components that list them: instances of a
 series they are not invited to are excluded with EXDATE. A reply for a
@@ -133,8 +167,14 @@ response has no ETag (RFC 4791 §5.3.4); clients read the object again.
 
 **Concurrency**: every change of an existing object is a
 read–modify–write guarded by its ETag in one `BEGIN IMMEDIATE` write and
-retried on conflicts; two attendees replying at the same time both end up
-in the organizer's copy (`concurrent_replies_lose_nothing`).
+retried with a short random back-off; two attendees replying at the same
+time both end up in the organizer's copy
+(`concurrent_replies_lose_nothing`). A retried request is charged to the
+rate limit only once. Copies derived from an organizer's object are only
+written while that object still carries the Schedule-Tag they were made
+from (checked in the same transaction), so when two organizer PUTs race,
+the older version can never overwrite the newer one in an attendee's
+calendar.
 
 ## Inbox and outbox
 
@@ -146,6 +186,10 @@ and 1), GET/HEAD, DELETE (final: inbox messages never go to the trash) and
 REPORT `calendar-multiget` / `calendar-query` (returns all messages). PUT,
 PROPPATCH, MKCOL, COPY and MOVE are refused (405; as a COPY/MOVE
 destination 403). Messages count towards the recipient's storage quota.
+REPORTs on the inbox have the limits of REPORTs on calendars (5000
+results, 32 MiB of data): a multiget names each message once however its
+hrefs are spelled (507 beyond the limits), a calendar-query is truncated
+with a 507 entry.
 
 The outbox takes only POST of a free/busy request (`METHOD:REQUEST`,
 `VFREEBUSY` with UTC `DTSTART`/`DTEND`, ORGANIZER and up to 100 ATTENDEE):
@@ -161,19 +205,24 @@ The outbox takes only POST of a free/busy request (`METHOD:REQUEST`,
   `transparent`, not `TRANSP:TRANSPARENT`, not cancelled and not declined
   by the recipient; tentative events and unanswered invitations are
   `BUSY-TENTATIVE`;
+* recipients are deduplicated by normalised address (case variants are
+  one recipient);
 * recurring events are expanded with the recurrence engine (2 000 000
-  steps, 2 000 objects, 64 MiB per recipient); objects beyond the budget
-  count as busy over their indexed span (never "free" when they might be
-  busy). Floating times and all-day events are read as UTC.
+  steps, 2 000 objects, 64 MiB per request, shared by all its
+  recipients); objects beyond the budget count as busy over their indexed
+  span, and beyond 10 000 periods the rest is reported as one busy period
+  – never "free" when it might be busy. Floating times and all-day events
+  are read as UTC.
 
 ## Privacy and enumeration
 
 Only authenticated users can schedule or look up free/busy time. RFC 6638
 needs 3.7 for unknown recipients, so an authenticated user can tell whether
-an address belongs to a user of this server. This is accepted: the
-answers are limited by `max_recipients_per_hour` (shared with invitations),
-disabled users look exactly like unknown ones, and nothing beyond
-existence and busy periods is revealed. Administrators who do not want
+an address belongs to a user of this server. This is accepted: every new
+attendee and every free/busy recipient costs from `max_recipients_per_hour`
+whatever the answer (beyond the limit every address gets 5.1, existing or
+not), disabled users and users who refuse invitations look exactly like
+unknown ones, and nothing beyond existence and busy periods is revealed. Administrators who do not want
 users to see each other's busy times set `free_busy = false` (answer 3.8
 for everybody).
 
@@ -188,8 +237,9 @@ data (`tests/log_secrets.rs`).
 * **Trash**: deleting moves the object to the trash and sends the
   cancellation or decline. Restoring does **not** send invitations again
   (and the restored object has no Schedule-Tag); edit it or use
-  `SCHEDULE-FORCE-SEND` to invite again. Deleting a whole calendar sends
-  nothing.
+  `SCHEDULE-FORCE-SEND` to invite again. Untouched attendee copies removed
+  by a cancellation are gone for good (they never were the attendee's).
+  Deleting a whole calendar sends nothing.
 * **MOVE** keeps an object a scheduling object; **COPY** creates a plain
   copy without Schedule-Tag (deliveries keep updating the original, which
   wins the UID lookup).

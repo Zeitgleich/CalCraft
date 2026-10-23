@@ -14,6 +14,8 @@
 //! organizer's series really has (checked with the recurrence engine,
 //! within a budget).
 
+use std::collections::{HashMap, HashSet};
+
 use crate::{
     Component, Parameter, Property,
     datetime::{format_date_or_datetime, parse_date_or_datetime},
@@ -322,6 +324,21 @@ pub fn project(calendar: &Component, is_attendee: &dyn Fn(&str) -> bool) -> Opti
 /// participation status of attendees (replies are no reason to send a new
 /// invitation).
 fn canonical(calendar: &Component) -> Vec<(String, Vec<String>)> {
+    canonical_with(calendar, &|name| {
+        !matches!(name, "DTSTAMP" | "LAST-MODIFIED" | "CREATED" | "SEQUENCE")
+            && !name.starts_with("X-")
+    })
+}
+
+/// Properties that say when something takes place.
+fn is_timing(name: &str) -> bool {
+    matches!(
+        name,
+        "DTSTART" | "DTEND" | "DURATION" | "DUE" | "RRULE" | "RDATE" | "EXDATE" | "RECURRENCE-ID"
+    )
+}
+
+fn canonical_with(calendar: &Component, keep: &dyn Fn(&str) -> bool) -> Vec<(String, Vec<String>)> {
     let mut components: Vec<(String, Vec<String>)> = instances(calendar)
         .map(|component| {
             let rid = component
@@ -331,12 +348,7 @@ fn canonical(calendar: &Component) -> Vec<(String, Vec<String>)> {
             let mut lines: Vec<String> = component
                 .properties
                 .iter()
-                .filter(|p| {
-                    !matches!(
-                        p.name.as_str(),
-                        "DTSTAMP" | "LAST-MODIFIED" | "CREATED" | "SEQUENCE"
-                    ) && !p.name.starts_with("X-")
-                })
+                .filter(|p| keep(&p.name))
                 .map(|p| {
                     let mut p = p.clone();
                     if p.name == "ATTENDEE" || p.name == "ORGANIZER" {
@@ -362,6 +374,12 @@ fn canonical(calendar: &Component) -> Vec<(String, Vec<String>)> {
         .collect();
     components.sort();
     components
+}
+
+/// Whether the times of two projections differ (a rescheduled event,
+/// for which the organizer may ask attendees to answer again).
+pub fn rescheduled(new: &Component, old: &Component) -> bool {
+    canonical_with(new, &is_timing) != canonical_with(old, &is_timing)
 }
 
 /// Whether two projections ([`project`]) are the same for the attendee.
@@ -499,6 +517,10 @@ impl Reply {
 /// The attendee's participation statuses in their copy: one per component
 /// that lists them, plus `DECLINED` for every instance their client
 /// excluded with an EXDATE the organizer's copy does not have.
+///
+/// At most [`MAX_REPLIES`] replies, of which at most
+/// [`MAX_EXDATE_REPLIES`] come from EXDATEs; everything is hashed, so the
+/// cost is linear in the size of both objects.
 pub fn replies(
     attendee_copy: &Component,
     organizer_copy: &Component,
@@ -506,7 +528,11 @@ pub fn replies(
 ) -> Vec<Reply> {
     let mut keys = InstantKeys::new(attendee_copy);
     let mut out = Vec::new();
+    let mut seen: HashSet<Option<InstantKey>> = HashSet::new();
     for component in instances(attendee_copy) {
+        if out.len() >= MAX_REPLIES {
+            break;
+        }
         let Some(status) = partstat(component, is_attendee) else {
             continue;
         };
@@ -520,6 +546,9 @@ pub fn replies(
             },
             None => None,
         };
+        if !seen.insert(instance.clone()) {
+            continue;
+        }
         out.push(Reply {
             instance,
             partstat: status,
@@ -530,20 +559,25 @@ pub fn replies(
         instances(organizer_copy).find(|c| c.property("RECURRENCE-ID").is_none());
     if let (Some(master), Some(organizer_master)) = (master, organizer_master) {
         let mut organizer_keys = InstantKeys::new(organizer_copy);
-        let mut known = Vec::new();
+        let mut known: HashSet<InstantKey> = HashSet::new();
         for property in organizer_master.properties_named("EXDATE") {
             for raw in property.value.split(',') {
                 if let Some(key) = organizer_keys.key(property, raw) {
-                    known.push(key);
+                    known.insert(key);
                 }
             }
         }
-        for property in master.properties_named("EXDATE") {
+        let mut from_exdates = 0usize;
+        'exdates: for property in master.properties_named("EXDATE") {
             for raw in property.value.split(',') {
+                if from_exdates >= MAX_EXDATE_REPLIES || out.len() >= MAX_REPLIES {
+                    break 'exdates;
+                }
                 if let Some(key) = keys.key(property, raw)
                     && !known.contains(&key)
-                    && !out.iter().any(|r| r.instance.as_ref() == Some(&key))
+                    && seen.insert(Some(key.clone()))
                 {
+                    from_exdates += 1;
                     out.push(Reply {
                         instance: Some(key),
                         partstat: "DECLINED".to_owned(),
@@ -554,6 +588,16 @@ pub fn replies(
     }
     out
 }
+
+/// Most replies taken from one attendee's copy.
+pub const MAX_REPLIES: usize = 1_000;
+/// Most of them derived from EXDATEs the attendee's client added.
+pub const MAX_EXDATE_REPLIES: usize = 100;
+/// Most overrides one merge may add to the organizer's copy.
+pub const MAX_NEW_OVERRIDES: usize = 10;
+/// No overrides are added once the organizer's copy has this many
+/// instance components.
+pub const MAX_INSTANCE_COMPONENTS: usize = 200;
 
 /// Replies for declining everything the attendee is invited to (the
 /// attendee deleted their copy).
@@ -601,14 +645,14 @@ pub fn apply_replies(
         .iter()
         .find(|(_, key)| key.is_none())
         .map(|(i, _)| *i);
+    let instance_count = existing.len();
+    let index: HashMap<Option<InstantKey>, usize> =
+        existing.into_iter().map(|(i, key)| (key, i)).collect();
 
     let mut updates: Vec<(usize, String)> = Vec::new();
     let mut additions: Vec<(String, String)> = Vec::new();
     for reply in replies {
-        let target = existing
-            .iter()
-            .find(|(_, key)| *key == reply.instance)
-            .map(|(i, _)| *i);
+        let target = index.get(&reply.instance).copied();
         match (target, &reply.instance) {
             (Some(index), _) => {
                 let current = partstat(&organizer_copy.components[index], is_attendee);
@@ -618,6 +662,12 @@ pub fn apply_replies(
             }
             (None, Some(instance)) => {
                 let Some(master) = master else { continue };
+                // Bounded: a reply may not blow up the organizer's object.
+                if additions.len() >= MAX_NEW_OVERRIDES
+                    || instance_count + additions.len() >= MAX_INSTANCE_COMPONENTS
+                {
+                    continue;
+                }
                 let current = partstat(&organizer_copy.components[master], is_attendee);
                 if current.is_none_or(|c| c == reply.partstat) {
                     continue;
@@ -763,6 +813,41 @@ pub fn reply_message(
         body.components.push(reply);
     }
     message("REPLY", &body, dtstamp)
+}
+
+/// Sets the attendee's `PARTSTAT` to `NEEDS-ACTION` everywhere (a new
+/// invitation: whatever the organizer's client wrote is not their answer).
+pub fn reset_partstat(calendar: &mut Component, is_attendee: &dyn Fn(&str) -> bool) {
+    set_parameter(
+        calendar,
+        "ATTENDEE",
+        is_attendee,
+        "PARTSTAT",
+        Some("NEEDS-ACTION"),
+    );
+}
+
+/// The `SCHEDULE-STATUS` of the ORGANIZER property (an attendee's copy:
+/// the result of their last reply).
+pub fn organizer_status(calendar: &Component) -> Option<String> {
+    instances(calendar)
+        .filter_map(|c| c.property("ORGANIZER"))
+        .find_map(|p| param(p, "SCHEDULE-STATUS"))
+        .map(str::to_owned)
+}
+
+/// Whether the attendee's copy is still exactly what the server delivered
+/// for `projection`: no answer (`NEEDS-ACTION` everywhere), no alarms, no
+/// relevant change. Such a copy can be removed on cancellation.
+pub fn untouched(
+    copy: &Component,
+    projection: &Component,
+    is_attendee: &dyn Fn(&str) -> bool,
+) -> bool {
+    instances(copy).all(|c| {
+        c.components.iter().all(|sub| sub.name != "VALARM")
+            && partstat(c, is_attendee).is_none_or(|p| p == "NEEDS-ACTION")
+    }) && same_for_attendee(copy, projection)
 }
 
 /// Free/busy type of a busy period (RFC 5545 §3.2.9).

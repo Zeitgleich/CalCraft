@@ -88,3 +88,45 @@ fn generated_values_are_random() {
     assert!(new_resource_name().ends_with(".ics"));
     assert_eq!(dtstamp().len(), 16);
 }
+
+#[test]
+fn retries_of_one_request_are_charged_once() {
+    let scheduling = Scheduling::new(&SchedulingConfig {
+        enabled: true,
+        max_recipients_per_hour: 5,
+        ..SchedulingConfig::default()
+    });
+    let mut grant = Grant::default();
+    assert_eq!(grant.take(&scheduling, 1, 3), 3);
+    // The same three recipients again (a retry): nothing more is charged.
+    assert_eq!(grant.take(&scheduling, 1, 3), 3);
+    assert_eq!(scheduling.allow(1, 5), 2);
+}
+
+#[test]
+fn delivered_bytes_are_limited_per_recipient() {
+    let scheduling = Scheduling::new(&SchedulingConfig {
+        enabled: true,
+        max_delivered_bytes_per_hour: 100,
+        ..SchedulingConfig::default()
+    });
+    assert!(scheduling.allow_bytes(7, 60));
+    // All or nothing.
+    assert!(!scheduling.allow_bytes(7, 60));
+    assert!(scheduling.allow_bytes(7, 40));
+    assert!(scheduling.allow_bytes(8, 100));
+}
+
+#[test]
+fn too_many_busy_periods_never_become_free() {
+    use calcraft_ical::itip::BusyType;
+    let periods: Vec<(i64, i64, BusyType)> = (0..20_000)
+        .map(|i| (i * 10, i * 10 + 5, BusyType::Busy))
+        .collect();
+    let bounded = freebusy::bounded(periods);
+    assert!(bounded.len() <= 10_000);
+    let last = bounded.last().unwrap();
+    assert_eq!(last.1, 199_995);
+    // Everything after the cut is covered by the last period.
+    assert!(last.0 <= 9_999 * 10);
+}
