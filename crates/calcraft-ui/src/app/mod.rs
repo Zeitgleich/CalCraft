@@ -12,6 +12,7 @@ mod api;
 mod app_passwords;
 mod collections;
 mod login;
+mod sharing;
 mod subscriptions;
 mod trash;
 

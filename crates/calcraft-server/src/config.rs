@@ -36,6 +36,8 @@ pub struct Config {
     pub subscriptions: SubscriptionsConfig,
     pub scheduling: SchedulingConfig,
     pub attachments: AttachmentsConfig,
+    pub sharing: SharingConfig,
+    pub publish: PublishConfig,
     pub logging: LoggingConfig,
 }
 
@@ -885,6 +887,90 @@ impl AttachmentsConfig {
     }
 }
 
+/// Sharing calendars and address books with other users of this server
+/// (docs/sharing.md). On by default; sharees must accept a share before it
+/// appears in their home.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SharingConfig {
+    /// Owners may share; sharees see accepted shares. Off: no new shares,
+    /// and existing ones are hidden (kept in the database).
+    pub enabled: bool,
+}
+
+impl Default for SharingConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// Bounds of `publish.max_bytes` (64 KiB to 64 MiB).
+pub const PUBLISH_MAX_BYTES: std::ops::RangeInclusive<usize> = 64 * 1024..=64 * 1024 * 1024;
+/// Bounds of `publish.max_objects`.
+pub const PUBLISH_MAX_OBJECTS: std::ops::RangeInclusive<u32> = 1..=100_000;
+
+/// Public read-only links of calendars (`<base_url>/public/<token>.ics`,
+/// docs/sharing.md). Off by default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PublishConfig {
+    /// Owners may create links, and links are served without login.
+    pub enabled: bool,
+    /// Scheme and host the links are built with, e.g.
+    /// `https://cal.example.org` (no path); never taken from the request.
+    /// Required when enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Largest published calendar in bytes (64 KiB to 64 MiB); objects
+    /// beyond it are left out.
+    pub max_bytes: usize,
+    /// Most objects of one published calendar (1 to 100 000); further
+    /// objects are left out.
+    pub max_objects: u32,
+}
+
+impl Default for PublishConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: None,
+            max_bytes: 8 * 1024 * 1024,
+            max_objects: 10_000,
+        }
+    }
+}
+
+impl PublishConfig {
+    /// `base_url` without a trailing slash.
+    pub fn base(&self) -> &str {
+        self.base_url
+            .as_deref()
+            .map_or("", |url| url.strip_suffix('/').unwrap_or(url))
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !PUBLISH_MAX_BYTES.contains(&self.max_bytes) {
+            return Err(ConfigError::Invalid(
+                "publish.max_bytes must be between 65536 and 67108864 (64 MiB)",
+            ));
+        }
+        if !PUBLISH_MAX_OBJECTS.contains(&self.max_objects) {
+            return Err(ConfigError::Invalid(
+                "publish.max_objects must be between 1 and 100000",
+            ));
+        }
+        match &self.base_url {
+            Some(url) if !valid_base_url(url) => Err(ConfigError::Invalid(
+                "publish.base_url: use scheme and host only, like https://cal.example.org",
+            )),
+            None if self.enabled => Err(ConfigError::Invalid(
+                "publish.base_url is required when publishing is enabled",
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
@@ -1034,6 +1120,7 @@ impl Config {
         self.subscriptions.validate()?;
         self.scheduling.validate()?;
         self.attachments.validate()?;
+        self.publish.validate()?;
         self.oidc.validate()
     }
 }

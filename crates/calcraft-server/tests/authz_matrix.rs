@@ -27,6 +27,17 @@
 //! alice's, bob's and a missing attachment are targets, and attachment
 //! POSTs (`attachment-add`, `attachment-remove`) are sent everywhere.
 //!
+//! Sharing is part of it: bob shares a calendar read-only, a calendar and
+//! an address book read-write with alice (accepted), one calendar is only
+//! offered (pending) and one was shared and revoked. The accepted shares
+//! are targets below alice's own home, with a model of exactly the granted
+//! access; bob's own paths of the shared collections, the pending and the
+//! revoked share stay indistinguishable from paths that do not exist (or,
+//! in alice's home, from her own unmapped paths). The only markers of bob a
+//! response may contain are those a share reveals on purpose (his
+//! principal, display name and home paths), and only for requests to the
+//! shares, alice's homes and her notification collection.
+//!
 //! The REST API part does the same for every route in
 //! [`calcraft_server::api::ROUTES`]. Both parts check themselves: a DAV
 //! method in [`ALLOWED_METHODS`] or an API route without a matrix entry
@@ -51,7 +62,7 @@ use calcraft_server::{
     router,
     secrets::{hash_secret, random_token},
 };
-use calcraft_store::{Collection, NewItem, Precondition, PropertyChange, Store, User};
+use calcraft_store::{Collection, NewItem, Precondition, PropertyChange, ShareAccess, Store, User};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -108,6 +119,26 @@ const BOB_ATTACHMENT: &str = "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0";
 const MISSING_ATTACHMENT: &str = "0123456789abcdef0123456789abcdef";
 const ATTACHMENT_BASE: &str = "https://cal.example.org";
 
+/// Bob's collections shared with alice, and their slugs in her homes.
+const SHARE_RO: &str = "share-ro";
+const SHARE_RW: &str = "share-rw";
+const SHARE_PENDING: &str = "share-pending";
+const SHARE_REVOKED: &str = "share-revoked";
+const SHARED_EVENT: &str = "shared-ev.ics";
+const SHARED_CARD: &str = "shared-card.vcf";
+/// Prefix of the (visible) data in bob's accepted shares.
+const SHARED_PREFIX: &str = "bobshared";
+/// Markers a share reveals on purpose: the owner's principal, display
+/// name and home paths (DAV:owner, CS:invite, CS:hosturl).
+const SHARED_IDENTITY: [&str; 5] = [
+    // The prefix of bob's display name.
+    MARK,
+    "/principals/bob",
+    "zqbobmark-person",
+    "/calendars/bob",
+    "/addressbooks/bob",
+];
+
 struct Fixture {
     app: Router,
     store: Store,
@@ -128,6 +159,13 @@ struct Fixture {
     bob_sync_token: String,
     markers: Vec<String>,
     bob_snapshot: String,
+    bob_shares: String,
+    /// Path of bob's pending invitation (from dave) in his notification
+    /// collection.
+    bob_notification: String,
+    /// Id of a public link of bob's default calendar.
+    #[cfg_attr(not(feature = "api"), allow(dead_code))]
+    bob_link_id: String,
 }
 
 fn event(uid: &str, summary: &str) -> String {
@@ -373,7 +411,16 @@ async fn snapshot(store: &Store, user: &User, session: &str) -> String {
     let mut out = format!("{:?}\n", store.user_by_id(user.id).await.unwrap());
     for kind in KINDS {
         for collection in store.collections(user.id, kind).await.unwrap() {
-            out += &format!("{collection:?}\n");
+            // The sharee may change the read-write shares (reset by
+            // `reset_shares`), which changes their revision.
+            if collection.slug.as_str() == SHARE_RW {
+                out += &format!(
+                    "shared read-write {:?} {}\n",
+                    collection.kind, collection.slug
+                );
+            } else {
+                out += &format!("{collection:?}\n");
+            }
             out += &format!(
                 "{:?}\n",
                 store.dead_properties(collection.id).await.unwrap()
@@ -434,6 +481,220 @@ async fn snapshot(store: &Store, user: &User, session: &str) -> String {
     out
 }
 
+/// Who a user shares with, and what is shared with them.
+async fn shares_snapshot(store: &Store, user: &User) -> String {
+    let mut out = String::new();
+    for kind in KINDS {
+        for share in store.shares_of_owner(user.id, kind).await.unwrap() {
+            out += &format!(
+                "out {:?} {} {} {:?} {}\n",
+                share.kind,
+                share.owner_slug,
+                share.sharee,
+                share.access,
+                share.accepted()
+            );
+        }
+    }
+    for share in store.incoming_shares(user.id).await.unwrap() {
+        out += &format!(
+            "in {:?} {} {} {:?} {}\n",
+            share.kind,
+            share.owner,
+            share.owner_slug,
+            share.access,
+            share.accepted()
+        );
+    }
+    out
+}
+
+/// Bob's shared collections (created once by the fixture).
+async fn shared_collection(
+    store: &Store,
+    bob: &User,
+    kind: CollectionKind,
+    slug: &str,
+) -> Collection {
+    store
+        .collection(bob.id, kind, &slug.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+/// Creates bob's shared collections and their shares with alice; dave
+/// invites bob. Returns the path of bob's invitation.
+async fn seed_shares(store: &Store, alice: &User, bob: &User) -> String {
+    let create = |kind: CollectionKind, slug: &'static str, name: &'static str| async move {
+        let components = match kind {
+            CollectionKind::Calendar => "VEVENT,VTODO",
+            CollectionKind::Addressbook => "VCARD",
+        };
+        // Bob's own client settings of a shared calendar never reach alice.
+        let dead_value = r#"<v xmlns="urn:x-seed">zqbobmark-shareddead</v>"#;
+        let dead = [PropertyChange {
+            namespace: "urn:x-seed",
+            name: "zqbobmark-shareddeadprop",
+            value: Some(dead_value),
+        }];
+        store
+            .create_collection_with_properties(
+                bob.id,
+                kind,
+                &slug.parse().unwrap(),
+                Some(name),
+                None,
+                None,
+                components,
+                &dead,
+            )
+            .await
+            .unwrap()
+    };
+    create(CollectionKind::Calendar, SHARE_RO, "bobshared-ro").await;
+    create(CollectionKind::Calendar, SHARE_RW, "bobshared-rw").await;
+    create(CollectionKind::Addressbook, SHARE_RW, "bobshared-rwab").await;
+    // Offered only, and revoked: their content must never reach alice.
+    let pending = create(CollectionKind::Calendar, SHARE_PENDING, "bobshared-pending").await;
+    let revoked = create(
+        CollectionKind::Calendar,
+        SHARE_REVOKED,
+        "zqbobmark-revokedname",
+    )
+    .await;
+    for (collection, name) in [
+        (&pending, "zqbobmark-pending.ics"),
+        (&revoked, "zqbobmark-revoked.ics"),
+    ] {
+        put_seed(
+            store,
+            collection,
+            MARK,
+            name,
+            &event("@UID@", &format!("{name}-summary")),
+        )
+        .await;
+    }
+    let share = store
+        .set_share(revoked.id, bob.id, alice.id, ShareAccess::ReadWrite, now())
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .accept_share(alice.id, &share.share().public_id, now())
+        .await
+        .unwrap();
+    store
+        .remove_share(revoked.id, bob.id, alice.id)
+        .await
+        .unwrap();
+    store
+        .set_share(pending.id, bob.id, alice.id, ShareAccess::ReadWrite, now())
+        .await
+        .unwrap();
+    reset_shares(store, alice, bob).await;
+    // Dave's invitation to bob.
+    let dave = store
+        .create_user(&"dave".parse().unwrap(), "unused", None)
+        .await
+        .unwrap();
+    let dave_cal = store
+        .collection(
+            dave.id,
+            CollectionKind::Calendar,
+            &"default".parse().unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let invitation = store
+        .set_share(dave_cal.id, dave.id, bob.id, ShareAccess::Read, now())
+        .await
+        .unwrap()
+        .unwrap();
+    format!(
+        "/dav/notifications/bob/{}.xml",
+        invitation.share().public_id
+    )
+}
+
+/// Restores the shares with alice and the content of the read-write
+/// shares after a request that may have changed them: alice may write the
+/// read-write shares (into bob's trash) and leave any share.
+async fn reset_shares(store: &Store, alice: &User, bob: &User) {
+    // Alice may have left a share, which keeps bob from inviting her again
+    // for a day.
+    store.clear_share_declines_for_tests().await.unwrap();
+    let rw = [
+        (CollectionKind::Calendar, SHARED_EVENT),
+        (CollectionKind::Addressbook, SHARED_CARD),
+    ];
+    for (kind, name) in rw {
+        let collection = shared_collection(store, bob, kind, SHARE_RW).await;
+        for meta in store.items(collection.id).await.unwrap() {
+            store
+                .delete_item(collection.id, &meta.name, &Precondition::None)
+                .await
+                .unwrap();
+        }
+        let content = match kind {
+            CollectionKind::Calendar => event("@UID@", "bobshared-summary-rw"),
+            CollectionKind::Addressbook => vcard("@UID@", "bobshared-fn"),
+        };
+        put_seed(store, &collection, SHARED_PREFIX, name, &content).await;
+    }
+    let ro = shared_collection(store, bob, CollectionKind::Calendar, SHARE_RO).await;
+    if store.items(ro.id).await.unwrap().is_empty() {
+        put_seed(
+            store,
+            &ro,
+            SHARED_PREFIX,
+            SHARED_EVENT,
+            &event("@UID@", "bobshared-summary-ro"),
+        )
+        .await;
+    }
+    for entry in store.trash_entries(bob.id, 1000, 0).await.unwrap().entries {
+        if entry.collection_slug == SHARE_RW {
+            store.delete_trash_entry(bob.id, &entry.id).await.unwrap();
+        }
+    }
+    let incoming = store.incoming_shares(alice.id).await.unwrap();
+    for (kind, slug, access) in [
+        (CollectionKind::Calendar, SHARE_RO, ShareAccess::Read),
+        (CollectionKind::Calendar, SHARE_RW, ShareAccess::ReadWrite),
+        (
+            CollectionKind::Addressbook,
+            SHARE_RW,
+            ShareAccess::ReadWrite,
+        ),
+    ] {
+        let collection = shared_collection(store, bob, kind, slug).await;
+        if incoming
+            .iter()
+            .any(|share| share.collection_id == collection.id && share.accepted())
+        {
+            continue;
+        }
+        let share = store
+            .set_share(collection.id, bob.id, alice.id, access, now())
+            .await
+            .unwrap()
+            .unwrap();
+        let accepted = store
+            .accept_share(alice.id, &share.share().public_id, now())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            accepted.slug.unwrap().as_str(),
+            format!("bob-{slug}"),
+            "share slug"
+        );
+    }
+}
+
 /// Puts an extra object into the default calendar and deletes it into the
 /// trash; returns the trash entry id.
 async fn seed_trash(store: &Store, user: &User, prefix: &str) -> String {
@@ -485,6 +746,32 @@ async fn fixture() -> Fixture {
         .unwrap();
     seed(&store, &alice, &ALICE).await;
     seed(&store, &bob, &BOB).await;
+    let bob_notification = seed_shares(&store, &alice, &bob).await;
+    let bob_cal = store
+        .collection(
+            bob.id,
+            CollectionKind::Calendar,
+            &"default".parse().unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let bob_link_id = store
+        .create_publish_link(
+            bob_cal.id,
+            bob.id,
+            &calcraft_store::NewPublishLink {
+                token_hash: &"b".repeat(64),
+                busy_only: false,
+                private_events: calcraft_store::PrivateEvents::Show,
+                include_attendees: true,
+                now: now(),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .public_id;
     seed_trash(&store, &alice, ALICE.prefix).await;
     let bob_trash_id = seed_trash(&store, &bob, BOB.prefix).await;
     store
@@ -536,9 +823,24 @@ async fn fixture() -> Fixture {
     .map(|m| (*m).to_owned())
     .collect();
     markers.extend([bob_app.clone(), bob_session.clone(), bob_trash_id.clone()]);
+    // Bob's invitation from dave, and his settings of shared calendars.
+    markers.extend([
+        bob_notification
+            .trim_end_matches(".xml")
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_owned(),
+        "zqbobmark-shareddead".to_owned(),
+        bob_link_id.clone(),
+    ]);
     let mut bob_sync_token = String::new();
     for kind in KINDS {
         for collection in store.collections(bob.id, kind).await.unwrap() {
+            // What bob shares with alice is visible to her on purpose.
+            if [SHARE_RO, SHARE_RW].contains(&collection.slug.as_str()) {
+                continue;
+            }
             // The collection identity inside sync tokens.
             markers.push(format!("{}-{}", collection.id, collection.token_salt));
             if kind == CollectionKind::Calendar && collection.slug.as_str() == "default" {
@@ -561,6 +863,7 @@ async fn fixture() -> Fixture {
         .await
         .unwrap();
     let bob_snapshot = snapshot(&store, &bob, &bob_session).await;
+    let bob_shares = shares_snapshot(&store, &bob).await;
     // The matrix sends thousands of requests, many with wrong passwords,
     // from one client: lift the per-client limits explicitly, so that only
     // authorization decides the answers (the limits have their own tests in
@@ -579,6 +882,9 @@ async fn fixture() -> Fixture {
     // Managed attachments on: download URLs and attachment POSTs too.
     config.attachments.enabled = true;
     config.attachments.base_url = Some(ATTACHMENT_BASE.to_owned());
+    // Public links on: their routes are part of the API matrix.
+    config.publish.enabled = true;
+    config.publish.base_url = Some(ATTACHMENT_BASE.to_owned());
     #[allow(unused_mut)]
     let mut state = AppState::new(store.clone()).unwrap();
     // Subscriptions enabled with the production rules: alice's attempt to
@@ -609,11 +915,24 @@ async fn fixture() -> Fixture {
         bob_sync_token,
         markers,
         bob_snapshot,
+        bob_shares,
+        bob_notification,
+        bob_link_id,
     }
 }
 
 impl Fixture {
     async fn assert_bob_unchanged(&self, context: &str) {
+        self.assert_bob_content_unchanged(context).await;
+        let shares = shares_snapshot(&self.store, &self.bob).await;
+        assert_eq!(
+            shares, self.bob_shares,
+            "bob's shares changed after {context}"
+        );
+    }
+
+    /// Bob's data except who he shares with (a sharee may leave a share).
+    async fn assert_bob_content_unchanged(&self, context: &str) {
         let now = snapshot(&self.store, &self.bob, &self.bob_session).await;
         assert_eq!(now, self.bob_snapshot, "bob's data changed after {context}");
     }
@@ -621,13 +940,40 @@ impl Fixture {
     /// Fails if a response contains a marker of bob's data that the request
     /// did not contain itself.
     fn assert_no_leak(&self, request: &str, reply: &Reply, context: &str) {
+        self.assert_no_leak_but(request, reply, context, &[]);
+    }
+
+    /// [`Fixture::assert_no_leak`], except for the markers in `allowed`.
+    fn assert_no_leak_but(&self, request: &str, reply: &Reply, context: &str, allowed: &[&str]) {
         let haystack = format!("{:?}\n{}", reply.headers, reply.body);
         for marker in &self.markers {
+            if allowed.contains(&marker.as_str()) {
+                continue;
+            }
             assert!(
                 request.contains(marker.as_str()) || !haystack.contains(marker.as_str()),
                 "{context}: response leaks {marker:?}:\n{haystack}"
             );
         }
+    }
+
+    /// Targets that need the fixture: bob's invitation, in his and in
+    /// alice's notification collection.
+    fn dynamic_targets(&self) -> Vec<Target> {
+        let id = self.bob_notification.rsplit('/').next().unwrap();
+        vec![
+            Target::new(self.bob_notification.clone(), Res::Invalid, Owner::Other),
+            Target::new(
+                format!("/dav/notifications/alice/{id}"),
+                Res::Invalid,
+                Owner::Tricky,
+            ),
+            Target::new(
+                format!("/dav/notifications/{NOBODY}/{id}"),
+                Res::Invalid,
+                Owner::Nobody,
+            ),
+        ]
     }
 }
 
@@ -714,6 +1060,8 @@ enum Res {
     Outbox,
     /// The download URL of a managed attachment.
     Attachment,
+    /// The notification collection (sharing invitations).
+    Notifications,
     /// Does not resolve for alice: malformed, traversal, or below a
     /// collection that does not exist.
     Invalid,
@@ -729,6 +1077,10 @@ enum Owner {
     Nobody,
     /// Malformed or traversal path.
     Tricky,
+    /// A collection bob shares with alice read-only, below her home.
+    SharedRead,
+    /// A collection bob shares with alice read-write, below her home.
+    SharedWrite,
 }
 
 #[derive(Debug)]
@@ -749,7 +1101,27 @@ impl Target {
 
     /// Whether alice can reach the resource at all.
     fn resolvable(&self) -> bool {
-        self.owner == Owner::Own && self.res != Res::Invalid
+        matches!(
+            self.owner,
+            Owner::Own | Owner::SharedRead | Owner::SharedWrite
+        ) && self.res != Res::Invalid
+    }
+
+    fn shared(&self) -> bool {
+        matches!(self.owner, Owner::SharedRead | Owner::SharedWrite)
+    }
+
+    /// Requests whose answers show what bob shares with alice: the shares
+    /// themselves, alice's homes (which list them) and her notifications.
+    fn shows_shares(&self) -> bool {
+        self.shared()
+            || [
+                "/dav/calendars/alice",
+                "/dav/addressbooks/alice",
+                "/dav/notifications/alice",
+            ]
+            .iter()
+            .any(|home| self.path.trim_end_matches('/') == *home)
     }
 
     fn is_addressbook_path(&self) -> bool {
@@ -832,6 +1204,16 @@ fn user_targets(user: &str, n: &Names, owner: Owner) -> Vec<Target> {
         ),
         Target::new(format!("/dav/scheduling/{user}/"), Res::Invalid, owner),
         Target::new(
+            format!("/dav/notifications/{user}/"),
+            Res::Notifications,
+            owner,
+        ),
+        Target::new(
+            format!("/dav/notifications/{user}/0123456789abcdef0123456789abcdef.xml"),
+            Res::Invalid,
+            owner,
+        ),
+        Target::new(
             format!("/dav/scheduling/{user}/outbox/{}", n.message),
             Res::Invalid,
             owner,
@@ -844,6 +1226,100 @@ fn user_targets(user: &str, n: &Names, owner: Owner) -> Vec<Target> {
     ]
 }
 
+/// Bob's shares with alice, seen from alice, and the paths around them.
+fn shared_targets() -> Vec<Target> {
+    use Owner::{Other, Own, SharedRead, SharedWrite, Tricky};
+    let ro = format!("/dav/calendars/alice/bob-{SHARE_RO}/");
+    let rw = format!("/dav/calendars/alice/bob-{SHARE_RW}/");
+    let ab = format!("/dav/addressbooks/alice/bob-{SHARE_RW}/");
+    vec![
+        Target::new(ro.clone(), Res::Calendar, SharedRead),
+        Target::new(format!("{ro}{SHARED_EVENT}"), Res::CalObject, SharedRead),
+        Target::new(
+            format!("{ro}missing.ics"),
+            Res::MissingCalObject,
+            SharedRead,
+        ),
+        Target::new(rw.clone(), Res::Calendar, SharedWrite),
+        Target::new(format!("{rw}{SHARED_EVENT}"), Res::CalObject, SharedWrite),
+        Target::new(
+            format!("{rw}missing.ics"),
+            Res::MissingCalObject,
+            SharedWrite,
+        ),
+        Target::new(ab.clone(), Res::Addressbook, SharedWrite),
+        Target::new(format!("{ab}{SHARED_CARD}"), Res::CardObject, SharedWrite),
+        Target::new(
+            format!("{ab}missing.vcf"),
+            Res::MissingCardObject,
+            SharedWrite,
+        ),
+        // Offered but not accepted, and revoked: nothing in alice's home.
+        Target::new(
+            format!("/dav/calendars/alice/bob-{SHARE_PENDING}/"),
+            Res::UnmappedCal,
+            Own,
+        ),
+        Target::new(
+            format!("/dav/calendars/alice/bob-{SHARE_REVOKED}/"),
+            Res::UnmappedCal,
+            Own,
+        ),
+        Target::new(
+            format!("/dav/calendars/alice/bob-{SHARE_REVOKED}/zqbobmark-revoked.ics"),
+            Res::Invalid,
+            Own,
+        ),
+        // Bob's own paths of what he shares stay his.
+        Target::new(
+            format!("/dav/calendars/bob/{SHARE_RO}/"),
+            Res::Calendar,
+            Other,
+        ),
+        Target::new(
+            format!("/dav/calendars/bob/{SHARE_RO}/{SHARED_EVENT}"),
+            Res::CalObject,
+            Other,
+        ),
+        Target::new(
+            format!("/dav/calendars/bob/{SHARE_RW}/{SHARED_EVENT}"),
+            Res::CalObject,
+            Other,
+        ),
+        Target::new(
+            format!("/dav/addressbooks/bob/{SHARE_RW}/{SHARED_CARD}"),
+            Res::CardObject,
+            Other,
+        ),
+        Target::new(
+            format!("/dav/calendars/bob/{SHARE_PENDING}/zqbobmark-pending.ics"),
+            Res::CalObject,
+            Other,
+        ),
+        // The share's slug in somebody else's home, and traversal.
+        Target::new(
+            format!("/dav/calendars/bob/bob-{SHARE_RO}/"),
+            Res::Calendar,
+            Other,
+        ),
+        Target::new(
+            format!("/dav/calendars/{NOBODY}/bob-{SHARE_RO}/{SHARED_EVENT}"),
+            Res::CalObject,
+            Owner::Nobody,
+        ),
+        Target::new(
+            format!("{ro}../../bob/{SHARE_PENDING}/zqbobmark-pending.ics"),
+            Res::Invalid,
+            Tricky,
+        ),
+        Target::new(
+            format!("{rw}..%2f..%2f..%2fbob%2f{SHARE_PENDING}%2fzqbobmark-pending.ics"),
+            Res::Invalid,
+            Tricky,
+        ),
+    ]
+}
+
 fn all_targets() -> Vec<Target> {
     let mut targets = vec![
         Target::new("/dav", Res::Root, Owner::Own),
@@ -852,6 +1328,7 @@ fn all_targets() -> Vec<Target> {
     targets.extend(user_targets("alice", &ALICE, Owner::Own));
     targets.extend(user_targets("bob", &BOB, Owner::Other));
     targets.extend(user_targets(NOBODY, &BOB, Owner::Nobody));
+    targets.extend(shared_targets());
     let attachment = |id: &str| format!("/dav/attachments/{id}");
     targets.extend([
         Target::new(attachment(ALICE_ATTACHMENT), Res::Attachment, Owner::Own),
@@ -1341,6 +1818,148 @@ impl Case {
         }
     }
 
+    /// Expected status for an authenticated request by alice to a
+    /// resource she can reach.
+    fn status(self, target: &Target) -> u16 {
+        match target.owner {
+            Owner::SharedRead => self.shared_status(target, false),
+            Owner::SharedWrite => self.shared_status(target, true),
+            _ => self.own_status(target),
+        }
+    }
+
+    /// Expected status for alice's request to a collection bob shares with
+    /// her (`writable`: read-write) or one of its objects: everything the
+    /// owner may do except changing the collection, its settings and its
+    /// sharing, and moving objects to other owners; a DELETE of the
+    /// collection unsubscribes.
+    fn shared_status(self, target: &Target, writable: bool) -> u16 {
+        use Res::*;
+        let res = target.res;
+        let object = matches!(res, CalObject | CardObject);
+        let missing = matches!(res, MissingCalObject | MissingCardObject);
+        let collection = matches!(res, Calendar | Addressbook);
+        let calendar_object = matches!(res, CalObject | MissingCalObject);
+        match self {
+            Self::Options => 200,
+            Self::Get | Self::Head => match () {
+                () if object => 200,
+                () if missing => 404,
+                () => 405,
+            },
+            Self::Put | Self::PutIfNoneMatch if collection => 405,
+            Self::Put | Self::PutIfNoneMatch if !writable => 403,
+            Self::Put => {
+                if object {
+                    204
+                } else {
+                    201
+                }
+            }
+            Self::PutIfNoneMatch => {
+                if object {
+                    412
+                } else {
+                    201
+                }
+            }
+            // Unsubscribes.
+            Self::Delete | Self::DeleteIfMatch if collection => 204,
+            Self::Delete | Self::DeleteIfMatch if !writable => 403,
+            Self::Delete | Self::DeleteIfMatch => {
+                if object {
+                    204
+                } else {
+                    404
+                }
+            }
+            Self::PropfindD0 | Self::PropfindD1 | Self::PropfindAllpropD1 => {
+                if missing {
+                    404
+                } else {
+                    207
+                }
+            }
+            // The sharee's own name (207 with 200), or the owner's dead
+            // properties (207 with 403).
+            Self::Proppatch | Self::ProppatchDead => {
+                if collection {
+                    207
+                } else {
+                    405
+                }
+            }
+            Self::CalMultiget | Self::CalQuery => {
+                if res == Calendar {
+                    207
+                } else {
+                    403
+                }
+            }
+            Self::AbMultiget | Self::AbQuery => {
+                if res == Addressbook {
+                    207
+                } else {
+                    403
+                }
+            }
+            Self::SyncInitial => {
+                if collection {
+                    207
+                } else {
+                    403
+                }
+            }
+            Self::SyncForeignToken => 403,
+            Self::Mkcalendar | Self::MkcolExtended | Self::MkcolPlain => 405,
+            Self::Copy(dest) | Self::Move(dest) => {
+                let copy = matches!(self, Self::Copy(_));
+                match () {
+                    () if collection => 403,
+                    // Nothing moves out of a read-only share.
+                    () if !copy && !writable => 403,
+                    () if missing => 404,
+                    () => match dest {
+                        // Alice's own collections belong to another owner.
+                        Dest::Own | Dest::OwnPath | Dest::OwnExistingNoOverwrite => 403,
+                        Dest::Same => 403,
+                        Dest::Foreign
+                        | Dest::ForeignExisting
+                        | Dest::ForeignEncoded
+                        | Dest::Nobody
+                        | Dest::MissingCollection
+                        | Dest::EncodedTraversal => 409,
+                        Dest::Traversal => 400,
+                        Dest::OtherHost | Dest::OtherScheme => 502,
+                    },
+                }
+            }
+            Self::AttachmentAdd | Self::AttachmentRemove if calendar_object => match () {
+                () if !writable => 403,
+                () if missing => 404,
+                () if self == Self::AttachmentAdd => 201,
+                // Alice's attachment is not part of bob's object.
+                () => 403,
+            },
+            Self::Post | Self::AttachmentAdd | Self::AttachmentRemove | Self::Unknown(_) => 405,
+        }
+    }
+
+    /// Expected status for alice's notification collection.
+    fn notifications_status(self) -> u16 {
+        match self {
+            Self::Options => 200,
+            Self::PropfindD0 | Self::PropfindD1 | Self::PropfindAllpropD1 => 207,
+            Self::CalMultiget
+            | Self::CalQuery
+            | Self::AbMultiget
+            | Self::AbQuery
+            | Self::SyncInitial
+            | Self::SyncForeignToken => 403,
+            _ => 405,
+        }
+    }
+
     /// Expected status for an authenticated request by alice to her own
     /// resource `target`.
     fn own_status(self, target: &Target) -> u16 {
@@ -1355,6 +1974,9 @@ impl Case {
         }
         if matches!(res, Inbox | InboxMessage | MissingInboxMessage | Outbox) {
             return self.scheduling_status(res);
+        }
+        if res == Notifications {
+            return self.notifications_status();
         }
         if res == Attachment {
             // Only downloads.
@@ -1550,7 +2172,8 @@ struct Stats {
 /// Runs `cases` against every target with every cheap credential.
 async fn run_dav_matrix(cases: &[Case]) -> Stats {
     let fx = fixture().await;
-    let targets = all_targets();
+    let mut targets = all_targets();
+    targets.extend(fx.dynamic_targets());
     let mut stats = Stats::default();
     // HEAD responses have no body, so they form their own group.
     let mut unauthorized: [Option<Reply>; 2] = [None, None];
@@ -1581,12 +2204,17 @@ async fn run_dav_matrix(cases: &[Case]) -> Stats {
                 } else if !cred.valid() {
                     401
                 } else if target.resolvable() {
-                    case.own_status(target)
+                    case.status(target)
                 } else {
                     404
                 };
                 assert_eq!(reply.status, expected, "{context}: {}", reply.body);
-                fx.assert_no_leak(&request, &reply, &context);
+                let allowed: &[&str] = if cred.valid() && target.shows_shares() {
+                    &SHARED_IDENTITY
+                } else {
+                    &[]
+                };
+                fx.assert_no_leak_but(&request, &reply, &context, allowed);
                 stats.assertions += 2;
 
                 if case == Case::Options {
@@ -1620,7 +2248,7 @@ async fn run_dav_matrix(cases: &[Case]) -> Stats {
                     );
                     stats.assertions += 1;
                 }
-                if case == Case::Get && reply.status == 200 {
+                if case == Case::Get && reply.status == 200 && target.owner == Owner::Own {
                     assert!(reply.body.contains("BEGIN:"), "{context}");
                     assert!(reply.body.contains("alice"), "{context}");
                     stats.assertions += 2;
@@ -1628,7 +2256,18 @@ async fn run_dav_matrix(cases: &[Case]) -> Stats {
 
                 // Only authenticated requests reach a handler; the others
                 // are checked once per target below.
-                if cred.valid() && (case.mutating() || target.owner != Owner::Own) {
+                if cred.valid() && target.shared() && case.mutating() {
+                    // Nothing alice may not do happened: a read-only share
+                    // is unchanged (she may only leave it), a read-write
+                    // share changes only as granted (and is reset).
+                    if target.owner == Owner::SharedRead {
+                        fx.assert_bob_content_unchanged(&context).await;
+                    }
+                    reset_shares(&fx.store, &fx.alice, &fx.bob).await;
+                    seed(&fx.store, &fx.alice, &ALICE).await;
+                    fx.assert_bob_unchanged(&context).await;
+                    stats.assertions += 1;
+                } else if cred.valid() && (case.mutating() || target.owner != Owner::Own) {
                     fx.assert_bob_unchanged(&context).await;
                     stats.assertions += 1;
                 }
@@ -1777,7 +2416,8 @@ async fn dav_matrix_unknown_methods() {
 #[tokio::test]
 async fn dav_other_registered_methods_are_refused() {
     let fx = fixture().await;
-    let targets = all_targets();
+    let mut targets = all_targets();
+    targets.extend(fx.dynamic_targets());
     let mut stats = Stats::default();
     for method in MORE_UNKNOWN_METHODS {
         assert!(
@@ -1963,6 +2603,8 @@ mod api_matrix {
         body: Option<Payload>,
         /// Reachable without a session.
         public: bool,
+        /// The answer shows what bob shares with alice (his identity).
+        identity: bool,
         /// Status without a session.
         anonymous: u16,
         /// Status with alice's session.
@@ -1977,6 +2619,7 @@ mod api_matrix {
             missing: None,
             body: None,
             public: false,
+            identity: false,
             anonymous: 401,
             alice,
         }
@@ -2002,6 +2645,11 @@ mod api_matrix {
             self
         }
 
+        fn identity(mut self) -> Self {
+            self.identity = true;
+            self
+        }
+
         fn public(mut self, anonymous: u16) -> Self {
             self.public = true;
             self.anonymous = anonymous;
@@ -2011,7 +2659,20 @@ mod api_matrix {
 
     /// The matrix, in execution order. Every route of `ROUTES` must appear
     /// exactly once; logout comes last because it ends alice's session.
-    fn cases(bob_app: &str, bob_app_id: i64, bob_trash_id: &str) -> Vec<ApiCase> {
+    fn cases(
+        bob_app: &str,
+        bob_app_id: i64,
+        bob_trash_id: &str,
+        bob_link_id: &str,
+        bob_invite_id: &str,
+    ) -> Vec<ApiCase> {
+        let shared_cal = format!("/api/v1/collections/calendar/{}", super::SHARE_RO);
+        let bob_link = format!("/api/v1/collections/calendar/default/publish/{bob_link_id}");
+        let no_link =
+            "/api/v1/collections/calendar/default/publish/00000000000000000000000000000000"
+                .to_owned();
+        let bob_invite = format!("/api/v1/shared/{bob_invite_id}");
+        let no_invite = "/api/v1/shared/00000000000000000000000000000000".to_owned();
         let bob_trash = format!("/api/v1/trash/{bob_trash_id}");
         let no_trash = "/api/v1/trash/00000000000000000000000000000000".to_owned();
         let bob_app_uri = format!("/api/v1/app-passwords/{bob_app_id}");
@@ -2066,6 +2727,44 @@ mod api_matrix {
                     "text/calendar",
                     &super::event("zzattack-import", "zzattack"),
                 ),
+            // Only the owner manages shares and links, also of what bob
+            // shares with alice; alice's own calendar has no link of bob's.
+            case("get", "/v1/collections/{kind}/{slug}/shares", 404)
+                .uri(format!("{shared_cal}/shares"), format!("{no_cal}/shares")),
+            case(
+                "put",
+                "/v1/collections/{kind}/{slug}/shares/{username}",
+                404,
+            )
+            .uri(
+                format!("{shared_cal}/shares/dave"),
+                format!("{no_cal}/shares/dave"),
+            )
+            .body(json!({"access": "read-write"})),
+            case(
+                "delete",
+                "/v1/collections/{kind}/{slug}/shares/{username}",
+                404,
+            )
+            .uri(
+                format!("{shared_cal}/shares/alice"),
+                format!("{no_cal}/shares/alice"),
+            ),
+            case("get", "/v1/collections/{kind}/{slug}/publish", 404)
+                .uri(format!("{bob_cal}/publish"), format!("{no_cal}/publish")),
+            case("post", "/v1/collections/{kind}/{slug}/publish", 404)
+                .uri(format!("{shared_cal}/publish"), format!("{no_cal}/publish"))
+                .body(json!({"busy_only": false, "include_attendees": true})),
+            case("delete", "/v1/collections/{kind}/{slug}/publish/{id}", 404)
+                .uri(bob_link, no_link),
+            // Alice's own invitations and shares only; bob's invitation is
+            // unknown to her.
+            case("get", "/v1/shared", 200).identity(),
+            case("post", "/v1/shared/{id}/accept", 404).uri(
+                format!("{bob_invite}/accept"),
+                format!("{no_invite}/accept"),
+            ),
+            case("delete", "/v1/shared/{id}", 404).uri(bob_invite, no_invite),
             case("delete", "/v1/collections/{kind}/{slug}", 404).uri(bob_cal, no_cal),
             sub("get", "/v1/subscriptions", 200),
             // Same slug as bob's subscription; refused as a loopback address.
@@ -2104,6 +2803,7 @@ mod api_matrix {
                 "/api/v1/admin/users/nobody-zz/sso".to_owned(),
             ),
             case("get", "/v1/admin/update", 403),
+            case("get", "/v1/admin/shares", 403),
             case("post", "/v1/auth/logout", 204),
         ]
     }
@@ -2141,7 +2841,8 @@ mod api_matrix {
 
     #[test]
     fn api_matrix_covers_every_route() {
-        let table = cases("ccap_1_x", 1, "0123456789abcdef0123456789abcdef");
+        let id = "0123456789abcdef0123456789abcdef";
+        let table = cases("ccap_1_x", 1, id, id, id);
         let covered: Vec<(&str, &str)> = table.iter().map(|c| (c.method, c.route)).collect();
         let unique: BTreeSet<_> = covered.iter().copied().collect();
         assert_eq!(unique.len(), covered.len(), "duplicate matrix entries");
@@ -2174,7 +2875,15 @@ mod api_matrix {
         let mut unauthorized: Option<Reply> = None;
         let mut csrf: Option<Reply> = None;
 
-        for case in cases(&fx.bob_app, fx.bob_app_id, &fx.bob_trash_id) {
+        let invite = fx.bob_notification.rsplit('/').next().unwrap();
+        let invite = invite.trim_end_matches(".xml").to_owned();
+        for case in cases(
+            &fx.bob_app,
+            fx.bob_app_id,
+            &fx.bob_trash_id,
+            &fx.bob_link_id,
+            &invite,
+        ) {
             let method = case.method;
             let body = case.body.as_ref();
             let context = format!("{method} {}", case.route);
@@ -2237,7 +2946,12 @@ mod api_matrix {
             let (request, reply) =
                 call(&fx, method, &case.uri, Some(&fx.alice_session), true, body).await;
             requests += 1;
-            fx.assert_no_leak(&request, &reply, &context);
+            let allowed: &[&str] = if case.identity {
+                &super::SHARED_IDENTITY
+            } else {
+                &[]
+            };
+            fx.assert_no_leak_but(&request, &reply, &context, allowed);
             assert_eq!(
                 reply.status, case.alice,
                 "{context} as alice: {}",

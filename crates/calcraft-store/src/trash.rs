@@ -308,10 +308,54 @@ impl Store {
     where
         F: FnOnce(&[u8]) -> Option<String> + Send,
     {
+        self.delete_item_to_trash_inner(collection_id, name, precondition, now, summary, None)
+            .await
+    }
+
+    /// [`Store::delete_item_to_trash`] by a sharee through share `share_id`
+    /// (see [`Store::put_item_shared`]): the object goes into the owner's
+    /// trash.
+    pub async fn delete_item_to_trash_shared<F>(
+        &self,
+        share_id: i64,
+        collection_id: i64,
+        name: &str,
+        precondition: &Precondition,
+        now: i64,
+        summary: F,
+    ) -> Result<bool>
+    where
+        F: FnOnce(&[u8]) -> Option<String> + Send,
+    {
+        self.delete_item_to_trash_inner(
+            collection_id,
+            name,
+            precondition,
+            now,
+            summary,
+            Some(share_id),
+        )
+        .await
+    }
+
+    async fn delete_item_to_trash_inner<F>(
+        &self,
+        collection_id: i64,
+        name: &str,
+        precondition: &Precondition,
+        now: i64,
+        summary: F,
+        share: Option<i64>,
+    ) -> Result<bool>
+    where
+        F: FnOnce(&[u8]) -> Option<String> + Send,
+    {
         self.observe(
             async {
                 if self.trash_retention_days() == 0 {
-                    return self.delete_item(collection_id, name, precondition).await;
+                    return self
+                        .delete_item_inner(collection_id, name, precondition, share)
+                        .await;
                 }
                 // Parse outside the write transaction; if the object changes in
                 // between, the entry simply has no display text.
@@ -323,8 +367,11 @@ impl Store {
 
                 let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
                 crate::items::ensure_writable(&mut tx, collection_id).await?;
+                if let Some(share) = share {
+                    crate::sharing::ensure_share(&mut tx, share, collection_id, true).await?;
+                }
                 let Some(row) = sqlx::query(
-                    "SELECT i.id, i.etag, c.owner_id FROM items i JOIN collections c ON c.id = i.collection_id \
+                    "SELECT i.id, i.etag, i.schedule_tag, c.owner_id FROM items i JOIN collections c ON c.id = i.collection_id \
                      WHERE i.collection_id = ? AND i.name = ?",
                 )
                 .bind(collection_id)
@@ -336,6 +383,9 @@ impl Store {
                 };
                 let etag: String = row.try_get("etag")?;
                 check(precondition, Some(&etag))?;
+                if share.is_some() {
+                    crate::items::scheduling_object_guard(Some(&row))?;
+                }
                 let summary = summary.filter(|_| etag == before.etag);
                 let owner_id: i64 = row.try_get("owner_id")?;
                 let item_id: i64 = row.try_get("id")?;
@@ -855,6 +905,12 @@ async fn restore_collection(
         .try_get("n")?;
     if count >= MAX_COLLECTIONS_PER_USER {
         return Err(StoreError::Limit("too many collections"));
+    }
+    // The slug may now be taken by a collection shared with the owner.
+    if crate::sharing::slug_taken_by_share(tx, owner_id, collection_kind, collection_slug.as_str())
+        .await?
+    {
+        return Err(StoreError::TrashConflict(TrashConflict::CollectionExists));
     }
     // A new token salt: sync tokens of the deleted collection stay invalid.
     let result = sqlx::query(

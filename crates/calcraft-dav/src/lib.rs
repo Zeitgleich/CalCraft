@@ -11,6 +11,7 @@ mod multistatus;
 mod propfind;
 mod proppatch;
 mod report;
+pub mod sharing;
 pub mod tree;
 pub mod xml;
 

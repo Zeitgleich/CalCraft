@@ -203,6 +203,28 @@ max_per_object = 20
 # count towards the storage quota.
 max_bytes_per_user = 268435456
 
+[sharing]
+# Users may share calendars and address books with other users of this server
+# (read or read-write). A share appears in the sharee's calendar or address
+# book home only after they accepted it (web UI, REST API, or Apple Calendar's
+# invitation). Off: no new shares, existing ones are hidden. See
+# docs/sharing.md.
+enabled = true
+
+[publish]
+# Secret read-only links of calendars (<base_url>/public/<token>.ics, also as
+# webcal://), served without login. Off by default. Links can be "busy only";
+# attachments, alarms and (unless the owner opts in) organizer and attendee
+# addresses are never published. See docs/sharing.md.
+enabled = false
+# Scheme and host the links are built with (never from the Host header).
+# Required when enabled.
+# base_url = "https://cal.example.org"
+# Largest published calendar in bytes (64 KiB to 64 MiB) and most objects
+# (1-100000); objects beyond are left out.
+max_bytes = 8388608
+max_objects = 10000
+
 [logging]
 # Filter syntax of tracing-subscriber; RUST_LOG takes precedence.
 level = "info"

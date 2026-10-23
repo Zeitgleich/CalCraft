@@ -24,6 +24,7 @@ Until 1.0, only the latest release receives security fixes.
 
 - `#![forbid(unsafe_code)]` in all crates
 - Dependency checks with `cargo-deny` (RustSec advisories, licenses, sources) on every change, advisories also daily
-- Fuzzing of the iCalendar, recurrence, XML and import parsers, of the scheduling (iTIP) logic and of the attachment handling (file names, `Content-Disposition`, ATTACH changes) (six targets, on every change and nightly)
+- Fuzzing of the iCalendar, recurrence, XML (including the sharing request bodies) and import parsers, of the scheduling (iTIP) logic and of the attachment handling (file names, `Content-Disposition`, ATTACH changes) (six targets, on every change and nightly)
+- Sharing between users needs the sharee's acceptance and is re-checked inside every write; public calendar links are off by default, use hashed 256-bit tokens and answer every wrong token with the same 404 (see [docs/sharing.md](docs/sharing.md))
 - Strict HTTP security headers and conservative defaults
 - More detail: the *Security* section of the [README](README.md#security)

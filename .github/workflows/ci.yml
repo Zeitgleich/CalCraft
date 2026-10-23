@@ -134,6 +134,12 @@ jobs:
           CALCRAFT_PASSWORD: compat test password
         run: |
           "$RUNNER_TEMP/venv/bin/python" tests/compat/scheduling_client.py
+      - name: python-caldav sharing session
+        env:
+          CALCRAFT_URL: http://127.0.0.1:5233
+          CALCRAFT_PASSWORD: compat test password
+        run: |
+          "$RUNNER_TEMP/venv/bin/python" tests/compat/sharing_client.py
       - name: Scheduling server log
         if: always()
         run: cat "$RUNNER_TEMP/scheduling.log" || true

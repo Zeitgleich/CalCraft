@@ -28,13 +28,16 @@ pub enum PropValue {
     Xml(XmlFragment),
 }
 
-/// An empty child element with optional attributes, e.g. `<c:comp name="VEVENT"/>`.
+/// A child element with optional attributes, children or text, e.g.
+/// `<c:comp name="VEVENT"/>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Element {
     pub namespace: &'static str,
     pub name: &'static str,
     pub attributes: Vec<(&'static str, String)>,
     pub children: Vec<Element>,
+    /// Text content (escaped when written), before the children.
+    pub text: Option<String>,
 }
 
 impl Element {
@@ -44,7 +47,13 @@ impl Element {
             name,
             attributes: Vec::new(),
             children: Vec::new(),
+            text: None,
         }
+    }
+
+    pub fn text(mut self, text: impl Into<String>) -> Self {
+        self.text = Some(text.into());
+        self
     }
 
     pub fn attr(mut self, name: &'static str, value: impl Into<String>) -> Self {
@@ -231,10 +240,13 @@ fn write_element(out: &mut String, element: &Element) {
     for (name, value) in &element.attributes {
         let _ = write!(out, " {name}=\"{}\"", escape_text(value));
     }
-    if element.children.is_empty() {
+    if element.children.is_empty() && element.text.is_none() {
         out.push_str("/>");
     } else {
         out.push('>');
+        if let Some(text) = &element.text {
+            out.push_str(&escape_text(text));
+        }
         for child in &element.children {
             write_element(out, child);
         }

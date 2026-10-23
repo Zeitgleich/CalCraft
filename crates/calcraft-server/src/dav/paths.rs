@@ -4,9 +4,16 @@
 //! resolves to a resource if it belongs to the authenticated user. Every
 //! handler starts from a resolved resource, and every storage query takes
 //! the id of a collection obtained here.
+//!
+//! A collection shared with the user (and accepted) is part of the user's
+//! own home, at the slug of the share (`/dav/calendars/<sharee>/<slug>/`);
+//! it resolves to the owner's collection with [`Collection::shared`] set.
+//! The owner's paths never resolve for anybody else, shared or not, so a
+//! share grants exactly what the handlers allow through
+//! [`Collection::shared`] and `read_only`.
 
 use calcraft_core::{CollectionKind, Slug, Username};
-use calcraft_store::{AttachmentMeta, Collection, StoreError, User};
+use calcraft_store::{AttachmentMeta, Collection, Share, StoreError, User};
 
 use crate::app::{AppState, DAV_ROOT};
 
@@ -32,6 +39,11 @@ pub enum Resource {
     /// A managed attachment (RFC 8607) the user may read; only with
     /// attachments on. Attachments the user may not read do not resolve.
     Attachment(AttachmentMeta),
+    /// The user's notification collection (Apple's sharing invitations);
+    /// only with sharing on.
+    Notifications,
+    /// An invitation in it: a pending share with the user.
+    Notification(Share),
 }
 
 /// Path below `/dav/` after splitting, still unvalidated against the user.
@@ -45,6 +57,8 @@ enum Target {
     Inbox(Username),
     InboxItem(Username, String),
     Outbox(Username),
+    Notifications(Username),
+    Notification(Username, String),
 }
 
 /// Decodes `%XX` escapes. Rejects encoded slashes and invalid UTF-8.
@@ -101,6 +115,14 @@ fn parse_target(path: &str) -> Option<Target> {
             Some(Target::InboxItem(user.parse().ok()?, name))
         }
         ["scheduling", ..] => None,
+        ["notifications", user] => Some(Target::Notifications(user.parse().ok()?)),
+        ["notifications", user, item] => {
+            // Exactly the form the server issues: `<public id>.xml`.
+            let id = item.strip_suffix(".xml")?;
+            calcraft_store::valid_managed_id(id).then_some(())?;
+            Some(Target::Notification(user.parse().ok()?, id.to_owned()))
+        }
+        ["notifications", ..] => None,
         // Exactly the form the server issues: no decoding, no variants.
         ["attachments", id] => {
             calcraft_store::valid_managed_id(id).then(|| Target::Attachment((*id).to_owned()))
@@ -141,16 +163,26 @@ pub async fn resolve(
         Some(Target::Principal(owner)) => own(&owner).then_some(Resource::Principal),
         Some(Target::Home(kind, owner)) => own(&owner).then_some(Resource::Home(kind)),
         Some(Target::Collection(kind, owner, slug)) if own(&owner) => {
-            match state.store.collection(user.id, kind, &slug).await? {
+            match collection(state, user, kind, &slug).await? {
                 Some(collection) => Some(Resource::Collection(collection)),
                 None => Some(Resource::Unmapped(kind, slug)),
             }
         }
-        Some(Target::Item(kind, owner, slug, name)) if own(&owner) => state
+        Some(Target::Item(kind, owner, slug, name)) if own(&owner) => {
+            collection(state, user, kind, &slug)
+                .await?
+                .map(|collection| Resource::Item(collection, name))
+        }
+        Some(Target::Notifications(owner)) => {
+            (state.sharing && own(&owner)).then_some(Resource::Notifications)
+        }
+        Some(Target::Notification(owner, id)) if state.sharing && own(&owner) => state
             .store
-            .collection(user.id, kind, &slug)
+            .incoming_share(user.id, &id)
             .await?
-            .map(|collection| Resource::Item(collection, name)),
+            .filter(|share| !share.accepted())
+            .map(Resource::Notification),
+        Some(Target::Notification(..)) => None,
         Some(Target::Inbox(owner)) => (scheduling && own(&owner)).then_some(Resource::Inbox),
         Some(Target::Outbox(owner)) => (scheduling && own(&owner)).then_some(Resource::Outbox),
         Some(Target::InboxItem(owner, name)) => {
@@ -166,6 +198,23 @@ pub async fn resolve(
             .map(Resource::Attachment),
         Some(Target::Attachment(_)) => None,
     })
+}
+
+/// One of the user's own collections, or (with sharing on) a collection
+/// shared with them at that slug of their home.
+async fn collection(
+    state: &AppState,
+    user: &User,
+    kind: CollectionKind,
+    slug: &Slug,
+) -> Result<Option<Collection>, StoreError> {
+    if let Some(own) = state.store.collection(user.id, kind, slug).await? {
+        return Ok(Some(own));
+    }
+    if !state.sharing {
+        return Ok(None);
+    }
+    state.store.shared_collection(user.id, kind, slug).await
 }
 
 /// Maximum length of a `Destination` header.
@@ -275,6 +324,14 @@ pub fn outbox_href(user: &Username) -> String {
     format!("{DAV_ROOT}scheduling/{user}/outbox/")
 }
 
+pub fn notifications_href(user: &Username) -> String {
+    format!("{DAV_ROOT}notifications/{user}/")
+}
+
+pub fn notification_href(user: &Username, share: &Share) -> String {
+    format!("{}{}.xml", notifications_href(user), share.public_id)
+}
+
 fn home_segment(kind: CollectionKind) -> &'static str {
     match kind {
         CollectionKind::Calendar => "calendars",
@@ -308,6 +365,8 @@ pub fn href_of(resource: &Resource, user: &Username) -> String {
         Resource::InboxItem(name) => format!("{}{name}", inbox_href(user)),
         Resource::Outbox => outbox_href(user),
         Resource::Attachment(meta) => attachment_href(&meta.managed_id),
+        Resource::Notifications => notifications_href(user),
+        Resource::Notification(share) => notification_href(user, share),
     }
 }
 

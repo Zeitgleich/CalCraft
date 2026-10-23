@@ -1,0 +1,1 @@
+<CS:invite-reply xmlns:D="DAV:" xmlns:CS="http://calendarserver.org/ns/"><D:href>mailto:alice@example.org</D:href><CS:invite-accepted/><CS:hosturl><D:href>/dav/calendars/bob/team/</D:href></CS:hosturl><CS:in-reply-to>0123456789abcdef0123456789abcdef</CS:in-reply-to></CS:invite-reply>

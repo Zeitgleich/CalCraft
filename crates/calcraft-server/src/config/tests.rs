@@ -340,3 +340,30 @@ fn example_configuration_is_valid() {
     let text = include_str!("../../../../calcraft.example.toml");
     from_toml(text).unwrap();
 }
+
+#[test]
+fn sharing_is_on_and_publishing_off_by_default() {
+    let config = from_toml("").unwrap();
+    assert!(config.sharing.enabled);
+    assert!(!config.publish.enabled);
+    assert_eq!(config.publish.base_url, None);
+    let config = from_toml(
+        "[sharing]\nenabled = false\n[publish]\nenabled = true\nbase_url = \"https://cal.example.org/\"\nmax_objects = 10\n",
+    )
+    .unwrap();
+    assert!(!config.sharing.enabled);
+    assert_eq!(config.publish.base(), "https://cal.example.org");
+    assert_eq!(config.publish.max_objects, 10);
+    for bad in [
+        "[publish]\nenabled = true",
+        "[publish]\nbase_url = \"https://cal.example.org/public\"",
+        "[publish]\nbase_url = \"http://user@cal.example.org\"",
+        "[publish]\nmax_bytes = 1",
+        "[publish]\nmax_objects = 0",
+        "[publish]\nmax_objects = 100001",
+        "[publish]\ntoken = \"x\"",
+        "[sharing]\nauto_accept = true",
+    ] {
+        assert!(from_toml(&format!("{bad}\n")).is_err(), "{bad}");
+    }
+}

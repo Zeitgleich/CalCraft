@@ -138,13 +138,20 @@ async fn object_response(
     let user = ctx.user;
     let href = item_href(collection, &user.username, &meta.name);
     let size = usize::try_from(meta.size).unwrap_or(0);
-    if !with_data {
+    // Read-only sharees: the ETag and length are those of the busy stubs
+    // of private events, so the object is always loaded.
+    if !with_data && !super::sharing::hides_private(collection) {
         let available = item_properties(user, collection, &meta.etag, size, None);
         return Ok(Some(respond(&href, &available, props)));
     }
     let Some(item) = ctx.state.store.item(collection.id, &meta.name).await? else {
         return Ok(None);
     };
+    if !with_data {
+        let item = super::sharing::sharee_item(collection, item);
+        let available = item_properties(user, collection, &item.etag, item.content.len(), None);
+        return Ok(Some(respond(&href, &available, props)));
+    }
     Ok(Some(item_response(ctx, collection, &item, props)))
 }
 
@@ -155,6 +162,7 @@ fn item_response(
     item: &Item,
     props: &Propfind,
 ) -> DavResponse {
+    let item = &super::sharing::sharee_item(collection, item.clone());
     let href = item_href(collection, &ctx.user.username, &item.name);
     let available = item_properties(
         ctx.user,

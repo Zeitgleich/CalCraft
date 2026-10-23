@@ -352,6 +352,8 @@ async fn read_only_collections_refuse_every_write() {
         .unwrap();
     let transfer = |from: i64, name: &'static str, to: i64| Transfer {
         owner_id: owner,
+        source_share: None,
+        destination_share: None,
         source_collection: from,
         source_name: name,
         source_precondition: &Precondition::None,

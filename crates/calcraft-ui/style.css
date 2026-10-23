@@ -727,6 +727,7 @@ main > .warning {
     color: var(--text-2);
 }
 
+.share-panel,
 .edit,
 .confirm {
     margin-top: var(--space-4);

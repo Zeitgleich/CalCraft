@@ -453,6 +453,7 @@ impl Subscriptions {
             sync_floor: 0,
             token_salt: 0,
             read_only: true,
+            shared: None,
         };
         let slot = self.fetch_slot().await?;
         let loaded = self.load(&url, &Conditional::default(), &placeholder).await;

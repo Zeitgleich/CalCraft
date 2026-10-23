@@ -51,6 +51,8 @@ pub async fn me_of(state: &AppState, user: &User) -> Result<Me, ApiError> {
             }),
             None => None,
         },
+        sharing: state.sharing,
+        publish: state.publish.is_some(),
     })
 }
 

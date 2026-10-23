@@ -421,7 +421,10 @@ impl Store {
 
     /// An attachment `reader` may download: one they own, or one a live
     /// object of theirs references (e.g. an invitation from the
-    /// organizer). `None` otherwise, whether it exists or not.
+    /// organizer), or a live object in a collection shared with them
+    /// (accepted, both users enabled; through a read-only share only if the
+    /// object is not private, see `items.private`). `None` otherwise, whether it exists
+    /// or not. The access ends with the reference or the share.
     pub async fn readable_attachment(
         &self,
         managed_id: &str,
@@ -435,7 +438,12 @@ impl Store {
              WHERE a.managed_id = ?1 AND (a.owner_id = ?2 OR EXISTS (\
                SELECT 1 FROM attachment_refs r JOIN items i ON i.id = r.item_id \
                  JOIN collections c ON c.id = i.collection_id \
-               WHERE r.attachment_id = a.id AND c.owner_id = ?2))",
+               WHERE r.attachment_id = a.id AND (c.owner_id = ?2 OR EXISTS (\
+                 SELECT 1 FROM shares s JOIN users o ON o.id = c.owner_id \
+                   JOIN users u ON u.id = s.sharee_id \
+                 WHERE s.collection_id = c.id AND s.sharee_id = ?2 \
+                   AND s.accepted_at IS NOT NULL AND o.disabled = 0 AND u.disabled = 0 \
+                   AND (s.access = 'read-write' OR i.private = 0)))))",
         )
         .bind(managed_id)
         .bind(reader)
@@ -460,7 +468,12 @@ impl Store {
              WHERE a.managed_id = ?1 AND (a.owner_id = ?2 OR EXISTS (\
                SELECT 1 FROM attachment_refs r JOIN items i ON i.id = r.item_id \
                  JOIN collections c ON c.id = i.collection_id \
-               WHERE r.attachment_id = a.id AND c.owner_id = ?2))",
+               WHERE r.attachment_id = a.id AND (c.owner_id = ?2 OR EXISTS (\
+                 SELECT 1 FROM shares s JOIN users o ON o.id = c.owner_id \
+                   JOIN users u ON u.id = s.sharee_id \
+                 WHERE s.collection_id = c.id AND s.sharee_id = ?2 \
+                   AND s.accepted_at IS NOT NULL AND o.disabled = 0 AND u.disabled = 0 \
+                   AND (s.access = 'read-write' OR i.private = 0)))))",
         )
         .bind(managed_id)
         .bind(reader)

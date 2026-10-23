@@ -48,6 +48,12 @@ pub struct Me {
     /// Scheduling settings of the user; `None` if scheduling is off.
     #[serde(default)]
     pub scheduling: Option<SchedulingInfo>,
+    /// Sharing with other users is enabled (`[sharing] enabled`).
+    #[serde(default)]
+    pub sharing: bool,
+    /// Public calendar links are enabled (`[publish] enabled`).
+    #[serde(default)]
+    pub publish: bool,
 }
 
 /// The user's scheduling settings (`GET /api/v1/me`).
@@ -407,6 +413,115 @@ pub struct UpdateSubscription {
     pub color: Option<String>,
     #[serde(default)]
     pub refresh_minutes: Option<u32>,
+}
+
+/// Access of a sharee to a shared collection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShareAccess {
+    #[serde(rename = "read")]
+    Read,
+    #[serde(rename = "read-write")]
+    ReadWrite,
+}
+
+/// A share of one of the user's collections, as the owner sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareInfo {
+    /// Username of the sharee.
+    pub username: String,
+    pub display_name: Option<String>,
+    pub access: ShareAccess,
+    /// The sharee accepted; until then the share is an invitation.
+    pub accepted: bool,
+    /// Unix seconds.
+    pub created_at: i64,
+}
+
+/// `PUT /api/v1/collections/{kind}/{slug}/shares/{username}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetShareRequest {
+    pub access: ShareAccess,
+}
+
+/// A collection another user shared with the logged-in user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncomingShareInfo {
+    /// Random id of the share (for accept and remove).
+    pub id: String,
+    pub kind: CollectionKind,
+    /// Username of the owner.
+    pub owner: String,
+    pub owner_display_name: Option<String>,
+    /// The owner's name of the collection.
+    pub display_name: Option<String>,
+    pub access: ShareAccess,
+    pub accepted: bool,
+    /// DAV URL in the user's own home; `None` until accepted.
+    pub href: Option<String>,
+    /// Unix seconds.
+    pub created_at: i64,
+}
+
+/// A share as administrators see it (`GET /api/v1/admin/shares`): who
+/// shares what with whom, never the content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminShareInfo {
+    pub owner: String,
+    pub kind: CollectionKind,
+    pub collection: String,
+    pub sharee: String,
+    pub access: ShareAccess,
+    pub accepted: bool,
+    pub created_at: i64,
+}
+
+/// How a public link shows events with `CLASS:PRIVATE`/`CONFIDENTIAL`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PrivateEvents {
+    /// As busy blocks without details (default).
+    #[default]
+    Busy,
+    /// Left out.
+    Hide,
+    /// Like other events.
+    Show,
+}
+
+/// A public read-only link of a calendar (without its secret URL).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishLinkInfo {
+    pub id: String,
+    /// Only busy blocks, no titles or other details.
+    pub busy_only: bool,
+    pub private_events: PrivateEvents,
+    /// ORGANIZER and ATTENDEE (e-mail addresses) are published.
+    pub include_attendees: bool,
+    /// Unix seconds.
+    pub created_at: i64,
+}
+
+/// `POST /api/v1/collections/calendar/{slug}/publish`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreatePublishLink {
+    #[serde(default)]
+    pub busy_only: bool,
+    #[serde(default)]
+    pub private_events: PrivateEvents,
+    #[serde(default)]
+    pub include_attendees: bool,
+}
+
+/// A new link: the only time its URLs (which contain the secret) are shown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatedPublishLink {
+    pub link: PublishLinkInfo,
+    /// `https://…/public/<token>.ics`.
+    pub url: String,
+    /// The same as `webcal://`.
+    pub webcal_url: String,
 }
 
 #[cfg(test)]

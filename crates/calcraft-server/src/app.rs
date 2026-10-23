@@ -50,6 +50,12 @@ pub struct AppState {
     pub attachments: Option<Arc<crate::attachments::Attachments>>,
     /// Largest accepted vCard; [`router`] sets it from `storage.max_vcard_bytes`.
     pub max_vcard_bytes: usize,
+    /// Sharing between users (`[sharing] enabled`); [`router`] sets it from
+    /// the configuration.
+    pub sharing: bool,
+    /// Public calendar links, if enabled (`[publish] enabled`); [`router`]
+    /// sets it from the configuration.
+    pub publish: Option<Arc<crate::publish::Publish>>,
     /// Bounds concurrent recurrence checks of calendar-query (CPU work on
     /// the blocking pool), separately from password hashing.
     pub expansion: Arc<tokio::sync::Semaphore>,
@@ -72,6 +78,8 @@ impl AppState {
             scheduling: None,
             attachments: None,
             max_vcard_bytes: crate::config::DEFAULT_MAX_VCARD_BYTES,
+            sharing: true,
+            publish: None,
             expansion: Arc::new(tokio::sync::Semaphore::new(expansion_permits())),
             readiness: Arc::new(ReadinessCache::new(READINESS_TTL)),
         })
@@ -86,6 +94,11 @@ fn expansion_permits() -> usize {
 /// Builds the complete application router for the given configuration.
 pub fn router(config: &Config, mut state: AppState) -> Router {
     state.max_vcard_bytes = config.max_vcard_bytes();
+    state.sharing = config.sharing.enabled;
+    if config.publish.enabled && state.publish.is_none() {
+        state.publish = Some(Arc::new(crate::publish::Publish::new(&config.publish)));
+    }
+    let publish = state.publish.is_some();
     if config.scheduling.enabled && state.scheduling.is_none() {
         state.scheduling = Some(Arc::new(crate::scheduling::Scheduling::new(
             &config.scheduling,
@@ -113,6 +126,12 @@ pub fn router(config: &Config, mut state: AppState) -> Router {
         .route("/dav", any(dav::handle))
         .route("/dav/", any(dav::handle))
         .route("/dav/{*path}", any(dav::handle));
+    // Without `[publish] enabled` the path falls through to the 404 below.
+    let app = if publish {
+        app.route("/public/{file}", any(crate::publish::serve))
+    } else {
+        app
+    };
 
     #[cfg(feature = "api")]
     let app = if config.api.enabled {
@@ -164,6 +183,9 @@ pub fn router(config: &Config, mut state: AppState) -> Router {
                 let path = request.uri().path();
                 let path = if path.starts_with(crate::attachments::ATTACHMENTS_PATH) {
                     crate::attachments::ATTACHMENTS_PATH
+                } else if path.starts_with(crate::publish::PUBLIC_PATH) {
+                    // The rest is the secret token.
+                    crate::publish::PUBLIC_PATH
                 } else {
                     path
                 };

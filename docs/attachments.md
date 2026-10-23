@@ -163,6 +163,16 @@ surrounding blanks, at most 255 bytes; `attachment` if nothing is left.
 Header values the server sends are visible ASCII only, so a file name can
 never inject a header line.
 
+### Shared calendars
+
+Sharees of a calendar ([sharing.md](sharing.md)) may download the managed
+attachments of its objects while the share exists (accepted, owner and
+sharee enabled): the access derives from the reference of a live object in
+the shared calendar, like for invitations. Read-write sharees may add and
+remove attachments of plain objects (not of the owner's scheduling
+objects); the uploads belong to, and count against, the calendar's owner.
+When the share ends, so does the access.
+
 ## Storage and lifecycle
 
 Attachments are rows in the SQLite database (`attachments`, migration
