@@ -10,6 +10,8 @@ mod admin;
 mod collections;
 #[cfg(feature = "oidc")]
 mod oidc;
+mod publish;
+mod sharing;
 #[cfg(feature = "subscriptions")]
 mod subscriptions;
 mod transfer;
@@ -22,7 +24,7 @@ use axum::{
     http::{HeaderMap, Method, StatusCode, header, request::Parts},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
 };
 use calcraft_core::api::{AuthMethods, CSRF_HEADER, ErrorBody, VersionInfo};
 use calcraft_store::{StoreError, User};
@@ -62,6 +64,15 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("delete", "/v1/collections/{kind}/{slug}"),
     ("get", "/v1/collections/{kind}/{slug}/export"),
     ("post", "/v1/collections/{kind}/{slug}/import"),
+    ("get", "/v1/collections/{kind}/{slug}/shares"),
+    ("put", "/v1/collections/{kind}/{slug}/shares/{username}"),
+    ("delete", "/v1/collections/{kind}/{slug}/shares/{username}"),
+    ("get", "/v1/collections/{kind}/{slug}/publish"),
+    ("post", "/v1/collections/{kind}/{slug}/publish"),
+    ("delete", "/v1/collections/{kind}/{slug}/publish/{id}"),
+    ("get", "/v1/shared"),
+    ("post", "/v1/shared/{id}/accept"),
+    ("delete", "/v1/shared/{id}"),
     ("get", "/v1/subscriptions"),
     ("post", "/v1/subscriptions"),
     ("patch", "/v1/subscriptions/{slug}"),
@@ -75,6 +86,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("post", "/v1/admin/users"),
     ("patch", "/v1/admin/users/{username}"),
     ("delete", "/v1/admin/users/{username}/sso"),
+    ("get", "/v1/admin/shares"),
     ("get", "/v1/admin/update"),
 ];
 
@@ -116,12 +128,29 @@ pub fn router() -> Router<AppState> {
             "/v1/collections/{kind}/{slug}/import",
             post(transfer::import),
         )
+        .route("/v1/collections/{kind}/{slug}/shares", get(sharing::list))
+        .route(
+            "/v1/collections/{kind}/{slug}/shares/{username}",
+            put(sharing::set).delete(sharing::remove),
+        )
+        .route(
+            "/v1/collections/{kind}/{slug}/publish",
+            get(publish::list).post(publish::create),
+        )
+        .route(
+            "/v1/collections/{kind}/{slug}/publish/{id}",
+            delete(publish::delete),
+        )
+        .route("/v1/shared", get(sharing::incoming_list))
+        .route("/v1/shared/{id}/accept", post(sharing::accept))
+        .route("/v1/shared/{id}", delete(sharing::leave))
         .route("/v1/trash", get(trash::list).delete(trash::empty))
         .route("/v1/trash/{id}/restore", post(trash::restore))
         .route("/v1/trash/{id}", delete(trash::delete_entry))
         .route("/v1/admin/users", get(admin::list).post(admin::create))
         .route("/v1/admin/users/{username}", patch(admin::update))
         .route("/v1/admin/users/{username}/sso", delete(admin::unlink_sso))
+        .route("/v1/admin/shares", get(sharing::admin_list))
         .route("/v1/admin/update", get(admin::update_check));
     // Without the `oidc` feature these paths fall through to 404.
     #[cfg(feature = "oidc")]
@@ -320,6 +349,7 @@ impl From<StoreError> for ApiError {
             StoreError::ReadOnly => Self::ReadOnly,
             StoreError::TrashConflict(conflict) => Self::RestoreConflict(conflict),
             StoreError::UserExists(_) => Self::Conflict("user already exists"),
+            StoreError::NoSuchSharee | StoreError::ShareRevoked => Self::NotFound,
             StoreError::Busy => {
                 tracing::error!("storage busy: database stayed locked");
                 Self::Unavailable

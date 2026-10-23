@@ -565,6 +565,8 @@ fn transfer<'a>(
 ) -> Transfer<'a> {
     Transfer {
         owner_id,
+        source_share: None,
+        destination_share: None,
         source_collection: from.0,
         source_name: from.1,
         source_precondition: precondition,

@@ -400,6 +400,8 @@ async fn move_keeps_and_copy_shares_attachments() {
     put(&s.store, s.alice_cal.id, "e.ics", "e", &[A1]).await;
     let transfer = |from: i64, name: &'static str, to: i64, to_name: &'static str| Transfer {
         owner_id: s.alice.id,
+        source_share: None,
+        destination_share: None,
         source_collection: from,
         source_name: name,
         source_precondition: &Precondition::None,
@@ -514,6 +516,8 @@ async fn copies_do_not_carry_foreign_attachments() {
     s.store
         .copy_item(&Transfer {
             owner_id: s.bob.id,
+            source_share: None,
+            destination_share: None,
             source_collection: s.bob_cal.id,
             source_name: "m.ics",
             source_precondition: &Precondition::None,

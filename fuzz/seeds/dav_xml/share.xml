@@ -1,0 +1,1 @@
+<CS:share xmlns:D="DAV:" xmlns:CS="http://calendarserver.org/ns/"><CS:set><D:href>mailto:bob@example.org</D:href><CS:summary>Team</CS:summary><CS:read-write/></CS:set><CS:remove><D:href>/dav/principals/carol/</D:href></CS:remove></CS:share>

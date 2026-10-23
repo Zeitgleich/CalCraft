@@ -250,6 +250,13 @@ Die Beschreibungen sind Payload-Ideen für **eigene** Tests gegen CalCraft. Sie 
 68. Entfernen eines Anhangs bzw. Absage, deren Zustellung scheitert (Byte-Budget, Quota) → Zugriff endet trotzdem. ✅ (`removal_revokes_access_even_if_the_update_is_not_delivered`, `organizer_changes_revoke_access_without_a_delivery`)
 69. Langsame Upload-Bodies (1 Byte, dann nichts) eines Benutzers blockieren Uploads anderer → nur eigene 2 Slots belegt, sonst sofort 503. ✅ (`slow_uploads_of_one_user_do_not_block_others`)
 
+### Freigaben und öffentliche Links (M5b)
+70. Empfänger einer Lesefreigabe schickt PUT, DELETE, PROPPATCH fremder Eigenschaften, MKCOL, MOVE/COPY hinaus oder hinein, `CS:share` (Weiterteilen), LOCK/ACL → abgelehnt, beim Besitzer ändert sich nichts. ✅ (`tests/sharing.rs`, Autorisierungsmatrix `SharedRead`)
+71. Pfad des Besitzers (`/dav/calendars/<besitzer>/<slug>/`), Slug der Freigabe im Home Dritter, ausstehende und widerrufene Freigaben, `..`-Varianten → byte-identisch zu nie vorhandenen Pfaden. ✅ (Autorisierungsmatrix)
+72. Besitzer entfernt die Freigabe, während der Empfänger schreibt → kein Schreibzugriff nach dem Widerruf (Prüfung in der Schreibtransaktion), danach PROPFIND, GET, PUT, REPORT `sync-collection` und Anhang-Download wie nie vorhanden. ✅ (`share_removed_while_the_sharee_writes`, `revoked_share_is_indistinguishable_from_nothing`)
+73. Schreibender Empfänger ändert eine Besprechung des Besitzers bzw. legt ein Objekt mit ORGANIZER des Besitzers und Teilnehmern an → keine Einladungen im Namen des Besitzers; Besprechungen des Besitzers sind für Empfänger schreibgeschützt. ✅ (`sharees_never_schedule_in_the_owners_name`)
+74. Öffentlicher Link: Raten von Tokens (falsche Länge, Großbuchstaben, Hash statt Token, Pfad-Tricks), widerrufene Links, deaktivierter Besitzer → einheitliches 404; viele Fehlversuche → 429; Token nie im Log. Inhalt ohne ATTACH, VALARM, ATTENDEE/ORGANIZER (außer bewusst gewählt), ohne Original-UIDs; `CLASS:PRIVATE/CONFIDENTIAL` standardmäßig nur als „belegt“. ✅ (`tests/publish.rs`, `log_secrets.rs`)
+
 ### Release (M7)
 60. Gesamter Autorisierungs-Matrix-Test grün. Fuzzing-Langlauf ohne Funde. `cargo audit` sauber. Header-Check (CSP, HSTS, nosniff, frame-ancestors, Referrer-Policy) auf allen UI- und API-Antworten.
 

@@ -51,6 +51,7 @@ fn calendar() -> Collection {
         sync_floor: 0,
         token_salt: 0,
         read_only: false,
+        shared: None,
     }
 }
 

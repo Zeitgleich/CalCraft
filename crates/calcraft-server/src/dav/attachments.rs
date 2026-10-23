@@ -244,7 +244,10 @@ pub(super) async fn post(
     let Ok(tree) = parse(&item.content) else {
         return precondition_error("valid-calendar-data");
     };
-    if let Some(scheduling) = &ctx.state.scheduling {
+    // A sharee's change is stored like their PUT (see
+    // `objects::shared_write_precondition`, which refuses scheduling
+    // objects); the attendee rule below is about the user's own copies.
+    if let (Some(scheduling), None) = (&ctx.state.scheduling, &collection.shared) {
         match super::scheduling::is_attendee(ctx, scheduling, &tree).await {
             Ok(false) => {}
             Ok(true) => {
@@ -286,9 +289,11 @@ pub(super) async fn post(
         let managed_id = new_managed_id();
         let filename = upload_filename(&headers);
         let media_type = upload_media_type(&headers);
+        // Owned by (and counted against) the collection's owner, also when
+        // a sharee uploads it.
         let new = NewAttachment {
             managed_id: &managed_id,
-            owner_id: ctx.user.id,
+            owner_id: collection.owner_id,
             filename: &filename,
             media_type: &media_type,
             content: &body,
@@ -306,7 +311,7 @@ pub(super) async fn post(
         }
         let meta = AttachmentMeta {
             managed_id,
-            owner_id: ctx.user.id,
+            owner_id: collection.owner_id,
             filename,
             media_type,
             size: i64::try_from(body.len()).unwrap_or(i64::MAX),
@@ -328,7 +333,7 @@ pub(super) async fn post(
     if let Some(meta) = &upload
         && !response.status().is_success()
         && let Err(err) = store
-            .delete_unreferenced_attachment(ctx.user.id, &meta.managed_id)
+            .delete_unreferenced_attachment(collection.owner_id, &meta.managed_id)
             .await
     {
         // Removed by the background purge later.

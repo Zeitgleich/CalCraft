@@ -450,6 +450,34 @@ Attachments count towards the uploader's quota, stay with an object in the
 trash and go when nothing references them any more. Details and deviations
 from the RFC: [docs/attachments.md](docs/attachments.md).
 
+### Sharing and public links
+
+Users can share calendars and address books with other users of the server
+(**on by default**, `[sharing] enabled`), read-only or read-write. A share
+is an invitation until the sharee accepts it (web UI, REST API or Apple
+Calendar's invitation); then it appears in the sharee's own home
+(`/dav/calendars/<sharee>/<owner>-<slug>/`), so every client sees it.
+Sharees can decline and leave at any time; the owner keeps sole control of
+the collection, its settings and its shares. Sharees' writes count against
+the owner's quota, deletions go into the owner's trash, and they are never
+scheduled (no invitations in the owner's name). Apple's CalendarServer
+sharing (`CS:share`, notifications, `CS:invite-reply`) is implemented.
+
+Calendars can also be published as secret read-only links
+(`<base_url>/public/<token>.ics`, also `webcal://`), **off by default**:
+
+```toml
+[publish]
+enabled = true
+base_url = "https://cal.example.org"
+```
+
+Tokens have 256 bits and are stored hashed, every wrong token is the same
+`404`, guessing clients are blocked; links can be "busy only", private
+events are busy blocks by default, and attachments, alarms and (unless the
+owner opts in) attendee addresses are never published. Rights table, Apple
+compatibility and deviations: [docs/sharing.md](docs/sharing.md).
+
 ### Import and export
 
 Calendars can be exported and imported as iCalendar (`ics`), jCal (`jcal`), xCal
@@ -597,12 +625,19 @@ Integration suites of `calcraft-server` (`crates/calcraft-server/tests/`):
   `failures.rs` (read-only database, full disk, aborted uploads).
 - **Logs:** `log_secrets.rs` checks that passwords, tokens, TOTP and
   recovery codes, cookies, calendar/contact contents, scheduling
-  messages and addresses and attachments (names, contents, ids) never
-  reach the logs.
+  messages and addresses, attachments (names, contents, ids), share
+  requests and public link tokens never reach the logs.
 - **Scheduling:** `scheduling.rs` (invitations, replies, cancellations,
   recurrence, Schedule-Tag, free/busy, limits, quota, disabled users,
   organizer spoofing, attendee tampering, UID hijacking, concurrent
   replies); the authorization matrix covers inboxes, outboxes and POST.
+- **Sharing:** `sharing.rs` (read and read-write enforcement for every
+  method, Apple share/invite-reply flow, REST API, revocation
+  indistinguishable from nothing, disabled users, owner's quota and trash,
+  scheduling and attachment rules, a share removed during writes),
+  `publish.rs` (public links: options, headers, uniform 404, rate limit);
+  the authorization matrix covers shared, pending, revoked and unshared
+  collections and the new REST routes.
 - **Attachments:** `attachments.rs` (add, update, remove, recurrence
   instances, size and count limits, quota with trash, download headers and
   hostile file names, foreign managed ids in PUTs, attendee access and its
@@ -666,6 +701,11 @@ German):
   users whose events reference the file (never derived from event
   content), always as downloads with `nosniff` and a sandboxing CSP, never
   rendered on the server's origin (see *Attachments*).
+- **Sharing:** shares must be accepted; a shared collection is reachable
+  only below the sharee's own home, never at the owner's path; every write
+  of a sharee re-checks the share inside its transaction; public links are
+  off by default, hashed, uniform `404`, rate-limited, never logged (see
+  *Sharing and public links*).
 - **Calendar subscriptions:** off by default; the server fetches feeds only
   from public addresses it resolved and checked itself, pinned against DNS
   rebinding, with every redirect checked again (see *Calendar subscriptions*).

@@ -2,7 +2,9 @@
 //!
 //! Every resource below `/dav/` belongs to exactly one user. Requests for
 //! another user's resources are answered with 404, so that account names
-//! cannot be probed. Resolution and the ownership check live in [`paths`].
+//! cannot be probed. Resolution and the ownership check live in [`paths`];
+//! collections shared with a user are part of that user's own home
+//! ([`sharing`]).
 
 mod attachments;
 mod collections;
@@ -13,6 +15,7 @@ mod propfind;
 mod props;
 mod report;
 mod scheduling;
+mod sharing;
 mod sync;
 
 use axum::{
@@ -46,13 +49,19 @@ const DAV_CLASSES: &str = "1, 3, calendar-access, addressbook, extended-mkcol";
 const CLASS_SCHEDULING: &str = ", calendar-auto-schedule";
 /// Compliance class with managed attachments enabled (RFC 8607 §6.1).
 const CLASS_ATTACHMENTS: &str = ", calendar-managed-attachments";
+/// Apple's sharing (CalendarServer), with sharing enabled.
+const CLASS_SHARING: &str = ", calendarserver-sharing";
 const WWW_AUTHENTICATE_VALUE: &str = "Basic realm=\"CalCraft\", charset=\"UTF-8\"";
 const XML_CONTENT_TYPE: &str = "application/xml; charset=utf-8";
 
 /// Entry point for every request below `/dav`.
 pub async fn handle(State(state): State<AppState>, request: Request) -> Response {
     if request.method() == Method::OPTIONS {
-        return options(state.scheduling.is_some(), state.attachments.is_some());
+        return options(
+            state.scheduling.is_some(),
+            state.attachments.is_some(),
+            state.sharing,
+        );
     }
 
     let header = request
@@ -89,6 +98,13 @@ pub async fn handle(State(state): State<AppState>, request: Request) -> Response
             _ => method_not_allowed(),
         };
     }
+    if matches!(
+        resource,
+        Resource::Notifications | Resource::Notification(_)
+    ) {
+        return sharing::notifications(ctx, resource, request).await;
+    }
+    let sharing_post = state.sharing && sharing::is_xml(request.headers());
     match request.method().as_str() {
         "PROPFIND" => propfind::handle(ctx, resource, request).await,
         "PROPPATCH" => collections::proppatch(ctx, resource, request).await,
@@ -104,6 +120,12 @@ pub async fn handle(State(state): State<AppState>, request: Request) -> Response
         "POST" => match (resource, &state.scheduling, &state.attachments) {
             (Resource::Outbox, Some(scheduling), _) => {
                 scheduling::post(ctx, scheduling, request).await
+            }
+            (Resource::Collection(collection), ..) if sharing_post => {
+                sharing::post_share(ctx, collection, request).await
+            }
+            (Resource::Home(kind), ..) if sharing_post => {
+                sharing::post_invite_reply(ctx, kind, request).await
             }
             (Resource::Item(collection, name), _, Some(managed))
                 if attachments::is_attachment_post(request.uri().query()) =>
@@ -123,13 +145,16 @@ struct Ctx<'a> {
     user: &'a calcraft_store::User,
 }
 
-fn options(scheduling: bool, attachments: bool) -> Response {
+fn options(scheduling: bool, attachments: bool, sharing: bool) -> Response {
     let mut classes = DAV_CLASSES.to_owned();
     if scheduling {
         classes.push_str(CLASS_SCHEDULING);
     }
     if attachments {
         classes.push_str(CLASS_ATTACHMENTS);
+    }
+    if sharing {
+        classes.push_str(CLASS_SHARING);
     }
     (
         StatusCode::OK,
@@ -205,6 +230,9 @@ fn store_error(err: StoreError) -> Response {
         }
         StoreError::CollectionExists => method_not_allowed(),
         StoreError::ReadOnly => need_privileges(None, "write-content"),
+        // The share went away while the request was in flight: the
+        // collection is gone for this user, like any path they cannot see.
+        StoreError::ShareRevoked => not_found(),
         StoreError::Busy => {
             tracing::error!("storage busy: database stayed locked");
             service_unavailable()

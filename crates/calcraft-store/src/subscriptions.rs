@@ -302,6 +302,16 @@ impl Store {
                 if row.try_get::<i64, _>("collections")? >= MAX_COLLECTIONS_PER_USER {
                     return Err(StoreError::Limit("too many collections"));
                 }
+                if crate::sharing::slug_taken_by_share(
+                    &mut tx,
+                    new.owner_id,
+                    CollectionKind::Calendar,
+                    new.slug.as_str(),
+                )
+                .await?
+                {
+                    return Err(StoreError::CollectionExists);
+                }
                 let result = sqlx::query(
             "INSERT INTO collections (owner_id, kind, slug, display_name, color, components, \
                token_salt, read_only) \

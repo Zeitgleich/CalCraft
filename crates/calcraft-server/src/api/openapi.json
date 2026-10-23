@@ -1577,6 +1577,533 @@
           }
         }
       }
+    },
+    "/v1/collections/{kind}/{slug}/shares": {
+      "get": {
+        "summary": "List the shares of one of the user's collections",
+        "tags": [
+          "sharing"
+        ],
+        "description": "404 for collections of other users and with sharing disabled.",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "calendar",
+                "addressbook"
+              ]
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Shares, pending and accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ShareInfo"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/collections/{kind}/{slug}/shares/{username}": {
+      "put": {
+        "summary": "Share with a user, or change the access",
+        "tags": [
+          "sharing"
+        ],
+        "description": "A new share is an invitation until the sharee accepts it. 404 for unknown or disabled users, 400 for the owner, 403 read_only for read-write access to a subscription, 507 limit beyond 100 shares per collection or 100 pending invitations per sharee.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "calendar",
+                "addressbook"
+              ]
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "description": "Username of the sharee.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetShareRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Shared (invitation)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShareInfo"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Access changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShareInfo"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "End a share or withdraw the invitation",
+        "tags": [
+          "sharing"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "calendar",
+                "addressbook"
+              ]
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "description": "Username of the sharee.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed"
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/collections/{kind}/{slug}/publish": {
+      "get": {
+        "summary": "List the public links of a calendar",
+        "tags": [
+          "publish"
+        ],
+        "description": "404 with publishing disabled, for address books and for other users' calendars.",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "description": "Only calendars can be published.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "calendar"
+              ]
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Links, without their secret URLs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PublishLinkInfo"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create a public read-only link",
+        "tags": [
+          "publish"
+        ],
+        "description": "The response is the only time the secret URL is shown; only a hash of the token is stored.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "description": "Only calendars can be published.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "calendar"
+              ]
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePublishLink"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedPublishLink"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/collections/{kind}/{slug}/publish/{id}": {
+      "delete": {
+        "summary": "Revoke a public link",
+        "tags": [
+          "publish"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "description": "Only calendars can be published.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "calendar"
+              ]
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id of the link (32 hex digits), not its secret.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Revoked; the URL answers 404 from now on"
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/shared": {
+      "get": {
+        "summary": "Collections other users shared with the user",
+        "tags": [
+          "sharing"
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Invitations and accepted shares",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/IncomingShareInfo"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/shared/{id}/accept": {
+      "post": {
+        "summary": "Accept a share",
+        "tags": [
+          "sharing"
+        ],
+        "description": "The collection appears in the user's calendar or address book home (href).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Random id of the share (32 hex digits). Ids of shares with other users are answered like unknown ids.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncomingShareInfo"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/shared/{id}": {
+      "delete": {
+        "summary": "Decline an invitation or leave a share",
+        "tags": [
+          "sharing"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Random id of the share (32 hex digits). Ids of shares with other users are answered like unknown ids.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed; the owner's collection is unchanged"
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/shares": {
+      "get": {
+        "summary": "List all shares (administrators)",
+        "tags": [
+          "admin"
+        ],
+        "description": "Who shares which collection with whom; never contents.",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Shares",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AdminShareInfo"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1694,6 +2221,14 @@
                 "type": "null"
               }
             ]
+          },
+          "sharing": {
+            "type": "boolean",
+            "description": "Sharing with other users is enabled."
+          },
+          "publish": {
+            "type": "boolean",
+            "description": "Public calendar links are enabled."
           }
         },
         "required": [
@@ -2561,6 +3096,236 @@
           }
         },
         "additionalProperties": false
+      },
+      "ShareInfo": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "access": {
+            "type": "string",
+            "enum": [
+              "read",
+              "read-write"
+            ]
+          },
+          "accepted": {
+            "type": "boolean",
+            "description": "False while the share is an invitation."
+          },
+          "created_at": {
+            "type": "integer",
+            "description": "Unix seconds"
+          }
+        },
+        "required": [
+          "username",
+          "access",
+          "accepted",
+          "created_at"
+        ]
+      },
+      "SetShareRequest": {
+        "type": "object",
+        "properties": {
+          "access": {
+            "type": "string",
+            "enum": [
+              "read",
+              "read-write"
+            ]
+          }
+        },
+        "required": [
+          "access"
+        ],
+        "additionalProperties": false
+      },
+      "IncomingShareInfo": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "calendar",
+              "addressbook"
+            ]
+          },
+          "owner": {
+            "type": "string"
+          },
+          "owner_display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The owner's name of the collection."
+          },
+          "access": {
+            "type": "string",
+            "enum": [
+              "read",
+              "read-write"
+            ]
+          },
+          "accepted": {
+            "type": "boolean"
+          },
+          "href": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "DAV URL in the user's own home; null until accepted."
+          },
+          "created_at": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "owner",
+          "access",
+          "accepted",
+          "created_at"
+        ]
+      },
+      "AdminShareInfo": {
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "calendar",
+              "addressbook"
+            ]
+          },
+          "collection": {
+            "type": "string"
+          },
+          "sharee": {
+            "type": "string"
+          },
+          "access": {
+            "type": "string",
+            "enum": [
+              "read",
+              "read-write"
+            ]
+          },
+          "accepted": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "owner",
+          "kind",
+          "collection",
+          "sharee",
+          "access",
+          "accepted",
+          "created_at"
+        ]
+      },
+      "PublishLinkInfo": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "busy_only": {
+            "type": "boolean"
+          },
+          "private_events": {
+            "type": "string",
+            "enum": [
+              "busy",
+              "hide",
+              "show"
+            ],
+            "description": "Events with CLASS:PRIVATE or CONFIDENTIAL: busy blocks (default), left out, or shown."
+          },
+          "include_attendees": {
+            "type": "boolean",
+            "description": "ORGANIZER and ATTENDEE are published."
+          },
+          "created_at": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "busy_only",
+          "private_events",
+          "include_attendees",
+          "created_at"
+        ]
+      },
+      "CreatePublishLink": {
+        "type": "object",
+        "properties": {
+          "busy_only": {
+            "type": "boolean",
+            "default": false
+          },
+          "private_events": {
+            "type": "string",
+            "enum": [
+              "busy",
+              "hide",
+              "show"
+            ],
+            "description": "Events with CLASS:PRIVATE or CONFIDENTIAL: busy blocks (default), left out, or shown."
+          },
+          "include_attendees": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreatedPublishLink": {
+        "type": "object",
+        "properties": {
+          "link": {
+            "$ref": "#/components/schemas/PublishLinkInfo"
+          },
+          "url": {
+            "type": "string",
+            "description": "https URL with the secret token"
+          },
+          "webcal_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "link",
+          "url",
+          "webcal_url"
+        ]
       }
     }
   }

@@ -109,6 +109,12 @@ pub enum Precondition {
 pub struct Transfer<'a> {
     /// Owner of both collections; the store checks it again.
     pub owner_id: i64,
+    /// A sharee's request: the shares through which they see the source
+    /// and the destination. Checked in the write transaction (source
+    /// readable, or writable for a MOVE; destination writable), see
+    /// [`StoreError::ShareRevoked`].
+    pub source_share: Option<i64>,
+    pub destination_share: Option<i64>,
     pub source_collection: i64,
     pub source_name: &'a str,
     /// `If-Match` / `If-None-Match` of the request, evaluated on the source.
@@ -248,6 +254,10 @@ impl Store {
                     .try_get("n")?;
                 if count >= MAX_COLLECTIONS_PER_USER {
                     return Err(StoreError::Limit("too many collections"));
+                }
+                // The slug of a collection shared with the user is taken too.
+                if crate::sharing::slug_taken_by_share(&mut tx, owner_id, kind, slug.as_str()).await? {
+                    return Err(StoreError::CollectionExists);
                 }
                 let result = sqlx::query(
                     "INSERT INTO collections (owner_id, kind, slug, display_name, description, color, components, token_salt) \
@@ -569,12 +579,51 @@ impl Store {
         precondition: &Precondition,
         schedule: &ScheduleTag<'_>,
     ) -> Result<PutOutcome> {
+        self.put_item_inner(collection_id, name, item, precondition, schedule, None)
+            .await
+    }
+
+    /// [`Store::put_item`] by a sharee through share `share_id`: fails with
+    /// [`StoreError::ShareRevoked`] (and changes nothing) unless the share
+    /// still grants write access when the write happens. The quota is the
+    /// owner's.
+    pub async fn put_item_shared(
+        &self,
+        share_id: i64,
+        collection_id: i64,
+        name: &str,
+        item: &NewItem<'_>,
+        precondition: &Precondition,
+    ) -> Result<PutOutcome> {
+        self.put_item_inner(
+            collection_id,
+            name,
+            item,
+            precondition,
+            &ScheduleTag::default(),
+            Some(share_id),
+        )
+        .await
+    }
+
+    async fn put_item_inner(
+        &self,
+        collection_id: i64,
+        name: &str,
+        item: &NewItem<'_>,
+        precondition: &Precondition,
+        schedule: &ScheduleTag<'_>,
+        share: Option<i64>,
+    ) -> Result<PutOutcome> {
         self.observe(
             async {
                 // IMMEDIATE takes the write lock up front, so the checks below and
                 // the write are atomic and concurrent writers wait instead of failing.
                 let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
                 ensure_writable(&mut tx, collection_id).await?;
+                if let Some(share) = share {
+                    crate::sharing::ensure_share(&mut tx, share, collection_id, true).await?;
+                }
                 let row = sqlx::query(
                     "SELECT etag, schedule_tag FROM items WHERE collection_id = ? AND name = ?",
                 )
@@ -731,10 +780,24 @@ impl Store {
         name: &str,
         precondition: &Precondition,
     ) -> Result<bool> {
+        self.delete_item_inner(collection_id, name, precondition, None)
+            .await
+    }
+
+    pub(crate) async fn delete_item_inner(
+        &self,
+        collection_id: i64,
+        name: &str,
+        precondition: &Precondition,
+        share: Option<i64>,
+    ) -> Result<bool> {
         self.observe(
             async {
                 let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
                 ensure_writable(&mut tx, collection_id).await?;
+                if let Some(share) = share {
+                    crate::sharing::ensure_share(&mut tx, share, collection_id, true).await?;
+                }
                 let existing: Option<String> =
                     sqlx::query("SELECT etag FROM items WHERE collection_id = ? AND name = ?")
                         .bind(collection_id)
@@ -795,6 +858,8 @@ impl Store {
             async {
                 let Transfer {
                     owner_id,
+                    source_share,
+                    destination_share,
                     source_collection,
                     source_name,
                     source_precondition,
@@ -810,6 +875,14 @@ impl Store {
                 // `put_item`). Parallel MOVEs of one object are serialised; all but
                 // the first find no source.
                 let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                if let Some(share) = source_share {
+                    crate::sharing::ensure_share(&mut tx, share, source_collection, remove_source)
+                        .await?;
+                }
+                if let Some(share) = destination_share {
+                    crate::sharing::ensure_share(&mut tx, share, destination_collection, true)
+                        .await?;
+                }
 
                 // Both collections must belong to the owner and be of one kind. The
                 // caller resolved them for the owner already; this keeps the queries

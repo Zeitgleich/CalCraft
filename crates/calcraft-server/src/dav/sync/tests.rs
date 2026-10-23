@@ -15,6 +15,7 @@ fn collection(id: i64, salt: i64, floor: i64, revision: i64) -> Collection {
         sync_floor: floor,
         token_salt: salt,
         read_only: false,
+        shared: None,
     }
 }
 

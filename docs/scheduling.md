@@ -246,6 +246,12 @@ data (`tests/log_secrets.rs`).
 * **Subscriptions** are never targets of deliveries and never counted for
   free/busy.
 * **Backups** contain the new data (it lives in the same database).
+* **Shared calendars** ([sharing.md](sharing.md)): a sharee's PUT or
+  DELETE in a calendar shared with them is never scheduled (no messages in
+  the owner's or the sharee's name), and the owner's scheduling objects
+  (with Schedule-Tag) are read-only for sharees. Shared calendars never
+  count for the sharee's free/busy and are never the sharee's default
+  calendar; inbox and outbox are not shared.
 
 ## Deviations from RFC 6638 and open points
 

@@ -13,7 +13,12 @@ use calcraft_ui::{
 };
 use leptos::prelude::*;
 
-use super::{Ctx, ErrorText, api, submit, subscriptions::Subscriptions};
+use super::{
+    Ctx, ErrorText, api,
+    sharing::{SharePanel, SharedWithMe},
+    submit,
+    subscriptions::Subscriptions,
+};
 
 /// Default color for new calendars.
 pub(super) const DEFAULT_COLOR: &str = "#3a7bd5";
@@ -86,6 +91,7 @@ pub fn Overview() -> impl IntoView {
         {section(CollectionKind::Calendar, t::CALENDARS, t::NO_CALENDARS)}
         <Subscriptions on_change=reload />
         {section(CollectionKind::Addressbook, t::ADDRESS_BOOKS, t::NO_ADDRESS_BOOKS)}
+        {move || ctx.me().is_some_and(|me| me.sharing).then(|| view! { <SharedWithMe /> })}
         <CreateForm on_created=reload />
     }
 }
@@ -112,8 +118,12 @@ fn CollectionRow(info: CollectionInfo, on_change: Callback<()>) -> impl IntoView
     let ctx = Ctx::get();
     let editing = RwSignal::new(false);
     let confirming = RwSignal::new(false);
+    let sharing = RwSignal::new(false);
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
+    let share_info = info.clone();
+    let can_share = ctx.me().is_some_and(|me| me.sharing);
+    let can_publish = ctx.me().is_some_and(|me| me.publish);
 
     let path = collection_path(&info);
     let title = info
@@ -212,6 +222,18 @@ fn CollectionRow(info: CollectionInfo, on_change: Callback<()>) -> impl IntoView
                     <span class="muted">{slug_line}</span>
                 </div>
                 <div class="actions">
+                    {can_share
+                        .then(|| {
+                            view! {
+                                <button
+                                    type="button"
+                                    class="secondary"
+                                    on:click=move |_| sharing.update(|s| *s = !*s)
+                                >
+                                    {t::SHARE}
+                                </button>
+                            }
+                        })}
                     <button
                         type="button"
                         class="secondary"
@@ -251,6 +273,9 @@ fn CollectionRow(info: CollectionInfo, on_change: Callback<()>) -> impl IntoView
                         {t::CANCEL}
                     </button>
                 </div>
+            </Show>
+            <Show when=move || sharing.get()>
+                <SharePanel info=share_info.clone() publish=can_publish />
             </Show>
             <Show when=move || editing.get()>
                 <form class="edit" on:submit=on_save.clone()>

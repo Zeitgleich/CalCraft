@@ -27,7 +27,9 @@ mod health;
 mod items;
 mod oidc;
 mod properties;
+mod publish;
 mod scheduling;
+mod sharing;
 mod subscriptions;
 mod test_hooks;
 mod trash;
@@ -50,8 +52,13 @@ pub use items::{
 pub use items::{MAX_BYTES_PER_USER, MAX_ITEMS_PER_COLLECTION};
 pub use oidc::{ApprovedBinding, OidcBinding, OidcIdentityInfo};
 pub use properties::{DeadProperty, MAX_DEAD_PROPERTIES, MAX_DEAD_PROPERTY_BYTES, PropertyChange};
+pub use publish::{MAX_LINKS_PER_CALENDAR, NewPublishLink, PrivateEvents, PublishLink};
 pub use scheduling::{
     FreeBusyCandidate, InboxMessage, MAX_EMAIL_LEN, NewInboxMessage, SchedulingObject,
+};
+pub use sharing::{
+    MAX_PENDING_SHARES_PER_USER, MAX_SHARES_PER_COLLECTION, SetShare, Share, ShareAccess,
+    ShareView, SharedVia,
 };
 pub use subscriptions::{
     FeedItem, FeedState, NewSubscription, ReplaceOutcome, Subscription, SubscriptionFailure,
@@ -85,6 +92,15 @@ pub enum StoreError {
     Migration(#[from] sqlx::migrate::MigrateError),
     #[error("user {0} already exists")]
     UserExists(Username),
+    /// Sharing: the user to share with does not exist, is disabled or is
+    /// the owner.
+    #[error("no such user to share with")]
+    NoSuchSharee,
+    /// A sharee's write: the share that granted it is gone (removed,
+    /// downgraded, owner or sharee disabled) since the request resolved it.
+    /// DAV answers 404, like for any path the user cannot see.
+    #[error("share no longer exists")]
+    ShareRevoked,
     /// The calendar user address is already used by another user.
     #[error("address already in use")]
     AddressTaken,
@@ -233,8 +249,14 @@ pub struct Collection {
     /// Random value bound into sync tokens.
     pub token_salt: i64,
     /// A calendar subscription: only the server's feed refresher changes
-    /// its objects; DAV and API writes are refused.
+    /// its objects; DAV and API writes are refused. Also set for a
+    /// collection seen through a read-only share.
     pub read_only: bool,
+    /// Set when the collection is seen by a sharee through a share
+    /// ([`Store::shared_collection`]): `slug`, `display_name` and `color`
+    /// are then the sharee's, `id` and `owner_id` the owner's. `None` for
+    /// the owner's own view.
+    pub shared: Option<SharedVia>,
 }
 
 /// Handle to the database. Cheap to clone.
@@ -604,6 +626,7 @@ pub(crate) fn collection_from_row(row: &SqliteRow) -> Result<Collection> {
         sync_floor: row.try_get("sync_floor")?,
         token_salt: row.try_get("token_salt")?,
         read_only: row.try_get("read_only")?,
+        shared: None,
     })
 }
 

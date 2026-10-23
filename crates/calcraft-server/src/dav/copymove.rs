@@ -73,7 +73,9 @@ pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request, mode: Mo
         | Resource::Inbox
         | Resource::InboxItem(_)
         | Resource::Outbox
-        | Resource::Attachment(_) => return method_not_allowed(),
+        | Resource::Attachment(_)
+        | Resource::Notifications
+        | Resource::Notification(_) => return method_not_allowed(),
     };
     // Objects cannot be moved out of a subscription (copies are fine).
     if mode == Mode::Move && source.read_only {
@@ -126,6 +128,16 @@ pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request, mode: Mo
         let href = paths::collection_href(&target, &ctx.user.username);
         return need_privileges(Some(&href), "bind");
     }
+    // Objects stay with their owner: no copies or moves between the user's
+    // own collections and collections shared with them, or between
+    // collections of different owners (clients fall back to GET and PUT).
+    if target.owner_id != source.owner_id {
+        return (
+            StatusCode::FORBIDDEN,
+            "objects cannot be copied or moved to another owner's collection",
+        )
+            .into_response();
+    }
     if target.kind != source.kind {
         let condition = match target.kind {
             CollectionKind::Calendar => "<c:supported-calendar-data/>",
@@ -143,7 +155,9 @@ pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request, mode: Mo
     }
 
     let transfer = Transfer {
-        owner_id: ctx.user.id,
+        owner_id: source.owner_id,
+        source_share: source.shared.as_ref().map(|via| via.share_id),
+        destination_share: target.shared.as_ref().map(|via| via.share_id),
         source_collection: source.id,
         source_name: &name,
         source_precondition: &source_precondition,

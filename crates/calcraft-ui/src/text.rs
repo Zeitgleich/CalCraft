@@ -312,3 +312,55 @@ pub const ERR_TEXT_TOO_LONG: &str = "The text is too long.";
 pub const ERR_COLOR_INVALID: &str = "The color must have the form #RRGGBB.";
 pub const ERR_FEED_URL_INVALID: &str =
     "Please enter a calendar link starting with https:// or webcal://.";
+
+// Sharing and public links
+pub const SHARE: &str = "Share";
+pub const SHARING_TITLE: &str = "Shared with";
+pub const SHARING_HINT: &str = "Other users of this server get the collection in their own calendar or address book list once they accept. Read-only users can only look; read-write users can add, change and delete entries (deleted entries go to your trash, and everything counts towards your storage).";
+pub const SHARING_NOBODY: &str = "Not shared with anybody.";
+pub const SHARE_WITH_USER: &str = "Username";
+pub const ACCESS: &str = "Access";
+pub const ACCESS_READ: &str = "Read only";
+pub const ACCESS_READ_WRITE: &str = "Read and write";
+pub const SHARE_PENDING: &str = "invitation not accepted yet";
+pub const SHARE_ACCEPTED: &str = "accepted";
+pub const SHARE_ADD: &str = "Share";
+pub const SHARE_REMOVE: &str = "Remove";
+pub const SHARED_WITH_ME: &str = "Shared with me";
+pub const SHARED_WITH_ME_HINT: &str = "Calendars and address books other users shared with you. Accepted ones appear in all your apps; declining or leaving never changes the owner's data.";
+pub const SHARED_BY: &str = "shared by";
+pub const ACCEPT: &str = "Accept";
+pub const DECLINE: &str = "Decline";
+pub const LEAVE: &str = "Leave";
+pub const PUBLISH_TITLE: &str = "Public links";
+pub const PUBLISH_HINT: &str = "Anybody who knows a link can read the calendar without logging in, e.g. to subscribe in another app. Attachments, alarms and (unless you include them) attendees' e-mail addresses are never published. The link is shown only once; delete it to revoke access.";
+pub const PUBLISH_NONE: &str = "No public links.";
+pub const PUBLISH_BUSY_ONLY: &str = "Only free/busy times (no titles or details)";
+pub const PUBLISH_PRIVATE: &str = "Private and confidential events";
+pub const PUBLISH_PRIVATE_BUSY: &str = "as busy times";
+pub const PUBLISH_PRIVATE_HIDE: &str = "leave out";
+pub const PUBLISH_PRIVATE_SHOW: &str = "show like the others";
+pub const PUBLISH_ATTENDEES: &str = "Include organizer and attendees (e-mail addresses)";
+pub const PUBLISH_CREATE: &str = "Create link";
+pub const PUBLISH_CREATED: &str = "New link (copy it now, it is not shown again):";
+pub const PUBLISH_REVOKE: &str = "Delete link";
+pub const PUBLISH_DETAILS: &str = "Full details";
+pub const PUBLISH_BUSY: &str = "Free/busy only";
+pub const ERR_SHARE_USER: &str = "Please enter the username to share with.";
+
+/// Short description of a public link's options.
+pub fn publish_options(busy_only: bool, private: &str, attendees: bool) -> String {
+    let mut text = (if busy_only {
+        PUBLISH_BUSY
+    } else {
+        PUBLISH_DETAILS
+    })
+    .to_owned();
+    if !busy_only {
+        text.push_str(&format!(" · {PUBLISH_PRIVATE}: {private}"));
+        if attendees {
+            text.push_str(" · with attendees");
+        }
+    }
+    text
+}

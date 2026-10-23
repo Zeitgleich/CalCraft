@@ -4,7 +4,9 @@
 //! (also not when they are moved into the trash and restored), and no
 //! scheduling messages or calendar user addresses (invitations, replies,
 //! cancellations, free/busy lookups), and no managed attachments (file
-//! names, contents, managed ids).
+//! names, contents, managed ids), and nothing of sharing (the sharee's
+//! address in a share request, what a sharee writes) or public links (the
+//! secret token, also of unknown links, and the published content).
 //!
 //! This binary holds a single test because it installs the global
 //! subscriber (the same one `logging.format = "json"` uses), which also
@@ -107,6 +109,129 @@ async fn dav(
         body,
     )
     .await
+}
+
+/// Alice shares her calendar with bob by his (secret) e-mail address, bob
+/// accepts and writes into it; a public link of it is fetched, and an
+/// unknown one is tried.
+async fn sharing_flows(
+    app: &Router,
+    store: &Store,
+    alice_auth: &str,
+    bob_auth: &str,
+    bob_email: &str,
+    secrets: &mut Vec<String>,
+) {
+    let ns = r#"xmlns:D="DAV:" xmlns:CS="http://calendarserver.org/ns/""#;
+    let share = format!(
+        "<CS:share {ns}><CS:set><D:href>mailto:{bob_email}</D:href><CS:summary>{MARKER}ShareSummary</CS:summary><CS:read-write/></CS:set></CS:share>"
+    );
+    secrets.push(format!("{MARKER}ShareSummary"));
+    let reply = dav(
+        app,
+        alice_auth,
+        "POST",
+        "/dav/calendars/alice/default/",
+        "application/xml",
+        share,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let reply = send(
+        app,
+        "PROPFIND",
+        "/dav/notifications/bob/",
+        &[("authorization", bob_auth), ("depth", "1")],
+        String::new(),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::MULTI_STATUS);
+    let accept = format!(
+        "<CS:invite-reply {ns}><D:href>mailto:{bob_email}</D:href><CS:invite-accepted/><CS:hosturl><D:href>/dav/calendars/alice/default/</D:href></CS:hosturl></CS:invite-reply>"
+    );
+    let reply = dav(
+        app,
+        bob_auth,
+        "POST",
+        "/dav/calendars/bob/",
+        "application/xml",
+        accept,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let summary = format!("{MARKER}SharedWrite");
+    secrets.push(summary.clone());
+    let event = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\nBEGIN:VEVENT\r\nUID:{MARKER}SharedUid\r\nDTSTAMP:20261001T000000Z\r\nDTSTART:20261021T100000Z\r\nDTEND:20261021T110000Z\r\nSUMMARY:{summary}\r\nATTENDEE:mailto:{bob_email}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    );
+    secrets.push(format!("{MARKER}SharedUid"));
+    let reply = dav(
+        app,
+        bob_auth,
+        "PUT",
+        "/dav/calendars/bob/alice-default/shared.ics",
+        "text/calendar",
+        event,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+
+    // A public link of the calendar, with attendees: fetched, and an
+    // unknown token tried.
+    let (token, hash) = calcraft_server::publish::new_token();
+    secrets.push(token.clone());
+    secrets.push(hash.clone());
+    let alice = store
+        .user_credentials(&"alice".parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap()
+        .user;
+    let cal = store
+        .collection(
+            alice.id,
+            calcraft_core::CollectionKind::Calendar,
+            &"default".parse().unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .create_publish_link(
+            cal.id,
+            alice.id,
+            &calcraft_store::NewPublishLink {
+                token_hash: &hash,
+                busy_only: false,
+                private_events: calcraft_store::PrivateEvents::Show,
+                include_attendees: true,
+                now: 1,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let reply = send(
+        app,
+        "GET",
+        &format!("/public/{token}.ics"),
+        &[],
+        String::new(),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert!(reply.body.contains(&summary), "{}", reply.body);
+    let unknown = format!("{:064x}", 0x5eed_u32);
+    secrets.push(unknown.clone());
+    let reply = send(
+        app,
+        "GET",
+        &format!("/public/{unknown}.ics"),
+        &[],
+        String::new(),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
 }
 
 /// Writes events and contacts with marked contents, valid and invalid.
@@ -623,6 +748,8 @@ async fn logs_contain_no_secrets_or_contents() {
     config.attachments.enabled = true;
     config.attachments.base_url = Some("https://cal.example.org".to_owned());
     config.attachments.max_bytes = 64 * 1024;
+    config.publish.enabled = true;
+    config.publish.base_url = Some("https://cal.example.org".to_owned());
     let app = router(&config, AppState::new(store.clone()).unwrap());
 
     let mut secrets = vec![ALICE.1.to_owned()];
@@ -647,6 +774,15 @@ async fn logs_contain_no_secrets_or_contents() {
     secrets.push(bob_password.clone());
     secrets.push(bob_auth["Basic ".len()..].to_owned());
     scheduling_flows(
+        &app,
+        &store,
+        &password_auth,
+        &bob_auth,
+        &bob_email,
+        &mut secrets,
+    )
+    .await;
+    sharing_flows(
         &app,
         &store,
         &password_auth,
@@ -725,6 +861,9 @@ async fn logs_contain_no_secrets_or_contents() {
     assert!(logs.contains("scheduling messages sent"), "{logs}");
     assert!(logs.contains("scheduling reply sent"), "{logs}");
     assert!(logs.contains("free/busy lookup"), "{logs}");
+    assert!(logs.contains("INSERT INTO shares"), "{logs}");
+    // The span of a public link has the path without the token.
+    assert!(logs.contains("\"path\":\"/public/\""), "{logs}");
     assert!(logs.lines().count() > 50);
     assert_absent(&logs, &secrets);
 }

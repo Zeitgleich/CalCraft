@@ -350,6 +350,25 @@ async fn store_validated(
         content: &body,
         attachments: &validated.managed_ids,
     };
+    // A sharee's write: stored as it is, never scheduled (no invitations in
+    // the owner's name), and only while the share still grants it.
+    if let Some(via) = &collection.shared {
+        let precondition =
+            match shared_write_precondition(ctx, collection, name, precondition).await {
+                Ok(precondition) => precondition,
+                Err(response) => return response,
+            };
+        if if_tag.is_some() {
+            // Shared objects a sharee may write are no scheduling objects.
+            return StatusCode::PRECONDITION_FAILED.into_response();
+        }
+        let result = ctx
+            .state
+            .store
+            .put_item_shared(via.share_id, collection.id, name, &item, &precondition)
+            .await;
+        return put_result(ctx, collection, result, etag);
+    }
     if kind == CollectionKind::Calendar
         && let Some(scheduling) = &ctx.state.scheduling
     {
@@ -366,12 +385,23 @@ async fn store_validated(
         )
         .await;
     }
-    match ctx
+    let result = ctx
         .state
         .store
         .put_item(collection.id, name, &item, &precondition)
-        .await
-    {
+        .await;
+    put_result(ctx, collection, result, etag)
+}
+
+/// The response to a stored (or refused) object.
+fn put_result(
+    ctx: Ctx<'_>,
+    collection: &Collection,
+    result: Result<PutOutcome, StoreError>,
+    etag: String,
+) -> Response {
+    let kind = collection.kind;
+    match result {
         Ok(outcome) => {
             let status = match outcome {
                 PutOutcome::Created => StatusCode::CREATED,
@@ -393,6 +423,40 @@ async fn store_validated(
     }
 }
 
+/// For a sharee's write of `name`: refuses changes of scheduling objects
+/// (the owner's invitations and meetings, which would otherwise change
+/// without the attendees being told) and returns a precondition that makes
+/// the write fail if the object changed since it was checked.
+#[allow(clippy::result_large_err)]
+pub(super) async fn shared_write_precondition(
+    ctx: Ctx<'_>,
+    collection: &Collection,
+    name: &str,
+    precondition: Precondition,
+) -> Result<Precondition, Response> {
+    let current = match ctx
+        .state
+        .store
+        .item_with_schedule_tag(collection.id, name)
+        .await
+    {
+        Ok(current) => current,
+        Err(err) => return Err(store_error(err)),
+    };
+    if let Some((_, Some(_))) = &current {
+        let href = item_href(collection, &ctx.user.username, name);
+        return Err(need_privileges(Some(&href), "write-content"));
+    }
+    let etag = current.as_ref().map(|(item, _)| item.etag.clone());
+    if !precondition.holds(etag.as_deref()) {
+        return Err(StatusCode::PRECONDITION_FAILED.into_response());
+    }
+    Ok(match etag {
+        Some(etag) => Precondition::IfMatch(vec![etag]),
+        None => Precondition::MustNotExist,
+    })
+}
+
 pub async fn delete(ctx: Ctx<'_>, resource: Resource, request: Request) -> Response {
     let precondition = match precondition(request.headers()) {
         Ok(precondition) => precondition,
@@ -401,6 +465,11 @@ pub async fn delete(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
     match resource {
         Resource::InboxItem(name) => {
             super::scheduling::delete_message(ctx, &name, &precondition).await
+        }
+        Resource::Item(collection, name)
+            if collection.shared.is_some() && !collection.read_only =>
+        {
+            delete_shared_item(ctx, collection, name, precondition).await
         }
         Resource::Item(collection, name)
             if !collection.read_only && collection.kind == CollectionKind::Calendar =>
@@ -425,6 +494,20 @@ pub async fn delete(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
             if !matches!(precondition, Precondition::None | Precondition::MustExist) {
                 return StatusCode::PRECONDITION_FAILED.into_response();
             }
+            // A sharee deleting a shared collection unsubscribes: the share
+            // goes, the owner's collection stays.
+            if let Some(via) = &collection.shared {
+                return match ctx
+                    .state
+                    .store
+                    .leave_share(ctx.user.id, &via.public_id)
+                    .await
+                {
+                    Ok(true) => StatusCode::NO_CONTENT.into_response(),
+                    Ok(false) => not_found(),
+                    Err(err) => store_error(err),
+                };
+            }
             match ctx
                 .state
                 .store
@@ -437,6 +520,49 @@ pub async fn delete(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
         }
         Resource::Unmapped(..) => not_found(),
         _ => method_not_allowed(),
+    }
+}
+
+/// A sharee's DELETE of an object of a read-write share: into the owner's
+/// trash, never scheduled (see [`shared_write_precondition`]).
+async fn delete_shared_item(
+    ctx: Ctx<'_>,
+    collection: Collection,
+    name: String,
+    precondition: Precondition,
+) -> Response {
+    let Some(via) = &collection.shared else {
+        return not_found();
+    };
+    // Deleting a missing object is a 404, whatever the precondition.
+    match ctx.state.store.item_meta(collection.id, &name).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return not_found(),
+        Err(err) => return store_error(err),
+    }
+    let precondition = match shared_write_precondition(ctx, &collection, &name, precondition).await
+    {
+        Ok(Precondition::MustNotExist) => return not_found(),
+        Ok(precondition) => precondition,
+        Err(response) => return response,
+    };
+    let kind = collection.kind;
+    match ctx
+        .state
+        .store
+        .delete_item_to_trash_shared(
+            via.share_id,
+            collection.id,
+            &name,
+            &precondition,
+            now(),
+            |content| crate::trash::summary(kind, content),
+        )
+        .await
+    {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => not_found(),
+        Err(err) => store_error(err),
     }
 }
 

@@ -138,12 +138,50 @@ const OWNER_PRIVILEGES: [&str; 7] = [
 /// server's feed refresher changes them (the subscription itself can be
 /// deleted, which is the home's `unbind`).
 const READ_ONLY_PRIVILEGES: [&str; 2] = ["read", "read-current-user-privilege-set"];
+/// Privileges of a sharee on a read-only shared collection: reading, and
+/// their own name, colour and position of it (stored per share).
+const SHARED_READ_PRIVILEGES: [&str; 3] = [
+    "read",
+    "write-properties",
+    "read-current-user-privilege-set",
+];
 
-fn privileges(read_only: bool) -> PropValue {
-    let names: &[&str] = if read_only {
-        &READ_ONLY_PRIVILEGES
-    } else {
-        &OWNER_PRIVILEGES
+/// What the user may do with a resource, for `current-user-privilege-set`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// Own resources, and collections shared with read-write access.
+    Full,
+    /// Subscriptions and objects the user can only read.
+    ReadOnly,
+    /// A collection shared with read access.
+    SharedRead,
+}
+
+impl Access {
+    /// The user's access to a collection.
+    pub fn of_collection(collection: &Collection) -> Self {
+        match (&collection.shared, collection.read_only) {
+            (Some(via), _) if !via.access.writable() => Self::SharedRead,
+            (_, true) => Self::ReadOnly,
+            (_, false) => Self::Full,
+        }
+    }
+
+    /// The user's access to an object of a collection.
+    pub fn of_items(collection: &Collection) -> Self {
+        if collection.read_only {
+            Self::ReadOnly
+        } else {
+            Self::Full
+        }
+    }
+}
+
+fn privileges(access: Access) -> PropValue {
+    let names: &[&str] = match access {
+        Access::Full => &OWNER_PRIVILEGES,
+        Access::ReadOnly => &READ_ONLY_PRIVILEGES,
+        Access::SharedRead => &SHARED_READ_PRIVILEGES,
     };
     PropValue::Elements(
         names
@@ -155,14 +193,14 @@ fn privileges(read_only: bool) -> PropValue {
     )
 }
 
-fn common(user: &User, read_only: bool) -> Vec<(PropName, PropValue)> {
+fn common(user: &User, access: Access) -> Vec<(PropName, PropValue)> {
     vec![
         prop(
             NS_DAV,
             "current-user-principal",
             PropValue::Href(principal_href(&user.username)),
         ),
-        prop(NS_DAV, "current-user-privilege-set", privileges(read_only)),
+        prop(NS_DAV, "current-user-privilege-set", privileges(access)),
     ]
 }
 
@@ -193,8 +231,11 @@ pub fn properties(
 ) -> Vec<(PropName, PropValue)> {
     let username = &user.username;
     let principal = principal_href(username);
-    let read_only = matches!(resource, Resource::Collection(c) if c.read_only);
-    let mut props = common(user, read_only);
+    let access = match resource {
+        Resource::Collection(collection) => Access::of_collection(collection),
+        _ => Access::Full,
+    };
+    let mut props = common(user, access);
     match resource {
         Resource::Root => props.push(resourcetype(&[(NS_DAV, "collection")])),
         Resource::Principal => {
@@ -237,11 +278,12 @@ pub fn properties(
             }
         }
         Resource::Collection(collection) => {
-            props.extend(collection_properties(
-                collection,
-                principal,
-                max_vcard_bytes,
-            ));
+            // A shared collection belongs to its owner.
+            let owner = collection
+                .shared
+                .as_ref()
+                .map_or(principal, |via| principal_href(&via.owner));
+            props.extend(collection_properties(collection, owner, max_vcard_bytes));
             if let Some(limits) = attachments
                 && collection.kind == CollectionKind::Calendar
                 && !collection.read_only
@@ -266,7 +308,9 @@ pub fn properties(
         | Resource::Inbox
         | Resource::InboxItem(_)
         | Resource::Outbox
-        | Resource::Attachment(_) => {}
+        | Resource::Attachment(_)
+        | Resource::Notifications
+        | Resource::Notification(_) => {}
     }
     props
 }
@@ -389,7 +433,7 @@ pub fn item_properties(
     content: Option<&[u8]>,
 ) -> Vec<(PropName, PropValue)> {
     let kind = collection.kind;
-    let mut props = common(user, collection.read_only);
+    let mut props = common(user, Access::of_items(collection));
     props.extend([
         resourcetype(&[]),
         prop(NS_DAV, "getetag", PropValue::Text(etag.to_owned())),

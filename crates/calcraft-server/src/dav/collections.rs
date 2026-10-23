@@ -184,10 +184,121 @@ fn apply_dead(changes: &mut Changes, name: &PropName, value: Option<&Node>) -> S
     Status::Ok
 }
 
+/// The multistatus of a PROPPATCH: all succeeded, or all failed (the
+/// successful ones with 424).
+fn proppatch_response(href: String, results: Vec<(PropName, Status)>) -> Response {
+    let failed = results.iter().any(|(_, status)| *status != Status::Ok);
+    let mut response = DavResponse::new(href);
+    for (name, status) in results {
+        match (failed, status) {
+            (false, _) => response.found.push((name, calcraft_dav::PropValue::Empty)),
+            (true, Status::Ok) => response.failed.push((name, 424, None)),
+            (true, status) => {
+                let (code, error) = status.code();
+                response.failed.push((name, code, error));
+            }
+        }
+    }
+    multistatus(&Multistatus {
+        responses: vec![response],
+        sync_token: None,
+    })
+}
+
+/// PROPPATCH of a collection shared with the user: only the sharee's own
+/// name, colour and position (`calendar-order`) can be changed, and only
+/// for themselves (stored with the share). Everything else belongs to the
+/// owner: protected properties as usual, all others 403.
+async fn proppatch_shared(
+    ctx: Ctx<'_>,
+    resource: &Resource,
+    collection: &calcraft_store::Collection,
+    share_id: i64,
+    request: Request,
+) -> Response {
+    let body = match read_body(request, MAX_PROPPATCH_BODY).await {
+        Ok(body) => body,
+        Err(err) => return err.into_response(),
+    };
+    let update = match PropertyUpdate::parse_proppatch(&body) {
+        Ok(update) => update,
+        Err(err) => return bad_request(&err),
+    };
+    let calendar = collection.kind == CollectionKind::Calendar;
+    let mut display_name: Option<Option<String>> = None;
+    let mut color: Option<Option<String>> = None;
+    let mut order: Option<Option<i64>> = None;
+    let results: Vec<(PropName, Status)> = update
+        .operations
+        .iter()
+        .map(|(name, value)| {
+            let status = if name.is(NS_DAV, "displayname") {
+                match value {
+                    None => Some(None),
+                    Some(node) => clean_text(&node.text, MAX_DISPLAY_NAME)
+                        .map(|t| (!t.is_empty()).then_some(t)),
+                }
+                .map_or(Status::Conflict, |v| {
+                    display_name = Some(v);
+                    Status::Ok
+                })
+            } else if calendar && name.is(NS_APPLE_ICAL, "calendar-color") {
+                match value {
+                    None => Some(None),
+                    Some(node) => clean_color(&node.text).map(Some),
+                }
+                .map_or(Status::Conflict, |v| {
+                    color = Some(v);
+                    Status::Ok
+                })
+            } else if calendar && name.is(CALENDAR_ORDER.0, CALENDAR_ORDER.1) {
+                match value {
+                    None => {
+                        order = Some(None);
+                        Status::Ok
+                    }
+                    Some(node) if valid_order(node) => {
+                        order = node.text.trim().parse().ok().map(Some);
+                        Status::Ok
+                    }
+                    Some(_) => Status::Conflict,
+                }
+            } else if matches!(classify(name, collection.kind), Class::Protected) {
+                Status::Protected
+            } else {
+                Status::Forbidden
+            };
+            (name.clone(), status)
+        })
+        .collect();
+    if results.iter().all(|(_, status)| *status == Status::Ok) {
+        let view = calcraft_store::ShareView {
+            display_name: display_name.as_ref().map(Option::as_deref),
+            color: color.as_ref().map(Option::as_deref),
+            order,
+        };
+        match ctx
+            .state
+            .store
+            .update_share_view(ctx.user.id, share_id, &view)
+            .await
+        {
+            Ok(true) => {}
+            // Removed meanwhile.
+            Ok(false) => return super::not_found(),
+            Err(err) => return store_error(err),
+        }
+    }
+    proppatch_response(href_of(resource, &ctx.user.username), results)
+}
+
 pub async fn proppatch(ctx: Ctx<'_>, resource: Resource, request: Request) -> Response {
     let Resource::Collection(collection) = &resource else {
         return method_not_allowed();
     };
+    if let Some(via) = &collection.shared {
+        return proppatch_shared(ctx, &resource, collection, via.share_id, request).await;
+    }
     // Subscriptions are renamed and recoloured in the web UI only.
     if collection.read_only {
         let href = href_of(&resource, &ctx.user.username);
@@ -243,22 +354,7 @@ pub async fn proppatch(ctx: Ctx<'_>, resource: Resource, request: Request) -> Re
             Err(err) => return store_error(err),
         }
     }
-    let failed = results.iter().any(|(_, status)| *status != Status::Ok);
-    let mut response = DavResponse::new(href_of(&resource, &ctx.user.username));
-    for (name, status) in results {
-        match (failed, status) {
-            (false, _) => response.found.push((name, calcraft_dav::PropValue::Empty)),
-            (true, Status::Ok) => response.failed.push((name, 424, None)),
-            (true, status) => {
-                let (code, error) = status.code();
-                response.failed.push((name, code, error));
-            }
-        }
-    }
-    multistatus(&Multistatus {
-        responses: vec![response],
-        sync_token: None,
-    })
+    proppatch_response(href_of(&resource, &ctx.user.username), results)
 }
 
 /// Reads `supported-calendar-component-set` from a MKCALENDAR request.
