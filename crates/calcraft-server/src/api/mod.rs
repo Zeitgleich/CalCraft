@@ -8,6 +8,7 @@
 mod account;
 mod admin;
 mod collections;
+mod groups;
 #[cfg(feature = "oidc")]
 mod oidc;
 mod publish;
@@ -55,6 +56,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("post", "/v1/me/totp/enable"),
     ("post", "/v1/me/totp/disable"),
     ("patch", "/v1/me/scheduling"),
+    ("get", "/v1/me/groups"),
     ("get", "/v1/app-passwords"),
     ("post", "/v1/app-passwords"),
     ("delete", "/v1/app-passwords/{id}"),
@@ -67,6 +69,12 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("get", "/v1/collections/{kind}/{slug}/shares"),
     ("put", "/v1/collections/{kind}/{slug}/shares/{username}"),
     ("delete", "/v1/collections/{kind}/{slug}/shares/{username}"),
+    ("get", "/v1/collections/{kind}/{slug}/group-shares"),
+    ("put", "/v1/collections/{kind}/{slug}/group-shares/{group}"),
+    (
+        "delete",
+        "/v1/collections/{kind}/{slug}/group-shares/{group}",
+    ),
     ("get", "/v1/collections/{kind}/{slug}/publish"),
     ("post", "/v1/collections/{kind}/{slug}/publish"),
     ("delete", "/v1/collections/{kind}/{slug}/publish/{id}"),
@@ -87,6 +95,12 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("patch", "/v1/admin/users/{username}"),
     ("delete", "/v1/admin/users/{username}/sso"),
     ("get", "/v1/admin/shares"),
+    ("get", "/v1/admin/groups"),
+    ("post", "/v1/admin/groups"),
+    ("get", "/v1/admin/groups/{group}"),
+    ("delete", "/v1/admin/groups/{group}"),
+    ("put", "/v1/admin/groups/{group}/members/{username}"),
+    ("delete", "/v1/admin/groups/{group}/members/{username}"),
     ("get", "/v1/admin/update"),
 ];
 
@@ -104,6 +118,7 @@ pub fn router() -> Router<AppState> {
         .route("/v1/me/totp/enable", post(account::totp_enable))
         .route("/v1/me/totp/disable", post(account::totp_disable))
         .route("/v1/me/scheduling", patch(account::update_scheduling))
+        .route("/v1/me/groups", get(groups::mine))
         .route(
             "/v1/app-passwords",
             get(account::list_app_passwords).post(account::create_app_password),
@@ -134,6 +149,14 @@ pub fn router() -> Router<AppState> {
             put(sharing::set).delete(sharing::remove),
         )
         .route(
+            "/v1/collections/{kind}/{slug}/group-shares",
+            get(groups::shares),
+        )
+        .route(
+            "/v1/collections/{kind}/{slug}/group-shares/{group}",
+            put(groups::set_share).delete(groups::remove_share),
+        )
+        .route(
             "/v1/collections/{kind}/{slug}/publish",
             get(publish::list).post(publish::create),
         )
@@ -151,6 +174,18 @@ pub fn router() -> Router<AppState> {
         .route("/v1/admin/users/{username}", patch(admin::update))
         .route("/v1/admin/users/{username}/sso", delete(admin::unlink_sso))
         .route("/v1/admin/shares", get(sharing::admin_list))
+        .route(
+            "/v1/admin/groups",
+            get(groups::admin_list).post(groups::admin_create),
+        )
+        .route(
+            "/v1/admin/groups/{group}",
+            get(groups::admin_get).delete(groups::admin_delete),
+        )
+        .route(
+            "/v1/admin/groups/{group}/members/{username}",
+            put(groups::admin_add_member).delete(groups::admin_remove_member),
+        )
         .route("/v1/admin/update", get(admin::update_check));
     // Without the `oidc` feature these paths fall through to 404.
     #[cfg(feature = "oidc")]
@@ -349,6 +384,8 @@ impl From<StoreError> for ApiError {
             StoreError::ReadOnly => Self::ReadOnly,
             StoreError::TrashConflict(conflict) => Self::RestoreConflict(conflict),
             StoreError::UserExists(_) => Self::Conflict("user already exists"),
+            StoreError::GroupExists => Self::Conflict("group already exists"),
+            StoreError::NoSuchGroup => Self::NotFound,
             StoreError::NoSuchSharee | StoreError::ShareRevoked => Self::NotFound,
             StoreError::Busy => {
                 tracing::error!("storage busy: database stayed locked");

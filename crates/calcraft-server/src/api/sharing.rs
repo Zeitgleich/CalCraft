@@ -27,7 +27,7 @@ use crate::{
 /// Most shares listed for administrators.
 const MAX_ADMIN_SHARES: u32 = 10_000;
 
-fn access(access: ShareAccess) -> api::ShareAccess {
+pub(super) fn access(access: ShareAccess) -> api::ShareAccess {
     match access {
         ShareAccess::Read => api::ShareAccess::Read,
         ShareAccess::ReadWrite => api::ShareAccess::ReadWrite,
@@ -40,6 +40,8 @@ fn info(share: Share) -> ShareInfo {
         username: share.sharee.to_string(),
         display_name: share.sharee_display_name,
         access: access(share.access),
+        direct: share.direct.map(access),
+        groups: share.groups,
         created_at: share.created_at,
     }
 }
@@ -61,6 +63,7 @@ fn incoming(share: Share, user: &Username) -> IncomingShareInfo {
         owner_display_name: share.owner_display_name,
         display_name: share.collection_display_name,
         access: access(share.access),
+        groups: share.groups,
         created_at: share.created_at,
     }
 }
@@ -231,6 +234,8 @@ pub async fn admin_list(
                 collection: share.owner_slug.to_string(),
                 sharee: share.sharee.to_string(),
                 access: access(share.access),
+                direct: share.direct.map(access),
+                groups: share.groups,
                 created_at: share.created_at,
             })
             .collect(),

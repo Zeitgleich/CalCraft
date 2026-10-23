@@ -260,6 +260,13 @@ Die Beschreibungen sind Payload-Ideen für **eigene** Tests gegen CalCraft. Sie 
 77. `GET /public/%ff.ics` → kein 400 (verriete, dass Links aktiv sind), sondern dasselbe 404 und zählt als Fehlversuch; gültige Links funktionieren auch für gesperrte Adressen (Fund aus dem Review). ✅ (`malformed_paths_count_as_misses_and_look_like_unknown_ones`)
 74. Öffentlicher Link: Raten von Tokens (falsche Länge, Großbuchstaben, Hash statt Token, Pfad-Tricks), widerrufene Links, deaktivierter Besitzer → einheitliches 404; viele Fehlversuche → 429; Token nie im Log. Inhalt ohne ATTACH, VALARM, ATTENDEE/ORGANIZER (außer bewusst gewählt), ohne Original-UIDs; `CLASS:PRIVATE/CONFIDENTIAL` standardmäßig nur als „belegt“. ✅ (`tests/publish.rs`, `log_secrets.rs`)
 
+### Gruppen und Freigaben an Gruppen (M5)
+78. Gruppen-Mitgliedschaft als Rechtequelle (Muster CVE-2026-45281, `group-member-set` per PROPPATCH): Mitgliedschaften ändern nur Administratoren (CLI, Admin-API), es gibt keine Gruppen-Principals als DAV-Ressourcen und keine schreibbaren Gruppen-Properties; Nicht-Admins bekommen auf allen Admin-Gruppenrouten 403. ✅ (Autorisierungsmatrix, `tests/groups.rs`)
+79. Mitglied wird aus der Gruppe entfernt (auch während es schreibt), Gruppe gelöscht, Gruppenfreigabe beendet → sofort kein Zugriff (Neuberechnung in derselben Transaktion), danach PROPFIND, GET, PUT, REPORT `sync-collection` und Anhang-Download wie nie vorhanden; direkte Freigabe daneben bleibt bestehen. ✅ (`leaving_the_group_ends_access_like_it_never_existed`, `member_removed_while_writing`, `direct_and_group_shares_combine`, Matrix: ehemaliges Mitglied, beendete Gruppenfreigabe)
+80. Gruppennamen ausforschen bzw. an fremde Gruppen freigeben (Nicht-Mitglied, REST und `CS:share` mit `/dav/principals/groups/<name>/`) → identisch zu unbekannter Gruppe (404 bzw. 403 `valid-sharee`). ✅ (`only_members_and_administrators_share_with_a_group`, `apple_clients_share_with_group_principals`, Matrix)
+81. Einladungs-Spam über Gruppen (Gruppe statt Einzelner, erneutes Speichern, Austritt und Wiedereintritt, Gruppenfreigabe neu anlegen) → dieselben Limits je Empfänger (5 offen je Besitzer, 100 gesamt, 24 h nach Absage), Absage einer Gruppeneinladung wird je Mitglied gespeichert. ✅ (Store-Tests `groups/tests.rs`, `a_declined_group_invitation_is_remembered`)
+82. Gruppennamen in Logs (REST-Pfade, Gruppen-Principals) → nie geloggt. ✅ (`log_secrets.rs`)
+
 ### Release (M7)
 60. Gesamter Autorisierungs-Matrix-Test grün. Fuzzing-Langlauf ohne Funde. `cargo audit` sauber. Header-Check (CSP, HSTS, nosniff, frame-ancestors, Referrer-Policy) auf allen UI- und API-Antworten.
 

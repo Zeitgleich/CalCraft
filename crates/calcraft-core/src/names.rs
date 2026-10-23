@@ -96,6 +96,14 @@ name_type!(
 );
 
 name_type!(
+    /// Name of a group of users (same rules as usernames). Appears in the
+    /// group principal URL `/dav/principals/groups/<name>/`.
+    GroupName,
+    "group name",
+    64
+);
+
+name_type!(
     /// URL segment of a calendar or address book.
     Slug,
     "collection name",

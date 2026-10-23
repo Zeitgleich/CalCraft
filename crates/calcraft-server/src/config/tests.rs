@@ -367,3 +367,24 @@ fn sharing_is_on_and_publishing_off_by_default() {
         assert!(from_toml(&format!("{bad}\n")).is_err(), "{bad}");
     }
 }
+
+#[test]
+fn group_limits_have_defaults_and_bounds() {
+    let config = from_toml("").unwrap();
+    assert_eq!(config.groups.max_groups, 100);
+    assert_eq!(config.groups.max_members, 200);
+    let config = from_toml("[groups]\nmax_groups = 1\nmax_members = 1000\n").unwrap();
+    assert_eq!(
+        (config.groups.max_groups, config.groups.max_members),
+        (1, 1000)
+    );
+    for bad in [
+        "[groups]\nmax_groups = 0",
+        "[groups]\nmax_groups = 10001",
+        "[groups]\nmax_members = 0",
+        "[groups]\nmax_members = 1001",
+        "[groups]\nenabled = true",
+    ] {
+        assert!(from_toml(&format!("{bad}\n")).is_err(), "{bad}");
+    }
+}

@@ -430,11 +430,89 @@ pub struct ShareInfo {
     /// Username of the sharee.
     pub username: String,
     pub display_name: Option<String>,
+    /// Effective access: the higher of `direct` and the group shares.
     pub access: ShareAccess,
+    /// The direct share with this user; `None` if only group shares (see
+    /// `groups`) grant access.
+    #[serde(default)]
+    pub direct: Option<ShareAccess>,
+    /// Groups whose shares give this user access.
+    #[serde(default)]
+    pub groups: Vec<String>,
     /// The sharee accepted; until then the share is an invitation.
     pub accepted: bool,
     /// Unix seconds.
     pub created_at: i64,
+}
+
+/// A share of one of the user's collections with a group, as the owner
+/// sees it. Every member has their own share (invitation) in the list of
+/// shares.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupShareInfo {
+    pub group: String,
+    pub display_name: Option<String>,
+    pub access: ShareAccess,
+    /// Members of the group other than the owner.
+    pub members: i64,
+    /// Unix seconds.
+    pub created_at: i64,
+}
+
+/// Answer to `PUT /api/v1/collections/{kind}/{slug}/group-shares/{group}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupShareResult {
+    pub share: GroupShareInfo,
+    /// New invitations of members.
+    pub invited: u32,
+    /// Members who cannot be invited now (too many pending invitations, or
+    /// they declined one of your shares within the last day); saving the
+    /// group share again later invites them.
+    pub skipped: u32,
+}
+
+/// A group of users (`GET /api/v1/me/groups`, `/api/v1/admin/groups`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupInfo {
+    pub name: String,
+    pub display_name: Option<String>,
+    /// Number of members.
+    pub member_count: i64,
+    /// The members: for members of the group their enabled fellow members,
+    /// for administrators everybody; empty in lists of all groups.
+    #[serde(default)]
+    pub members: Vec<GroupMemberInfo>,
+    /// Unix seconds.
+    pub created_at: i64,
+}
+
+/// A member of a group.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupMemberInfo {
+    pub username: String,
+    pub display_name: Option<String>,
+    /// Only shown to administrators (always `false` for members).
+    #[serde(default)]
+    pub disabled: bool,
+}
+
+/// `POST /api/v1/admin/groups`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateGroup {
+    /// Like a username: 1-64 characters a-z, 0-9, '.', '_' or '-'.
+    pub name: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+/// Answer to `PUT /api/v1/admin/groups/{group}/members/{username}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberAddedInfo {
+    /// `false` if the user was a member already.
+    pub added: bool,
+    /// New invitations through the group's shares.
+    pub invited: u32,
 }
 
 /// `PUT /api/v1/collections/{kind}/{slug}/shares/{username}`.
@@ -456,6 +534,10 @@ pub struct IncomingShareInfo {
     /// The owner's name of the collection.
     pub display_name: Option<String>,
     pub access: ShareAccess,
+    /// Groups of the user the collection is shared with (empty for a
+    /// direct share only).
+    #[serde(default)]
+    pub groups: Vec<String>,
     pub accepted: bool,
     /// DAV URL in the user's own home; `None` until accepted.
     pub href: Option<String>,
@@ -472,6 +554,12 @@ pub struct AdminShareInfo {
     pub collection: String,
     pub sharee: String,
     pub access: ShareAccess,
+    /// The direct share; `None` if only group shares grant access.
+    #[serde(default)]
+    pub direct: Option<ShareAccess>,
+    /// Groups whose shares give the sharee access.
+    #[serde(default)]
+    pub groups: Vec<String>,
     pub accepted: bool,
     pub created_at: i64,
 }

@@ -53,6 +53,8 @@ pub struct AppState {
     /// Sharing between users (`[sharing] enabled`); [`router`] sets it from
     /// the configuration.
     pub sharing: bool,
+    /// Group limits (`[groups]`); [`router`] sets them from the configuration.
+    pub groups: crate::groups::GroupLimits,
     /// Public calendar links, if enabled (`[publish] enabled`); [`router`]
     /// sets it from the configuration.
     pub publish: Option<Arc<crate::publish::Publish>>,
@@ -79,10 +81,26 @@ impl AppState {
             attachments: None,
             max_vcard_bytes: crate::config::DEFAULT_MAX_VCARD_BYTES,
             sharing: true,
+            groups: crate::groups::GroupLimits::default(),
             publish: None,
             expansion: Arc::new(tokio::sync::Semaphore::new(expansion_permits())),
             readiness: Arc::new(ReadinessCache::new(READINESS_TTL)),
         })
+    }
+}
+
+/// A request path for the logs without a group name: the REST routes of
+/// groups (`/api/v1/admin/groups/<name>…`, `…/group-shares/<name>`) end
+/// before it.
+pub fn without_group_name(path: &str) -> &str {
+    const ADMIN: &str = "/api/v1/admin/groups/";
+    const SHARES: &str = "/group-shares/";
+    if path.starts_with(ADMIN) {
+        return ADMIN;
+    }
+    match path.find(SHARES) {
+        Some(at) if path.starts_with("/api/") => &path[..at + SHARES.len()],
+        _ => path,
     }
 }
 
@@ -95,6 +113,7 @@ fn expansion_permits() -> usize {
 pub fn router(config: &Config, mut state: AppState) -> Router {
     state.max_vcard_bytes = config.max_vcard_bytes();
     state.sharing = config.sharing.enabled;
+    state.groups = (&config.groups).into();
     if config.publish.enabled && state.publish.is_none() {
         state.publish = Some(Arc::new(crate::publish::Publish::new(&config.publish)));
     }
@@ -187,7 +206,8 @@ pub fn router(config: &Config, mut state: AppState) -> Router {
                     // The rest is the secret token.
                     crate::publish::PUBLIC_PATH
                 } else {
-                    path
+                    // Group names are never logged.
+                    without_group_name(path)
                 };
                 tracing::debug_span!(
                     "request",

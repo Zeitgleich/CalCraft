@@ -452,6 +452,44 @@ async fn upgrade_from_every_previous_migration() {
     }
 }
 
+/// Migration 0014 (groups): every existing share becomes a direct share
+/// with its access, accepted or pending as before.
+#[tokio::test]
+async fn shares_survive_the_groups_migration_as_direct_shares() {
+    let dir = TempDir::new("upgrade-groups");
+    let db = dir.join("calcraft.db");
+    old_database(&db, 13).await;
+    let pool = raw(&db).await;
+    sqlx::query("INSERT INTO users (username, password_hash) VALUES ('bob', 'hash')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO shares (public_id, collection_id, sharee_id, kind, access, slug, created_at, accepted_at) \
+         VALUES ('0123456789abcdef0123456789abcdef', 1, 2, 'calendar', 'read-write', 'old-default', 1, 2)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    let store = Store::open(&db).await.unwrap();
+    let bob = store
+        .user_by_name(&"bob".parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let shares = store.incoming_shares(bob.id).await.unwrap();
+    assert_eq!(shares.len(), 1);
+    assert!(shares[0].accepted());
+    assert_eq!(shares[0].access, crate::ShareAccess::ReadWrite);
+    assert_eq!(shares[0].direct, Some(crate::ShareAccess::ReadWrite));
+    assert!(shares[0].groups.is_empty());
+    // Removing the direct share ends it (no group grants it).
+    assert!(store.remove_share(1, 1, bob.id).await.unwrap());
+    assert!(store.incoming_shares(bob.id).await.unwrap().is_empty());
+    store.close().await;
+}
+
 #[tokio::test]
 async fn new_database_gets_no_pre_migration_backup() {
     let dir = TempDir::new("fresh");

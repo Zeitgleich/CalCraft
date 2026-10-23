@@ -12,13 +12,22 @@
 //! write transaction that the share still grants write access
 //! ([`ensure_share`]): a share removed while a request is in flight cannot
 //! be written through any more.
+//!
+//! A row of `shares` is one sharee's view of one collection (invitation,
+//! acceptance, slug, name, colour). Its `access` is the one value every
+//! access check reads: the higher of the direct share (`direct_access`)
+//! and the group shares ([`crate::groups`]) of groups the sharee is a
+//! member of and did not decline. [`recompute_share`] keeps it up to date
+//! inside the transaction of every change; a row without any grant left is
+//! deleted, exactly like a removed share.
 
 use calcraft_core::{CollectionKind, Slug, Username};
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 
 use crate::{Collection, Result, Store, StoreError, collection_from_row};
 
-/// Most shares (pending and accepted) of one collection.
+/// Most direct shares (pending and accepted) of one collection; group
+/// shares have their own limit ([`crate::MAX_GROUP_SHARES_PER_COLLECTION`]).
 pub const MAX_SHARES_PER_COLLECTION: i64 = 100;
 /// Most pending invitations one user can have; further shares with them
 /// are refused until they accept or decline some.
@@ -94,7 +103,13 @@ pub struct Share {
     pub sharee_id: i64,
     pub sharee: Username,
     pub sharee_display_name: Option<String>,
+    /// Effective access: the higher of `direct` and the group shares.
     pub access: ShareAccess,
+    /// The direct share with this user; `None` if only group shares grant
+    /// access.
+    pub direct: Option<ShareAccess>,
+    /// Names of the groups whose shares grant access (sorted).
+    pub groups: Vec<String>,
     /// The slug in the sharee's home; `None` while pending.
     pub slug: Option<Slug>,
     pub created_at: i64,
@@ -124,6 +139,16 @@ impl SetShare {
     }
 }
 
+/// The changes of one `CS:share` request ([`Store::apply_share_changes`]):
+/// user ids and group ids with the access to set, and ids to remove.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ShareChanges<'a> {
+    pub set: &'a [(i64, ShareAccess)],
+    pub remove: &'a [i64],
+    pub set_groups: &'a [(i64, ShareAccess)],
+    pub remove_groups: &'a [i64],
+}
+
 /// The sharee's own view of a shared collection; `None` keeps a value,
 /// `Some(None)` clears it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -137,8 +162,15 @@ pub struct ShareView<'a> {
 /// (owner) and `users u` (sharee); a `WHERE` clause follows.
 macro_rules! share_select {
     () => {
-        "SELECT s.id, s.public_id, s.collection_id, s.kind, s.access, s.slug, \
+        "SELECT s.id, s.public_id, s.collection_id, s.kind, s.access, s.direct_access, s.slug, \
            s.created_at, s.accepted_at, s.sharee_id, c.owner_id, c.slug AS owner_slug, \
+           (SELECT group_concat(name, ',') FROM (SELECT g.name FROM group_shares gs \
+              JOIN group_members m ON m.group_id = gs.group_id \
+              JOIN user_groups g ON g.id = gs.group_id \
+              WHERE gs.collection_id = s.collection_id AND m.user_id = s.sharee_id \
+                AND NOT EXISTS (SELECT 1 FROM group_share_declines d \
+                  WHERE d.group_share_id = gs.id AND d.user_id = s.sharee_id) \
+              ORDER BY g.name)) AS via_groups, \
            c.display_name AS collection_display_name, c.components, c.read_only, \
            o.username AS owner_name, o.display_name AS owner_display_name, \
            u.username AS sharee_name, u.display_name AS sharee_display_name \
@@ -186,6 +218,8 @@ fn access_from_row(row: &SqliteRow) -> Result<ShareAccess> {
 fn share_from_row(row: &SqliteRow) -> Result<Share> {
     let kind: String = row.try_get("kind")?;
     let slug: Option<String> = row.try_get("slug")?;
+    let direct: Option<String> = row.try_get("direct_access")?;
+    let groups: Option<String> = row.try_get("via_groups")?;
     Ok(Share {
         id: row.try_get("id")?,
         public_id: row.try_get("public_id")?,
@@ -213,6 +247,17 @@ fn share_from_row(row: &SqliteRow) -> Result<Share> {
             .map_err(corrupt)?,
         sharee_display_name: row.try_get("sharee_display_name")?,
         access: access_from_row(row)?,
+        direct: direct
+            .map(|access| {
+                access
+                    .parse()
+                    .map_err(|()| corrupt(format!("unknown share access {access:?}")))
+            })
+            .transpose()?,
+        // Group names never contain a comma.
+        groups: groups
+            .map(|names| names.split(',').map(str::to_owned).collect())
+            .unwrap_or_default(),
         slug: slug.map(Slug::try_from).transpose().map_err(corrupt)?,
         created_at: row.try_get("created_at")?,
         accepted_at: row.try_get("accepted_at")?,
@@ -355,22 +400,209 @@ async fn set_share_in(
     if access.writable() && collection.try_get::<bool, _>("read_only")? {
         return Err(StoreError::ReadOnly);
     }
-    let existing: Option<i64> =
-        sqlx::query("SELECT id FROM shares WHERE collection_id = ? AND sharee_id = ?")
-            .bind(collection_id)
-            .bind(sharee_id)
-            .fetch_optional(&mut **tx)
-            .await?
-            .map(|row| row.try_get("id"))
-            .transpose()?;
-    if let Some(id) = existing {
-        sqlx::query("UPDATE shares SET access = ? WHERE id = ?")
+    let existing = sqlx::query(
+        "SELECT id, direct_access IS NOT NULL AS direct FROM shares \
+         WHERE collection_id = ? AND sharee_id = ?",
+    )
+    .bind(collection_id)
+    .bind(sharee_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(row) = existing {
+        let id: i64 = row.try_get("id")?;
+        // A member of a shared group gets a direct share on top: no new
+        // invitation (the row stays pending or accepted), but it counts.
+        if !row.try_get::<bool, _>("direct")?
+            && direct_shares(tx, collection_id).await? >= MAX_SHARES_PER_COLLECTION
+        {
+            return Err(StoreError::Limit("too many shares of this collection"));
+        }
+        sqlx::query("UPDATE shares SET direct_access = ? WHERE id = ?")
             .bind(access.as_str())
             .bind(id)
             .execute(&mut **tx)
             .await?;
+        recompute_share(tx, collection_id, sharee_id, None).await?;
         return Ok(Some((id, false)));
     }
+    if let Some(refusal) = invite_refusal(tx, owner_id, sharee_id, now).await? {
+        return Err(refusal);
+    }
+    if direct_shares(tx, collection_id).await? >= MAX_SHARES_PER_COLLECTION {
+        return Err(StoreError::Limit("too many shares of this collection"));
+    }
+    let id: i64 = sqlx::query(
+        "INSERT INTO shares \
+           (public_id, collection_id, sharee_id, kind, access, direct_access, created_at) \
+         VALUES (lower(hex(randomblob(16))), ?, ?, ?, ?, ?, ?) RETURNING id",
+    )
+    .bind(collection_id)
+    .bind(sharee_id)
+    .bind(collection.try_get::<String, _>("kind")?)
+    .bind(access.as_str())
+    .bind(access.as_str())
+    .bind(now)
+    .fetch_one(&mut **tx)
+    .await?
+    .try_get("id")?;
+    // Group shares the user declined stay declined; the access is the
+    // maximum of all remaining grants in any case.
+    recompute_share(tx, collection_id, sharee_id, None).await?;
+    Ok(Some((id, true)))
+}
+
+/// Number of direct shares of a collection (group shares have their own
+/// limit, [`crate::MAX_GROUP_SHARES_PER_COLLECTION`]).
+async fn direct_shares(tx: &mut Transaction<'static, Sqlite>, collection_id: i64) -> Result<i64> {
+    Ok(sqlx::query(
+        "SELECT COUNT(*) AS n FROM shares WHERE collection_id = ? AND direct_access IS NOT NULL",
+    )
+    .bind(collection_id)
+    .fetch_one(&mut **tx)
+    .await?
+    .try_get("n")?)
+}
+
+fn level(access: ShareAccess) -> i64 {
+    match access {
+        ShareAccess::Read => 1,
+        ShareAccess::ReadWrite => 2,
+    }
+}
+
+fn parse_access(value: &str) -> Result<ShareAccess> {
+    value
+        .parse()
+        .map_err(|()| corrupt(format!("unknown share access {value:?}")))
+}
+
+/// What [`recompute_share`] did with the row of one collection and user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Recomputed {
+    /// No grant and no row.
+    Nothing,
+    /// The row stays (its access may have changed).
+    Kept,
+    /// No grant left: the row was deleted (revoked like a removed share).
+    Removed,
+    /// A group share created a new invitation.
+    Invited,
+    /// A group share would grant access, but the user cannot be invited
+    /// now (pending-invitation limits, or they declined or left one of the
+    /// owner's shares within [`DECLINE_COOLDOWN_SECS`]).
+    Skipped,
+}
+
+/// Brings the row of `shares` for collection `collection_id` and user
+/// `user_id` in line with its grants: `access` becomes the higher of the
+/// direct share and the group shares (of groups the user is a member of
+/// and did not decline); without any grant the row is deleted. With
+/// `invite_at`, a group grant without a row creates a pending invitation,
+/// subject to the limits of a direct invitation. Runs inside the write
+/// transaction of the change that made it necessary, so the change and
+/// its effect on access are one atomic step.
+pub(crate) async fn recompute_share(
+    tx: &mut Transaction<'static, Sqlite>,
+    collection_id: i64,
+    user_id: i64,
+    invite_at: Option<i64>,
+) -> Result<Recomputed> {
+    let Some(collection) = sqlx::query("SELECT owner_id, kind FROM collections WHERE id = ?")
+        .bind(collection_id)
+        .fetch_optional(&mut **tx)
+        .await?
+    else {
+        return Ok(Recomputed::Nothing);
+    };
+    let owner_id: i64 = collection.try_get("owner_id")?;
+    let row = sqlx::query(
+        "SELECT id, direct_access FROM shares WHERE collection_id = ? AND sharee_id = ?",
+    )
+    .bind(collection_id)
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let group: Option<i64> = if user_id == owner_id {
+        None
+    } else {
+        sqlx::query(
+            "SELECT MAX(CASE gs.access WHEN 'read-write' THEN 2 ELSE 1 END) AS level \
+             FROM group_shares gs JOIN group_members m ON m.group_id = gs.group_id \
+             WHERE gs.collection_id = ?1 AND m.user_id = ?2 \
+               AND NOT EXISTS (SELECT 1 FROM group_share_declines d \
+                 WHERE d.group_share_id = gs.id AND d.user_id = ?2)",
+        )
+        .bind(collection_id)
+        .bind(user_id)
+        .fetch_one(&mut **tx)
+        .await?
+        .try_get("level")?
+    };
+    let direct = match &row {
+        Some(row) => row
+            .try_get::<Option<String>, _>("direct_access")?
+            .as_deref()
+            .map(parse_access)
+            .transpose()?,
+        None => None,
+    };
+    let effective = direct.map(level).max(group).map(|level| {
+        if level >= 2 {
+            ShareAccess::ReadWrite
+        } else {
+            ShareAccess::Read
+        }
+    });
+    match (row, effective) {
+        (Some(row), None) => {
+            sqlx::query("DELETE FROM shares WHERE id = ?")
+                .bind(row.try_get::<i64, _>("id")?)
+                .execute(&mut **tx)
+                .await?;
+            Ok(Recomputed::Removed)
+        }
+        (Some(row), Some(access)) => {
+            sqlx::query("UPDATE shares SET access = ?1 WHERE id = ?2 AND access <> ?1")
+                .bind(access.as_str())
+                .bind(row.try_get::<i64, _>("id")?)
+                .execute(&mut **tx)
+                .await?;
+            Ok(Recomputed::Kept)
+        }
+        (None, None) => Ok(Recomputed::Nothing),
+        (None, Some(access)) => {
+            let Some(now) = invite_at else {
+                return Ok(Recomputed::Nothing);
+            };
+            if invite_refusal(tx, owner_id, user_id, now).await?.is_some() {
+                return Ok(Recomputed::Skipped);
+            }
+            sqlx::query(
+                "INSERT INTO shares (public_id, collection_id, sharee_id, kind, access, created_at) \
+                 VALUES (lower(hex(randomblob(16))), ?, ?, ?, ?, ?)",
+            )
+            .bind(collection_id)
+            .bind(user_id)
+            .bind(collection.try_get::<String, _>("kind")?)
+            .bind(access.as_str())
+            .bind(now)
+            .execute(&mut **tx)
+            .await?;
+            Ok(Recomputed::Invited)
+        }
+    }
+}
+
+/// Why `owner_id` may not send `sharee_id` one more invitation now: within
+/// [`DECLINE_COOLDOWN_SECS`] of a decline ([`StoreError::ShareDeclined`]),
+/// or [`MAX_PENDING_PER_OWNER`] or [`MAX_PENDING_SHARES_PER_USER`] reached
+/// ([`StoreError::Limit`]).
+async fn invite_refusal(
+    tx: &mut Transaction<'static, Sqlite>,
+    owner_id: i64,
+    sharee_id: i64,
+    now: i64,
+) -> Result<Option<StoreError>> {
     let declined = sqlx::query(
         "SELECT 1 FROM share_declines WHERE owner_id = ? AND sharee_id = ? AND declined_at > ?",
     )
@@ -381,45 +613,54 @@ async fn set_share_in(
     .await?
     .is_some();
     if declined {
-        return Err(StoreError::ShareDeclined);
+        return Ok(Some(StoreError::ShareDeclined));
     }
     let counts = sqlx::query(
-        "SELECT (SELECT COUNT(*) FROM shares WHERE collection_id = ?1) AS shares, \
-           (SELECT COUNT(*) FROM shares WHERE sharee_id = ?2 AND accepted_at IS NULL) AS pending, \
+        "SELECT (SELECT COUNT(*) FROM shares WHERE sharee_id = ?1 AND accepted_at IS NULL) AS pending, \
            (SELECT COUNT(*) FROM shares s JOIN collections c ON c.id = s.collection_id \
-              WHERE s.sharee_id = ?2 AND s.accepted_at IS NULL AND c.owner_id = ?3) AS from_owner",
+              WHERE s.sharee_id = ?1 AND s.accepted_at IS NULL AND c.owner_id = ?2) AS from_owner",
     )
-    .bind(collection_id)
     .bind(sharee_id)
     .bind(owner_id)
     .fetch_one(&mut **tx)
     .await?;
-    if counts.try_get::<i64, _>("shares")? >= MAX_SHARES_PER_COLLECTION {
-        return Err(StoreError::Limit("too many shares of this collection"));
-    }
     if counts.try_get::<i64, _>("from_owner")? >= MAX_PENDING_PER_OWNER {
-        return Err(StoreError::Limit(
+        return Ok(Some(StoreError::Limit(
             "too many pending invitations from you for this user",
-        ));
+        )));
     }
     if counts.try_get::<i64, _>("pending")? >= MAX_PENDING_SHARES_PER_USER {
-        return Err(StoreError::Limit(
+        return Ok(Some(StoreError::Limit(
             "too many pending invitations for this user",
-        ));
+        )));
     }
-    let id: i64 = sqlx::query(
-        "INSERT INTO shares (public_id, collection_id, sharee_id, kind, access, created_at) \
-         VALUES (lower(hex(randomblob(16))), ?, ?, ?, ?, ?) RETURNING id",
+    Ok(None)
+}
+
+/// Removes the direct share of `collection_id` (of `owner_id`) with
+/// `sharee_id`; group shares keep the row. Returns whether there was a
+/// direct share.
+async fn remove_direct_share(
+    tx: &mut Transaction<'static, Sqlite>,
+    collection_id: i64,
+    owner_id: i64,
+    sharee_id: i64,
+) -> Result<bool> {
+    let done = sqlx::query(
+        "UPDATE shares SET direct_access = NULL \
+         WHERE collection_id = ? AND sharee_id = ? AND direct_access IS NOT NULL \
+           AND collection_id IN (SELECT id FROM collections WHERE owner_id = ?)",
     )
     .bind(collection_id)
     .bind(sharee_id)
-    .bind(collection.try_get::<String, _>("kind")?)
-    .bind(access.as_str())
-    .bind(now)
-    .fetch_one(&mut **tx)
-    .await?
-    .try_get("id")?;
-    Ok(Some((id, true)))
+    .bind(owner_id)
+    .execute(&mut **tx)
+    .await?;
+    if done.rows_affected() == 0 {
+        return Ok(false);
+    }
+    recompute_share(tx, collection_id, sharee_id, None).await?;
+    Ok(true)
 }
 
 impl Store {
@@ -496,10 +737,32 @@ impl Store {
         remove: &[i64],
         now: i64,
     ) -> Result<Option<()>> {
+        let changes = ShareChanges {
+            set,
+            remove,
+            ..ShareChanges::default()
+        };
+        self.apply_share_changes(collection_id, owner_id, &changes, now)
+            .await
+    }
+
+    /// Direct shares and group shares of one collection set and removed in
+    /// one transaction (a `CS:share` request): all or nothing, the first
+    /// error rolls everything back. `None` if the collection is not the
+    /// owner's. Group ids must name existing groups the owner may share
+    /// with (checked by the caller); an unknown one fails with
+    /// [`StoreError::NoSuchGroup`].
+    pub async fn apply_share_changes(
+        &self,
+        collection_id: i64,
+        owner_id: i64,
+        changes: &ShareChanges<'_>,
+        now: i64,
+    ) -> Result<Option<()>> {
         self.observe(
             async {
                 let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-                for &(sharee_id, access) in set {
+                for &(sharee_id, access) in changes.set {
                     if set_share_in(&mut tx, collection_id, owner_id, sharee_id, access, now)
                         .await?
                         .is_none()
@@ -507,15 +770,31 @@ impl Store {
                         return Ok(None);
                     }
                 }
-                for &sharee_id in remove {
-                    sqlx::query(
-                        "DELETE FROM shares WHERE collection_id = ? AND sharee_id = ? \
-                           AND collection_id IN (SELECT id FROM collections WHERE owner_id = ?)",
+                for &(group_id, access) in changes.set_groups {
+                    if crate::groups::set_group_share_in(
+                        &mut tx,
+                        collection_id,
+                        owner_id,
+                        group_id,
+                        access,
+                        now,
                     )
-                    .bind(collection_id)
-                    .bind(sharee_id)
-                    .bind(owner_id)
-                    .execute(&mut *tx)
+                    .await?
+                    .is_none()
+                    {
+                        return Ok(None);
+                    }
+                }
+                for &sharee_id in changes.remove {
+                    remove_direct_share(&mut tx, collection_id, owner_id, sharee_id).await?;
+                }
+                for &group_id in changes.remove_groups {
+                    crate::groups::remove_group_share_in(
+                        &mut tx,
+                        collection_id,
+                        owner_id,
+                        group_id,
+                    )
                     .await?;
                 }
                 tx.commit().await?;
@@ -525,8 +804,10 @@ impl Store {
         )
     }
 
-    /// Removes the share of collection `collection_id` (of `owner_id`) with
-    /// `sharee_id`. Returns whether there was one.
+    /// Removes the direct share of collection `collection_id` (of
+    /// `owner_id`) with `sharee_id`. Returns whether there was one. If
+    /// group shares still grant the user access, their share stays (with
+    /// the access of the group shares).
     pub async fn remove_share(
         &self,
         collection_id: i64,
@@ -535,16 +816,10 @@ impl Store {
     ) -> Result<bool> {
         self.observe(
             async {
-                let done = sqlx::query(
-                    "DELETE FROM shares WHERE collection_id = ? AND sharee_id = ? \
-                       AND collection_id IN (SELECT id FROM collections WHERE owner_id = ?)",
-                )
-                .bind(collection_id)
-                .bind(sharee_id)
-                .bind(owner_id)
-                .execute(&self.writer)
-                .await?;
-                Ok(done.rows_affected() == 1)
+                let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                let done = remove_direct_share(&mut tx, collection_id, owner_id, sharee_id).await?;
+                tx.commit().await?;
+                Ok(done)
             }
             .await,
         )
@@ -672,26 +947,40 @@ impl Store {
     }
 
     /// The sharee declines a pending share or unsubscribes from an
-    /// accepted one: the share is removed, and the owner cannot invite
-    /// them again for [`DECLINE_COOLDOWN_SECS`]. Returns whether there was
-    /// one.
+    /// accepted one: the share is removed (with the direct share and all
+    /// group shares behind it), the owner cannot invite them again for
+    /// [`DECLINE_COOLDOWN_SECS`], and the group shares of the collection
+    /// never invite them again. Returns whether there was one.
     pub async fn leave_share(&self, sharee_id: i64, public_id: &str, now: i64) -> Result<bool> {
         self.observe(
             async {
                 let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-                let owner: Option<i64> = sqlx::query(
-                    "SELECT c.owner_id FROM shares s JOIN collections c ON c.id = s.collection_id \
+                let Some(row) = sqlx::query(
+                    "SELECT c.owner_id, s.collection_id FROM shares s \
+                       JOIN collections c ON c.id = s.collection_id \
                      WHERE s.sharee_id = ? AND s.public_id = ?",
                 )
                 .bind(sharee_id)
                 .bind(public_id)
                 .fetch_optional(&mut *tx)
                 .await?
-                .map(|row| row.try_get("owner_id"))
-                .transpose()?;
-                let Some(owner) = owner else {
+                else {
                     return Ok(false);
                 };
+                let owner: i64 = row.try_get("owner_id")?;
+                // Group shares of the collection never invite them again
+                // (also not after leaving and rejoining the group).
+                sqlx::query(
+                    "INSERT OR IGNORE INTO group_share_declines (group_share_id, user_id, declined_at) \
+                     SELECT gs.id, m.user_id, ?3 FROM group_shares gs \
+                       JOIN group_members m ON m.group_id = gs.group_id \
+                     WHERE gs.collection_id = ?1 AND m.user_id = ?2",
+                )
+                .bind(row.try_get::<i64, _>("collection_id")?)
+                .bind(sharee_id)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
                 sqlx::query("DELETE FROM shares WHERE sharee_id = ? AND public_id = ?")
                     .bind(sharee_id)
                     .bind(public_id)
@@ -713,12 +1002,16 @@ impl Store {
         )
     }
 
-    /// Forgets all declines, for tests (feature `test-hooks`).
+    /// Forgets all declines, also of group shares, for tests (feature
+    /// `test-hooks`).
     #[cfg(feature = "test-hooks")]
     pub async fn clear_share_declines_for_tests(&self) -> Result<()> {
-        sqlx::query("DELETE FROM share_declines")
-            .execute(&self.writer)
-            .await?;
+        for table in [
+            "DELETE FROM share_declines",
+            "DELETE FROM group_share_declines",
+        ] {
+            sqlx::query(table).execute(&self.writer).await?;
+        }
         Ok(())
     }
 

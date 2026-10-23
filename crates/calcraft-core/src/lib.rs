@@ -5,7 +5,7 @@
 pub mod api;
 mod names;
 
-pub use names::{CollectionKind, InvalidName, Slug, Username};
+pub use names::{CollectionKind, GroupName, InvalidName, Slug, Username};
 
 /// Product name.
 pub const NAME: &str = "CalCraft";

@@ -464,6 +464,13 @@ scheduled (no invitations in the owner's name). Read-only sharees see private
 events (`CLASS:PRIVATE`/`CONFIDENTIAL`) only as busy stubs. Apple's CalendarServer
 sharing (`CS:share`, notifications, `CS:invite-reply`) is implemented.
 
+Administrators can create **groups** (`calcraft group add team`, `calcraft
+group add-member team alice`, or the admin page; limits in `[groups]`).
+Members share a collection with their group in one step: every member gets
+an own invitation, new members are invited automatically, and removing a
+member ends their access at once. A direct share and group shares of the
+same user combine to the higher access.
+
 Calendars can also be published as secret read-only links
 (`<base_url>/public/<token>.ics`, also `webcal://`), **off by default**:
 
@@ -627,7 +634,7 @@ Integration suites of `calcraft-server` (`crates/calcraft-server/tests/`):
 - **Logs:** `log_secrets.rs` checks that passwords, tokens, TOTP and
   recovery codes, cookies, calendar/contact contents, scheduling
   messages and addresses, attachments (names, contents, ids), share
-  requests and public link tokens never reach the logs.
+  requests, group names and public link tokens never reach the logs.
 - **Scheduling:** `scheduling.rs` (invitations, replies, cancellations,
   recurrence, Schedule-Tag, free/busy, limits, quota, disabled users,
   organizer spoofing, attendee tampering, UID hijacking, concurrent
@@ -636,9 +643,12 @@ Integration suites of `calcraft-server` (`crates/calcraft-server/tests/`):
   method, Apple share/invite-reply flow, REST API, revocation
   indistinguishable from nothing, disabled users, owner's quota and trash,
   scheduling and attachment rules, a share removed during writes),
-  `publish.rs` (public links: options, headers, uniform 404, rate limit);
-  the authorization matrix covers shared, pending, revoked and unshared
-  collections and the new REST routes.
+  `publish.rs` (public links: options, headers, uniform 404, rate limit),
+  `groups.rs` (sharing with groups: joining, leaving, overlapping direct
+  and group shares, declines, limits, CLI); the authorization matrix
+  covers shared, pending, revoked and unshared collections, group shares
+  (member, former member, non-member, pending, ended) and the new REST
+  routes.
 - **Attachments:** `attachments.rs` (add, update, remove, recurrence
   instances, size and count limits, quota with trash, download headers and
   hostile file names, foreign managed ids in PUTs, attendee access and its

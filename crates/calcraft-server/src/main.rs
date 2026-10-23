@@ -1,4 +1,5 @@
 mod backup_cmd;
+mod group_cmd;
 #[cfg(feature = "migrate")]
 mod migrate_cmd;
 mod transfer_cmd;
@@ -38,6 +39,13 @@ enum Command {
         config: ConfigArgs,
         #[command(subcommand)]
         command: users::UserCommand,
+    },
+    /// Manage groups of users (for sharing with a group).
+    Group {
+        #[command(flatten)]
+        config: ConfigArgs,
+        #[command(subcommand)]
+        command: group_cmd::GroupCommand,
     },
     /// Write a consistent backup of the database (safe while the server runs).
     Backup(backup_cmd::BackupArgs),
@@ -141,6 +149,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             runtime()?.block_on(async {
                 let store = open_store(&config).await?;
                 users::run(&store, &config, command).await
+            })
+        }
+        Command::Group { config, command } => {
+            let config = Config::load(config.config.as_deref())?;
+            telemetry::init_cli(&config.logging)?;
+            runtime()?.block_on(async {
+                let store = open_store(&config).await?;
+                group_cmd::run(&store, &config, command).await
             })
         }
         Command::Backup(args) => {

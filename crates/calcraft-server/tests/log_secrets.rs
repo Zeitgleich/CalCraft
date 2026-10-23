@@ -6,7 +6,8 @@
 //! cancellations, free/busy lookups), and no managed attachments (file
 //! names, contents, managed ids), and nothing of sharing (the sharee's
 //! address in a share request, what a sharee writes) or public links (the
-//! secret token, also of unknown links, and the published content).
+//! secret token, also of unknown links, and the published content), and no
+//! group names (REST paths, group principals in share requests).
 //!
 //! This binary holds a single test because it installs the global
 //! subscriber (the same one `logging.format = "json"` uses), which also
@@ -526,6 +527,83 @@ mod api {
         assert_eq!(forged.status, StatusCode::UNAUTHORIZED);
         app_password
     }
+
+    /// Groups with marked names: created, members added and removed,
+    /// alice's calendar shared with the group (REST and Apple `CS:share`
+    /// with the group principal), the group deleted. Runs before
+    /// [`flows`], which turns on two-factor authentication.
+    pub async fn group_flows(app: &Router, alice_auth: &str, secrets: &mut Vec<String>) {
+        let session = cookie(&login(app, ALICE.0, ALICE.1, None).await, secrets);
+        let session = Some(session.as_str());
+        let group = format!("{MARKER}grp").to_lowercase();
+        let display = format!("{MARKER}GroupName");
+        secrets.extend([group.clone(), display.clone()]);
+        let (reply, _) = call(
+            app,
+            "POST",
+            "/api/v1/admin/groups",
+            session,
+            json!({"name": group, "display_name": display}),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+        for member in ["alice", "bob"] {
+            let (reply, _) = call(
+                app,
+                "PUT",
+                &format!("/api/v1/admin/groups/{group}/members/{member}"),
+                session,
+                Value::Null,
+            )
+            .await;
+            assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        }
+        let (reply, _) = call(
+            app,
+            "PUT",
+            &format!("/api/v1/collections/calendar/default/group-shares/{group}"),
+            session,
+            json!({"access": "read"}),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+        for uri in [
+            "/api/v1/me/groups".to_owned(),
+            format!("/api/v1/admin/groups/{group}"),
+            "/api/v1/collections/calendar/default/group-shares".to_owned(),
+        ] {
+            let (reply, _) = call(app, "GET", &uri, session, Value::Null).await;
+            assert_eq!(reply.status, StatusCode::OK, "{uri}");
+        }
+        let ns = r#"xmlns:D="DAV:" xmlns:CS="http://calendarserver.org/ns/""#;
+        for body in [
+            format!(
+                "<CS:share {ns}><CS:remove><D:href>/dav/principals/groups/{group}/</D:href></CS:remove></CS:share>"
+            ),
+            format!(
+                "<CS:share {ns}><CS:set><D:href>/dav/principals/groups/{group}/</D:href><CS:read-write/></CS:set></CS:share>"
+            ),
+        ] {
+            let reply = dav(
+                app,
+                alice_auth,
+                "POST",
+                "/dav/calendars/alice/default/",
+                "application/xml",
+                body,
+            )
+            .await;
+            assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        }
+        for uri in [
+            format!("/api/v1/collections/calendar/default/group-shares/{group}"),
+            format!("/api/v1/admin/groups/{group}/members/bob"),
+            format!("/api/v1/admin/groups/{group}"),
+        ] {
+            let (reply, _) = call(app, "DELETE", &uri, session, Value::Null).await;
+            assert_eq!(reply.status, StatusCode::NO_CONTENT, "{uri}");
+        }
+    }
 }
 
 /// Managed attachments with marked file names and contents: upload,
@@ -825,6 +903,7 @@ async fn logs_contain_no_secrets_or_contents() {
 
     #[cfg(feature = "api")]
     {
+        api::group_flows(&app, &password_auth, &mut secrets).await;
         let app_password = api::flows(&app, &mut secrets).await;
         let auth = basic(ALICE.0, &app_password);
         secrets.push(auth["Basic ".len()..].to_owned());
@@ -862,6 +941,11 @@ async fn logs_contain_no_secrets_or_contents() {
     assert!(logs.contains("scheduling reply sent"), "{logs}");
     assert!(logs.contains("free/busy lookup"), "{logs}");
     assert!(logs.contains("INSERT INTO shares"), "{logs}");
+    #[cfg(feature = "api")]
+    {
+        assert!(logs.contains("INSERT INTO group_shares"), "{logs}");
+        assert!(logs.contains("admin deleted a group"), "{logs}");
+    }
     // The span of a public link has the path without the token.
     assert!(logs.contains("\"path\":\"/public/\""), "{logs}");
     assert!(logs.lines().count() > 50);

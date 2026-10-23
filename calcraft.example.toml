@@ -211,6 +211,14 @@ max_bytes_per_user = 268435456
 # docs/sharing.md.
 enabled = true
 
+[groups]
+# Groups of users, managed by administrators (calcraft group …, admin page).
+# Members can share a calendar or address book with a group: every member
+# gets an own invitation; leaving the group ends access at once. Most groups
+# on the server (1-10000) and most members of one group (1-1000).
+max_groups = 100
+max_members = 200
+
 [publish]
 # Secret read-only links of calendars (<base_url>/public/<token>.ics, also as
 # webcal://), served without login. Off by default. Links can be "busy only";

@@ -347,6 +347,45 @@ pub const PUBLISH_REVOKE: &str = "Delete link";
 pub const PUBLISH_DETAILS: &str = "Full details";
 pub const PUBLISH_BUSY: &str = "Free/busy only";
 pub const ERR_SHARE_USER: &str = "Please enter the username to share with.";
+pub const ERR_GROUP_NAME_INVALID: &str = "Invalid group name: use 1-64 characters a-z, 0-9, '.', '_' or '-', starting with a letter or digit.";
+
+// Groups
+pub const GROUPS: &str = "Groups";
+pub const GROUPS_HINT: &str = "Groups of users. Members can share a calendar or address book with a whole group: every member gets an own invitation, new members are invited automatically, and removing a member ends their access at once.";
+pub const GROUPS_NONE: &str = "No groups.";
+pub const GROUP_NAME: &str = "Group name";
+pub const GROUP_CREATE: &str = "New group";
+pub const GROUP_MEMBERS: &str = "Members";
+pub const GROUP_ADD_MEMBER: &str = "Add member";
+pub const GROUP_REMOVE_MEMBER: &str = "Remove";
+pub const GROUP_DELETE: &str = "Delete group";
+pub const GROUP_DELETE_CONFIRM: &str = "Delete the group? All its shares end at once.";
+pub const MY_GROUPS: &str = "Your groups";
+pub const MY_GROUPS_HINT: &str =
+    "Groups an administrator added you to. Collections shared with a group reach all its members.";
+pub const GROUP_SHARES: &str = "Shared with groups";
+pub const GROUP_SHARE_WITH: &str = "Group";
+pub const GROUP_SHARE_HINT: &str = "Every member gets an own invitation; people who join later are invited too, people who leave the group lose access.";
+pub const VIA_GROUP: &str = "via group";
+pub const ERR_SHARE_GROUP: &str = "Please enter the group to share with.";
+
+/// "N members".
+pub fn members(count: i64) -> String {
+    if count == 1 {
+        "1 member".to_owned()
+    } else {
+        format!("{count} members")
+    }
+}
+
+/// Result of sharing with a group.
+pub fn group_shared(invited: u32, skipped: u32) -> String {
+    let mut text = format!("{invited} new invitations.");
+    if skipped > 0 {
+        text.push_str(&format!(" {skipped} members cannot be invited right now (too many open invitations, or they declined recently); save again later."));
+    }
+    text
+}
 
 /// Short description of a public link's options.
 pub fn publish_options(busy_only: bool, private: &str, attendees: bool) -> String {

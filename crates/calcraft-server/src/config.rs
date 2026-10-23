@@ -37,6 +37,7 @@ pub struct Config {
     pub scheduling: SchedulingConfig,
     pub attachments: AttachmentsConfig,
     pub sharing: SharingConfig,
+    pub groups: GroupsConfig,
     pub publish: PublishConfig,
     pub logging: LoggingConfig,
 }
@@ -904,6 +905,47 @@ impl Default for SharingConfig {
     }
 }
 
+/// Bounds of `groups.max_groups`.
+pub const GROUPS_MAX_GROUPS: std::ops::RangeInclusive<u32> = 1..=10_000;
+/// Bounds of `groups.max_members`.
+pub const GROUPS_MAX_MEMBERS: std::ops::RangeInclusive<u32> = 1..=1_000;
+
+/// Groups of users, managed by administrators; collections can be shared
+/// with a group (docs/sharing.md).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GroupsConfig {
+    /// Most groups on the server (1 to 10 000).
+    pub max_groups: u32,
+    /// Most members of one group (1 to 1 000).
+    pub max_members: u32,
+}
+
+impl Default for GroupsConfig {
+    fn default() -> Self {
+        Self {
+            max_groups: 100,
+            max_members: 200,
+        }
+    }
+}
+
+impl GroupsConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !GROUPS_MAX_GROUPS.contains(&self.max_groups) {
+            return Err(ConfigError::Invalid(
+                "groups.max_groups must be between 1 and 10000",
+            ));
+        }
+        if !GROUPS_MAX_MEMBERS.contains(&self.max_members) {
+            return Err(ConfigError::Invalid(
+                "groups.max_members must be between 1 and 1000",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Bounds of `publish.max_bytes` (64 KiB to 64 MiB).
 pub const PUBLISH_MAX_BYTES: std::ops::RangeInclusive<usize> = 64 * 1024..=64 * 1024 * 1024;
 /// Bounds of `publish.max_objects`.
@@ -1121,6 +1163,7 @@ impl Config {
         self.scheduling.validate()?;
         self.attachments.validate()?;
         self.publish.validate()?;
+        self.groups.validate()?;
         self.oidc.validate()
     }
 }

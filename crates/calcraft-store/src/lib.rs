@@ -23,6 +23,7 @@ use sqlx::{
 mod accounts;
 mod attachments;
 mod backup;
+mod groups;
 mod health;
 mod items;
 mod oidc;
@@ -44,6 +45,10 @@ pub use backup::{
     BackupInfo, DEFAULT_ACQUIRE_TIMEOUT, RestoreInfo, StoreOptions, backup_database,
     latest_migration, pre_migration_backups, restore_database,
 };
+pub use groups::{
+    Group, GroupMember, GroupShare, GroupShareOutcome, MAX_GROUP_SHARES_PER_COLLECTION,
+    MAX_SHARES_PER_GROUP, MemberAdded,
+};
 pub use health::{PROBE_ACQUIRE_TIMEOUT, PROBE_BUSY_TIMEOUT, Readiness};
 pub use items::{
     Change, Item, ItemIndex, ItemMeta, NewItem, Precondition, PutOutcome, QueryCandidate,
@@ -58,7 +63,7 @@ pub use scheduling::{
 };
 pub use sharing::{
     DECLINE_COOLDOWN_SECS, MAX_PENDING_PER_OWNER, MAX_PENDING_SHARES_PER_USER,
-    MAX_SHARES_PER_COLLECTION, SetShare, Share, ShareAccess, ShareView, SharedVia,
+    MAX_SHARES_PER_COLLECTION, SetShare, Share, ShareAccess, ShareChanges, ShareView, SharedVia,
 };
 pub use subscriptions::{
     FeedItem, FeedState, NewSubscription, ReplaceOutcome, Subscription, SubscriptionFailure,
@@ -105,6 +110,12 @@ pub enum StoreError {
     /// ([`DECLINE_COOLDOWN_SECS`]).
     #[error("the user declined a share recently")]
     ShareDeclined,
+    /// A group with this name exists already.
+    #[error("group already exists")]
+    GroupExists,
+    /// The group does not exist.
+    #[error("no such group")]
+    NoSuchGroup,
     /// The calendar user address is already used by another user.
     #[error("address already in use")]
     AddressTaken,

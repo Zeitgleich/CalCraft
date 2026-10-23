@@ -56,6 +56,8 @@ fn slugs_and_usernames() {
     assert!(check_slug("").is_err());
     assert!(check_username("alice").is_ok());
     assert!(check_username("Alice Smith").is_err());
+    assert!(check_group_name("team.a").is_ok());
+    assert!(check_group_name("Team A").is_err());
 }
 
 #[test]

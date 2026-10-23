@@ -38,6 +38,7 @@ pub fn Settings() -> impl IntoView {
                 <SsoFacts />
             </dl>
         </section>
+        <super::groups::MyGroups />
         <Invitations />
         <PasswordForm />
         <TwoFactor />

@@ -1,7 +1,7 @@
 //! Client-side form validation. The server stays authoritative; these
 //! checks only give quicker and clearer feedback.
 
-use calcraft_core::{Slug, Username};
+use calcraft_core::{GroupName, Slug, Username};
 
 use crate::text;
 
@@ -48,6 +48,13 @@ pub fn check_username(username: &str) -> Result<(), &'static str> {
         .parse::<Username>()
         .map(|_| ())
         .map_err(|_| text::ERR_USERNAME_INVALID)
+}
+
+/// Checks a group name (same rules as usernames).
+pub fn check_group_name(name: &str) -> Result<(), &'static str> {
+    name.parse::<GroupName>()
+        .map(|_| ())
+        .map_err(|_| text::ERR_GROUP_NAME_INVALID)
 }
 
 /// Checks a new password and its confirmation.

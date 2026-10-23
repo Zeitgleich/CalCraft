@@ -40,3 +40,15 @@ fn deserialize_validates() {
         "alice"
     );
 }
+
+#[test]
+fn group_names_follow_the_username_rules() {
+    for name in ["staff", "team.a", "g_1", "x-y"] {
+        assert!(name.parse::<GroupName>().is_ok(), "{name}");
+    }
+    for name in ["", ".", "..", "-x", "Staff", "a/b", "a,b", "a b", "ä"] {
+        assert!(name.parse::<GroupName>().is_err(), "{name:?}");
+    }
+    assert!("a".repeat(64).parse::<GroupName>().is_ok());
+    assert!("a".repeat(65).parse::<GroupName>().is_err());
+}

@@ -11,6 +11,7 @@ mod admin;
 mod api;
 mod app_passwords;
 mod collections;
+mod groups;
 mod login;
 mod sharing;
 mod subscriptions;

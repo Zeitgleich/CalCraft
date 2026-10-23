@@ -123,21 +123,36 @@ pub fn SharePanel(info: CollectionInfo, publish: bool) -> impl IntoView {
                                     } else {
                                         t::SHARE_PENDING
                                     };
-                                    let line = format!(
+                                    let mut line = format!(
                                         "{} · {} · {state}",
                                         share.username,
                                         access_text(share.access),
                                     );
+                                    if !share.groups.is_empty() {
+                                        line.push_str(&format!(
+                                            " · {} {}",
+                                            t::VIA_GROUP,
+                                            share.groups.join(", ")
+                                        ));
+                                    }
+                                    // Only a direct share can be removed
+                                    // here; group shares below.
+                                    let direct = share.direct.is_some();
                                     view! {
                                         <li class="item-head">
                                             <span>{line}</span>
-                                            <button
-                                                type="button"
-                                                class="secondary"
-                                                on:click=move |_| remove(name.clone())
-                                            >
-                                                {t::SHARE_REMOVE}
-                                            </button>
+                                            {direct
+                                                .then(|| {
+                                                    view! {
+                                                        <button
+                                                            type="button"
+                                                            class="secondary"
+                                                            on:click=move |_| remove(name.clone())
+                                                        >
+                                                            {t::SHARE_REMOVE}
+                                                        </button>
+                                                    }
+                                                })}
                                         </li>
                                     }
                                 })
@@ -172,6 +187,7 @@ pub fn SharePanel(info: CollectionInfo, publish: bool) -> impl IntoView {
                 </button>
             </form>
             <ErrorText error />
+            <super::groups::GroupSharePanel base=base.clone() read_only on_change=reload />
             {(calendar && publish).then(|| view! { <PublishPanel base=base.clone() /> })}
         </div>
     }
@@ -398,11 +414,18 @@ pub fn SharedWithMe() -> impl IntoView {
                                         CollectionKind::Calendar => t::CALENDAR,
                                         CollectionKind::Addressbook => t::ADDRESS_BOOK,
                                     };
-                                    let line = format!(
+                                    let mut line = format!(
                                         "{kind} · {} {owner} · {}",
                                         t::SHARED_BY,
                                         access_text(share.access),
                                     );
+                                    if !share.groups.is_empty() {
+                                        line.push_str(&format!(
+                                            " · {} {}",
+                                            t::VIA_GROUP,
+                                            share.groups.join(", ")
+                                        ));
+                                    }
                                     let id = share.id.clone();
                                     let accept = format!("/v1/shared/{id}/accept");
                                     let leave = format!("/v1/shared/{id}");

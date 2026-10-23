@@ -38,6 +38,13 @@
 //! principal, display name and home paths), and only for requests to the
 //! shares, alice's homes and her notification collection.
 //!
+//! Group shares too: bob shares calendars with the group `team` (alice is
+//! a member: read, accepted; read-write on top of a direct read share;
+//! pending; ended by bob), with `former` (alice was removed after
+//! accepting) and with `others` (alice is no member). The accepted ones are
+//! targets with the model of the granted (maximum) access; all others are
+//! indistinguishable from alice's unmapped paths.
+//!
 //! The REST API part does the same for every route in
 //! [`calcraft_server::api::ROUTES`]. Both parts check themselves: a DAV
 //! method in [`ALLOWED_METHODS`] or an API route without a matrix entry
@@ -124,6 +131,24 @@ const SHARE_RO: &str = "share-ro";
 const SHARE_RW: &str = "share-rw";
 const SHARE_PENDING: &str = "share-pending";
 const SHARE_REVOKED: &str = "share-revoked";
+/// Bob's calendars shared with groups. `GROUP_RO`: with `team` (alice is
+/// a member), read, accepted. `GROUP_RW`: directly read and with `team`
+/// read-write (the maximum applies), accepted. `GROUP_PENDING`: with
+/// `team`, not accepted. `GROUP_FORMER`: with `former`, accepted, then
+/// alice was removed from the group. `GROUP_OTHER`: with `others` (alice
+/// is no member). `GROUP_REVOKED`: with `team`, accepted, then bob ended
+/// the group share.
+const GROUP_RO: &str = "grp-ro";
+const GROUP_RW: &str = "grp-rw";
+const GROUP_PENDING: &str = "grp-pending";
+const GROUP_FORMER: &str = "grp-former";
+const GROUP_OTHER: &str = "grp-other";
+const GROUP_REVOKED: &str = "grp-revoked";
+/// The group of alice and bob.
+const TEAM: &str = "team";
+/// Shares alice sees (and may write, for the read-write ones).
+const VISIBLE_SHARES: [&str; 4] = [SHARE_RO, SHARE_RW, GROUP_RO, GROUP_RW];
+const WRITABLE_SHARES: [&str; 2] = [SHARE_RW, GROUP_RW];
 const SHARED_EVENT: &str = "shared-ev.ics";
 const SHARED_CARD: &str = "shared-card.vcf";
 /// Prefix of the (visible) data in bob's accepted shares.
@@ -413,7 +438,7 @@ async fn snapshot(store: &Store, user: &User, session: &str) -> String {
         for collection in store.collections(user.id, kind).await.unwrap() {
             // The sharee may change the read-write shares (reset by
             // `reset_shares`), which changes their revision.
-            if collection.slug.as_str() == SHARE_RW {
+            if WRITABLE_SHARES.contains(&collection.slug.as_str()) {
                 out += &format!(
                     "shared read-write {:?} {}\n",
                     collection.kind, collection.slug
@@ -484,16 +509,33 @@ async fn snapshot(store: &Store, user: &User, session: &str) -> String {
 /// Who a user shares with, and what is shared with them.
 async fn shares_snapshot(store: &Store, user: &User) -> String {
     let mut out = String::new();
+    for group in store.groups_of_user(user.id).await.unwrap() {
+        out += &format!("member of {} ({})\n", group.name, group.members);
+    }
     for kind in KINDS {
         for share in store.shares_of_owner(user.id, kind).await.unwrap() {
             out += &format!(
-                "out {:?} {} {} {:?} {}\n",
+                "out {:?} {} {} {:?} {:?} {:?} {}\n",
                 share.kind,
                 share.owner_slug,
                 share.sharee,
                 share.access,
+                share.direct,
+                share.groups,
                 share.accepted()
             );
+        }
+        for collection in store.collections(user.id, kind).await.unwrap() {
+            for share in store
+                .group_shares_of_collection(collection.id)
+                .await
+                .unwrap()
+            {
+                out += &format!(
+                    "group {:?} {} {} {:?}\n",
+                    kind, collection.slug, share.group, share.access
+                );
+            }
         }
     }
     for share in store.incoming_shares(user.id).await.unwrap() {
@@ -593,12 +635,13 @@ async fn seed_shares(store: &Store, alice: &User, bob: &User) -> String {
         .set_share(pending.id, bob.id, alice.id, ShareAccess::ReadWrite, now())
         .await
         .unwrap();
-    reset_shares(store, alice, bob).await;
-    // Dave's invitation to bob.
     let dave = store
         .create_user(&"dave".parse().unwrap(), "unused", None)
         .await
         .unwrap();
+    // Also brings the direct shares into place (`reset_shares`).
+    seed_group_shares(store, alice, bob).await;
+    // Dave's invitation to bob.
     let dave_cal = store
         .collection(
             dave.id,
@@ -627,11 +670,12 @@ async fn reset_shares(store: &Store, alice: &User, bob: &User) {
     // for a day.
     store.clear_share_declines_for_tests().await.unwrap();
     let rw = [
-        (CollectionKind::Calendar, SHARED_EVENT),
-        (CollectionKind::Addressbook, SHARED_CARD),
+        (CollectionKind::Calendar, SHARE_RW, SHARED_EVENT),
+        (CollectionKind::Addressbook, SHARE_RW, SHARED_CARD),
+        (CollectionKind::Calendar, GROUP_RW, SHARED_EVENT),
     ];
-    for (kind, name) in rw {
-        let collection = shared_collection(store, bob, kind, SHARE_RW).await;
+    for (kind, slug, name) in rw {
+        let collection = shared_collection(store, bob, kind, slug).await;
         for meta in store.items(collection.id).await.unwrap() {
             store
                 .delete_item(collection.id, &meta.name, &Precondition::None)
@@ -644,19 +688,21 @@ async fn reset_shares(store: &Store, alice: &User, bob: &User) {
         };
         put_seed(store, &collection, SHARED_PREFIX, name, &content).await;
     }
-    let ro = shared_collection(store, bob, CollectionKind::Calendar, SHARE_RO).await;
-    if store.items(ro.id).await.unwrap().is_empty() {
-        put_seed(
-            store,
-            &ro,
-            SHARED_PREFIX,
-            SHARED_EVENT,
-            &event("@UID@", "bobshared-summary-ro"),
-        )
-        .await;
+    for slug in [SHARE_RO, GROUP_RO] {
+        let ro = shared_collection(store, bob, CollectionKind::Calendar, slug).await;
+        if store.items(ro.id).await.unwrap().is_empty() {
+            put_seed(
+                store,
+                &ro,
+                SHARED_PREFIX,
+                SHARED_EVENT,
+                &event("@UID@", "bobshared-summary-ro"),
+            )
+            .await;
+        }
     }
     for entry in store.trash_entries(bob.id, 1000, 0).await.unwrap().entries {
-        if entry.collection_slug == SHARE_RW {
+        if WRITABLE_SHARES.contains(&entry.collection_slug.as_str()) {
             store.delete_trash_entry(bob.id, &entry.id).await.unwrap();
         }
     }
@@ -693,6 +739,165 @@ async fn reset_shares(store: &Store, alice: &User, bob: &User) {
             "share slug"
         );
     }
+    // The group shares: alice may have left one (which declines it).
+    let team = store
+        .group_by_name(&TEAM.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    for (slug, access, direct, accept) in [
+        (GROUP_RO, ShareAccess::Read, false, true),
+        (GROUP_RW, ShareAccess::ReadWrite, true, true),
+        (GROUP_PENDING, ShareAccess::Read, false, false),
+    ] {
+        let collection = shared_collection(store, bob, CollectionKind::Calendar, slug).await;
+        if incoming
+            .iter()
+            .any(|share| share.collection_id == collection.id && share.accepted() == accept)
+        {
+            continue;
+        }
+        if direct {
+            store
+                .set_share(collection.id, bob.id, alice.id, ShareAccess::Read, now())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        store
+            .set_group_share(collection.id, bob.id, team.id, access, now())
+            .await
+            .unwrap()
+            .unwrap();
+        if !accept {
+            continue;
+        }
+        let share = store
+            .incoming_shares(alice.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|share| share.collection_id == collection.id)
+            .expect("group invitation");
+        let accepted = store
+            .accept_share(alice.id, &share.public_id, now())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            accepted.slug.unwrap().as_str(),
+            format!("bob-{slug}"),
+            "group share slug"
+        );
+    }
+}
+
+/// Bob's calendars shared with groups (see [`GROUP_RO`] and the others):
+/// the groups `team` (alice and bob), `former` (dave; alice was a member)
+/// and `others` (dave).
+async fn seed_group_shares(store: &Store, alice: &User, bob: &User) {
+    let dave = store
+        .user_by_name(&"dave".parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let group = |name: &'static str, members: Vec<i64>| async move {
+        let group = store
+            .create_group(&name.parse().unwrap(), Some(name), 100, now())
+            .await
+            .unwrap();
+        for member in members {
+            store
+                .add_group_member(group.id, member, 100, now())
+                .await
+                .unwrap();
+        }
+        group
+    };
+    let team = group(TEAM, vec![alice.id, bob.id]).await;
+    let former = group("former", vec![alice.id, dave.id]).await;
+    let others = group("others", vec![dave.id]).await;
+    let create = |slug: &'static str, name: &'static str| async move {
+        store
+            .create_collection(
+                bob.id,
+                CollectionKind::Calendar,
+                &slug.parse().unwrap(),
+                Some(name),
+                None,
+                None,
+                "VEVENT,VTODO",
+            )
+            .await
+            .unwrap()
+    };
+    // Filled and shared by `reset_shares`.
+    create(GROUP_RO, "bobshared-grp-ro").await;
+    create(GROUP_RW, "bobshared-grp-rw").await;
+    let pending = create(GROUP_PENDING, "bobshared-grp-pending").await;
+    let gone = [
+        (
+            create(GROUP_FORMER, "zqbobmark-grpformername").await,
+            &former,
+        ),
+        (create(GROUP_OTHER, "zqbobmark-grpothername").await, &others),
+        (
+            create(GROUP_REVOKED, "zqbobmark-grprevokedname").await,
+            &team,
+        ),
+    ];
+    let accept = |collection_id: i64| async move {
+        let share = store
+            .incoming_shares(alice.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|share| share.collection_id == collection_id)
+            .unwrap();
+        store
+            .accept_share(alice.id, &share.public_id, now())
+            .await
+            .unwrap()
+            .unwrap();
+    };
+    for (collection, _) in &gone {
+        let name = format!("zqbobmark-{}.ics", collection.slug);
+        put_seed(store, collection, MARK, &name, &event("@UID@", &name)).await;
+    }
+    put_seed(
+        store,
+        &pending,
+        MARK,
+        "zqbobmark-grp-pending.ics",
+        &event("@UID@", "zqbobmark-grp-pending-summary"),
+    )
+    .await;
+    for (collection, group) in &gone {
+        store
+            .set_group_share(
+                collection.id,
+                bob.id,
+                group.id,
+                ShareAccess::ReadWrite,
+                now(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    for (collection, _) in &gone[..1] {
+        accept(collection.id).await;
+    }
+    accept(gone[2].0.id).await;
+    store
+        .remove_group_member(former.id, alice.id)
+        .await
+        .unwrap();
+    store
+        .remove_group_share(gone[2].0.id, bob.id, team.id)
+        .await
+        .unwrap();
+    reset_shares(store, alice, bob).await;
 }
 
 /// Puts an extra object into the default calendar and deletes it into the
@@ -834,11 +1039,21 @@ async fn fixture() -> Fixture {
         "zqbobmark-shareddead".to_owned(),
         bob_link_id.clone(),
     ]);
+    // Group shares alice cannot see (any more).
+    markers.extend(
+        [
+            "zqbobmark-grpformername",
+            "zqbobmark-grpothername",
+            "zqbobmark-grprevokedname",
+            "zqbobmark-grp-pending-summary",
+        ]
+        .map(str::to_owned),
+    );
     let mut bob_sync_token = String::new();
     for kind in KINDS {
         for collection in store.collections(bob.id, kind).await.unwrap() {
             // What bob shares with alice is visible to her on purpose.
-            if [SHARE_RO, SHARE_RW].contains(&collection.slug.as_str()) {
+            if VISIBLE_SHARES.contains(&collection.slug.as_str()) {
                 continue;
             }
             // The collection identity inside sync tokens.
@@ -1232,6 +1447,8 @@ fn shared_targets() -> Vec<Target> {
     let ro = format!("/dav/calendars/alice/bob-{SHARE_RO}/");
     let rw = format!("/dav/calendars/alice/bob-{SHARE_RW}/");
     let ab = format!("/dav/addressbooks/alice/bob-{SHARE_RW}/");
+    let gro = format!("/dav/calendars/alice/bob-{GROUP_RO}/");
+    let grw = format!("/dav/calendars/alice/bob-{GROUP_RW}/");
     vec![
         Target::new(ro.clone(), Res::Calendar, SharedRead),
         Target::new(format!("{ro}{SHARED_EVENT}"), Res::CalObject, SharedRead),
@@ -1253,6 +1470,64 @@ fn shared_targets() -> Vec<Target> {
             format!("{ab}missing.vcf"),
             Res::MissingCardObject,
             SharedWrite,
+        ),
+        // Shared with a group of alice's (read; read-write on top of a
+        // direct read share).
+        Target::new(gro.clone(), Res::Calendar, SharedRead),
+        Target::new(format!("{gro}{SHARED_EVENT}"), Res::CalObject, SharedRead),
+        Target::new(
+            format!("{gro}missing.ics"),
+            Res::MissingCalObject,
+            SharedRead,
+        ),
+        Target::new(grw.clone(), Res::Calendar, SharedWrite),
+        Target::new(format!("{grw}{SHARED_EVENT}"), Res::CalObject, SharedWrite),
+        // Group shares pending, of a group alice left, of a group she is
+        // no member of, and ended by bob: nothing in alice's home.
+        Target::new(
+            format!("/dav/calendars/alice/bob-{GROUP_PENDING}/"),
+            Res::UnmappedCal,
+            Own,
+        ),
+        Target::new(
+            format!("/dav/calendars/alice/bob-{GROUP_PENDING}/zqbobmark-grp-pending.ics"),
+            Res::Invalid,
+            Own,
+        ),
+        Target::new(
+            format!("/dav/calendars/alice/bob-{GROUP_FORMER}/"),
+            Res::UnmappedCal,
+            Own,
+        ),
+        Target::new(
+            format!("/dav/calendars/alice/bob-{GROUP_FORMER}/zqbobmark-{GROUP_FORMER}.ics"),
+            Res::Invalid,
+            Own,
+        ),
+        Target::new(
+            format!("/dav/calendars/alice/bob-{GROUP_OTHER}/"),
+            Res::UnmappedCal,
+            Own,
+        ),
+        Target::new(
+            format!("/dav/calendars/alice/bob-{GROUP_REVOKED}/"),
+            Res::UnmappedCal,
+            Own,
+        ),
+        Target::new(
+            format!("/dav/calendars/alice/bob-{GROUP_REVOKED}/zqbobmark-{GROUP_REVOKED}.ics"),
+            Res::Invalid,
+            Own,
+        ),
+        Target::new(
+            format!("/dav/calendars/bob/{GROUP_RO}/{SHARED_EVENT}"),
+            Res::CalObject,
+            Other,
+        ),
+        Target::new(
+            format!("/dav/calendars/bob/{GROUP_OTHER}/zqbobmark-{GROUP_OTHER}.ics"),
+            Res::CalObject,
+            Other,
         ),
         // Offered but not accepted, and revoked: nothing in alice's home.
         Target::new(
@@ -2708,6 +2983,9 @@ mod api_matrix {
                 .body(json!({"password": BOB_PW, "code": "123456"})),
             // Only ever the session's own setting (scheduling is on here).
             case("patch", "/v1/me/scheduling", 204).body(json!({"accept_invitations": true})),
+            // Alice's groups with their members (bob is in `team` on
+            // purpose); never `others` or `former`.
+            case("get", "/v1/me/groups", 200).identity(),
             case("get", "/v1/app-passwords", 200),
             case("post", "/v1/app-passwords", 201).body(json!({"name": "zzattack"})),
             case("delete", "/v1/app-passwords/{id}", 404)
@@ -2749,6 +3027,31 @@ mod api_matrix {
             .uri(
                 format!("{shared_cal}/shares/alice"),
                 format!("{no_cal}/shares/alice"),
+            ),
+            // Group shares: only the owner, and only with groups of their
+            // own; a group alice is no member of is like none.
+            case("get", "/v1/collections/{kind}/{slug}/group-shares", 404).uri(
+                format!("{shared_cal}/group-shares"),
+                format!("{no_cal}/group-shares"),
+            ),
+            case(
+                "put",
+                "/v1/collections/{kind}/{slug}/group-shares/{group}",
+                404,
+            )
+            .uri(
+                "/api/v1/collections/calendar/default/group-shares/others".to_owned(),
+                "/api/v1/collections/calendar/default/group-shares/zz-nogroup".to_owned(),
+            )
+            .body(json!({"access": "read-write"})),
+            case(
+                "delete",
+                "/v1/collections/{kind}/{slug}/group-shares/{group}",
+                404,
+            )
+            .uri(
+                format!("{shared_cal}/group-shares/{}", super::TEAM),
+                format!("{no_cal}/group-shares/{}", super::TEAM),
             ),
             case("get", "/v1/collections/{kind}/{slug}/publish", 404)
                 .uri(format!("{bob_cal}/publish"), format!("{no_cal}/publish")),
@@ -2804,6 +3107,24 @@ mod api_matrix {
             ),
             case("get", "/v1/admin/update", 403),
             case("get", "/v1/admin/shares", 403),
+            case("get", "/v1/admin/groups", 403),
+            case("post", "/v1/admin/groups", 403).body(json!({"name": "zzattack"})),
+            case("get", "/v1/admin/groups/{group}", 403).uri(
+                "/api/v1/admin/groups/others".to_owned(),
+                "/api/v1/admin/groups/zz-nogroup".to_owned(),
+            ),
+            case("delete", "/v1/admin/groups/{group}", 403).uri(
+                "/api/v1/admin/groups/others".to_owned(),
+                "/api/v1/admin/groups/zz-nogroup".to_owned(),
+            ),
+            case("put", "/v1/admin/groups/{group}/members/{username}", 403).uri(
+                "/api/v1/admin/groups/others/members/alice".to_owned(),
+                "/api/v1/admin/groups/zz-nogroup/members/alice".to_owned(),
+            ),
+            case("delete", "/v1/admin/groups/{group}/members/{username}", 403).uri(
+                format!("/api/v1/admin/groups/{}/members/bob", super::TEAM),
+                "/api/v1/admin/groups/zz-nogroup/members/bob".to_owned(),
+            ),
             case("post", "/v1/auth/logout", 204),
         ]
     }
@@ -3067,6 +3388,42 @@ mod api_matrix {
         )
         .await;
         assert_eq!(reply.status, 404);
+
+        // Alice sees her own groups only; admins see every group and its
+        // members.
+        let (_, reply) = call(&fx, "get", "/api/v1/me/groups", Some(&alice2), true, None).await;
+        assert_eq!(reply.status, 200);
+        let groups: Value = serde_json::from_str(&reply.body).unwrap();
+        let names: Vec<&str> = groups
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, [super::TEAM]);
+        assert!(!reply.body.contains("dave"), "{}", reply.body);
+        let (_, reply) = call(
+            &fx,
+            "get",
+            "/api/v1/admin/groups/others",
+            Some(&admin_session),
+            true,
+            None,
+        )
+        .await;
+        assert_eq!(reply.status, 200);
+        assert!(reply.body.contains("\"dave\""), "{}", reply.body);
+        let (_, reply) = call(
+            &fx,
+            "get",
+            "/api/v1/admin/groups",
+            Some(&admin_session),
+            true,
+            None,
+        )
+        .await;
+        assert_eq!(reply.status, 200);
+        assert!(reply.body.contains("\"former\""), "{}", reply.body);
 
         // Bob's session still works.
         let (_, me) = call(&fx, "get", "/api/v1/me", Some(&fx.bob_session), true, None).await;

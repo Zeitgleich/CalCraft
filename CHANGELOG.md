@@ -47,6 +47,30 @@ follow [Semantic Versioning](https://semver.org/). Release process:
   scheduling objects.
 - Database migration `0013_sharing` (tables `shares`, `share_declines`,
   `publish_links`, column `items.private`).
+- Groups of users, managed by administrators: `calcraft group
+  add|remove|add-member|remove-member|list`, `/api/v1/admin/groups`, a
+  *Groups* section on the admin page; limits `[groups] max_groups` (100)
+  and `max_members` (200). Users see their own groups and fellow members
+  (`/api/v1/me/groups`, account page).
+- Sharing with a group (members of the group and administrators):
+  `/api/v1/collections/{kind}/{slug}/group-shares/{group}`, *Shared with
+  groups* in the share panel, Apple `CS:share` with the group principal URL
+  `/dav/principals/groups/<group>/`. Every member gets their own invitation
+  (same pending limits and 24-hour block as direct invitations, declines
+  remembered per member); new members are invited, removed members and
+  deleted groups lose access at once. Direct and group shares of the same
+  user combine to the higher access; removing one keeps the other. See
+  [docs/sharing.md](docs/sharing.md#groups).
+- Database migration `0014_groups` (tables `user_groups`, `group_members`,
+  `group_shares`, `group_share_declines`, column `shares.direct_access`;
+  existing shares become direct shares).
+
+### Changed
+
+- `DELETE /api/v1/collections/{kind}/{slug}/shares/{username}` and
+  `CS:remove` of a user remove only the direct share; access through a
+  shared group stays. Share lists (`ShareInfo`, `IncomingShareInfo`,
+  `AdminShareInfo`) have the new fields `direct` and `groups`.
 
 ## [0.1.0-alpha.3] – 2026-10-23
 

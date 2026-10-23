@@ -322,6 +322,40 @@
         }
       }
     },
+    "/v1/me/groups": {
+      "get": {
+        "summary": "The groups the user is a member of",
+        "tags": [
+          "groups"
+        ],
+        "description": "Each with its enabled members (usernames and display names). Groups the user does not belong to are never listed.",
+        "responses": {
+          "200": {
+            "description": "Groups",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GroupInfo"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/me/password": {
       "post": {
         "summary": "Change the password; ends all sessions",
@@ -1774,6 +1808,206 @@
         }
       }
     },
+    "/v1/collections/{kind}/{slug}/group-shares": {
+      "get": {
+        "summary": "List the group shares of one of the user's collections",
+        "tags": [
+          "sharing",
+          "groups"
+        ],
+        "description": "Every member has their own share in the list of shares. 404 for collections of other users and with sharing disabled.",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "calendar",
+                "addressbook"
+              ]
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Group shares",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GroupShareInfo"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/collections/{kind}/{slug}/group-shares/{group}": {
+      "put": {
+        "summary": "Share with a group, or change the access",
+        "tags": [
+          "sharing",
+          "groups"
+        ],
+        "description": "Every member except the owner gets their own invitation (within the per-sharee invitation limits; members who declined this group share are not invited again). Saving again invites members who could not be invited before. 404 for unknown groups and groups the user is not a member of (administrators: any group), 403 read_only for read-write access to a subscription, 507 limit beyond 20 group shares per collection.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "calendar",
+                "addressbook"
+              ]
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "group",
+            "in": "path",
+            "required": true,
+            "description": "Name of the group.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetShareRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Shared with the group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupShareResult"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Access changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupShareResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "End the share with a group",
+        "tags": [
+          "sharing",
+          "groups"
+        ],
+        "description": "Members lose access at once, unless a direct share or another group share grants it. Needs no membership.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "calendar",
+                "addressbook"
+              ]
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "group",
+            "in": "path",
+            "required": true,
+            "description": "Name of the group.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Ended"
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/collections/{kind}/{slug}/publish": {
       "get": {
         "summary": "List the public links of a calendar",
@@ -2091,6 +2325,265 @@
                 }
               }
             }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/groups": {
+      "get": {
+        "summary": "All groups (administrators)",
+        "tags": [
+          "admin",
+          "groups"
+        ],
+        "responses": {
+          "200": {
+            "description": "Groups, without members",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GroupInfo"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create a group (administrators)",
+        "tags": [
+          "admin",
+          "groups"
+        ],
+        "description": "Names like usernames. 409 if the name is taken, 507 limit beyond groups.max_groups.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateGroup"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupInfo"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/groups/{group}": {
+      "get": {
+        "summary": "A group with all its members (administrators)",
+        "tags": [
+          "admin",
+          "groups"
+        ],
+        "parameters": [
+          {
+            "name": "group",
+            "in": "path",
+            "required": true,
+            "description": "Name of the group.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupInfo"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete a group (administrators)",
+        "tags": [
+          "admin",
+          "groups"
+        ],
+        "description": "All its shares end at once for the members they gave access to.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "group",
+            "in": "path",
+            "required": true,
+            "description": "Name of the group.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/groups/{group}/members/{username}": {
+      "put": {
+        "summary": "Add a member (administrators)",
+        "tags": [
+          "admin",
+          "groups"
+        ],
+        "description": "The user gets an invitation for every collection shared with the group. 404 for unknown users or groups, 507 limit beyond groups.max_members.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "group",
+            "in": "path",
+            "required": true,
+            "description": "Name of the group.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "description": "Username of the member.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Added (or already a member)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberAddedInfo"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Remove a member (administrators)",
+        "tags": [
+          "admin",
+          "groups"
+        ],
+        "description": "The group's shares end for the user at once, unless a direct share or another group share grants access.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          },
+          {
+            "name": "group",
+            "in": "path",
+            "required": true,
+            "description": "Name of the group.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "description": "Username of the member.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed"
           },
           "default": {
             "description": "Error",
@@ -3114,7 +3607,27 @@
             "enum": [
               "read",
               "read-write"
-            ]
+            ],
+            "description": "Effective access: the higher of the direct share and the group shares."
+          },
+          "direct": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "read",
+              "read-write",
+              null
+            ],
+            "description": "The direct share; null if only group shares grant access."
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Groups whose shares give this user access."
           },
           "accepted": {
             "type": "boolean",
@@ -3184,6 +3697,13 @@
               "read-write"
             ]
           },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Groups whose shares give the sharee access."
+          },
           "accepted": {
             "type": "boolean"
           },
@@ -3233,6 +3753,24 @@
               "read-write"
             ]
           },
+          "direct": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "read",
+              "read-write",
+              null
+            ]
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Groups whose shares give the sharee access."
+          },
           "accepted": {
             "type": "boolean"
           },
@@ -3248,6 +3786,153 @@
           "access",
           "accepted",
           "created_at"
+        ]
+      },
+      "GroupInfo": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "member_count": {
+            "type": "integer"
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GroupMemberInfo"
+            },
+            "description": "Members of the group: for members their enabled fellow members, for administrators everybody (in the list of all groups: empty)."
+          },
+          "created_at": {
+            "type": "integer",
+            "description": "Unix seconds"
+          }
+        },
+        "required": [
+          "name",
+          "member_count",
+          "members",
+          "created_at"
+        ]
+      },
+      "GroupMemberInfo": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "disabled": {
+            "type": "boolean",
+            "description": "Only shown to administrators."
+          }
+        },
+        "required": [
+          "username",
+          "disabled"
+        ]
+      },
+      "CreateGroup": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "MemberAddedInfo": {
+        "type": "object",
+        "properties": {
+          "added": {
+            "type": "boolean",
+            "description": "False if the user was a member already."
+          },
+          "invited": {
+            "type": "integer",
+            "description": "New invitations through the group's shares."
+          }
+        },
+        "required": [
+          "added",
+          "invited"
+        ]
+      },
+      "GroupShareInfo": {
+        "type": "object",
+        "properties": {
+          "group": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "access": {
+            "type": "string",
+            "enum": [
+              "read",
+              "read-write"
+            ]
+          },
+          "members": {
+            "type": "integer",
+            "description": "Members other than the owner."
+          },
+          "created_at": {
+            "type": "integer",
+            "description": "Unix seconds"
+          }
+        },
+        "required": [
+          "group",
+          "access",
+          "members",
+          "created_at"
+        ]
+      },
+      "GroupShareResult": {
+        "type": "object",
+        "properties": {
+          "share": {
+            "$ref": "#/components/schemas/GroupShareInfo"
+          },
+          "invited": {
+            "type": "integer",
+            "description": "New invitations of members."
+          },
+          "skipped": {
+            "type": "integer",
+            "description": "Members who cannot be invited now (invitation limits, or a decline of one of your shares within the last day)."
+          }
+        },
+        "required": [
+          "share",
+          "invited",
+          "skipped"
         ]
       },
       "PublishLinkInfo": {

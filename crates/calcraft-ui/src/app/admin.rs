@@ -1,4 +1,4 @@
-//! User administration and update notice (administrators only; the server
+//! User and group administration and update notice (administrators only; the server
 //! checks again).
 
 use calcraft_core::api::{AdminUser, CreateUser, UpdateInfo, UpdateUser};
@@ -61,6 +61,7 @@ pub fn Admin() -> impl IntoView {
             }}
         </section>
         <CreateUserForm on_created=reload />
+        <super::groups::AdminGroups />
     }
 }
 

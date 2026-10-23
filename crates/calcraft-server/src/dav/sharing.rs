@@ -2,7 +2,9 @@
 //! uses (CalendarServer `caldav-sharing`):
 //!
 //! * `POST` of `CS:share` to one of the owner's collections adds, changes
-//!   or removes sharees (by `mailto:` address or principal URL);
+//!   or removes sharees (by `mailto:` address or principal URL) and groups
+//!   (by group principal URL `/dav/principals/groups/<name>/`, only groups
+//!   the owner belongs to);
 //! * every sharee gets an invitation in their notification collection
 //!   (`/dav/notifications/<user>/`, `CS:notification-URL`), one resource
 //!   per pending share, which they accept or decline with a `POST` of
@@ -25,13 +27,13 @@ use axum::{
     http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
 };
-use calcraft_core::{CollectionKind, Username};
+use calcraft_core::{CollectionKind, GroupName, Username};
 use calcraft_dav::{
     DavError, Element, Multistatus, PropName, PropValue, Propfind,
     sharing::{InviteReply, MAX_SHARE_BODY, ShareRequest, SharingPost},
     xml::{NS_CALDAV, NS_CALENDARSERVER as CS, NS_DAV, escape_text},
 };
-use calcraft_store::{Collection, Share, ShareAccess, StoreError, User};
+use calcraft_store::{Collection, Share, ShareAccess, ShareChanges, StoreError, User};
 
 use super::{
     Ctx, XML_CONTENT_TYPE, bad_request, method_not_allowed, multistatus, need_privileges,
@@ -43,7 +45,7 @@ use super::{
     props::respond,
     read_body, store_error,
 };
-use crate::auth::now;
+use crate::{auth::now, groups::shareable_group};
 
 /// Whether a request body is XML (sharing POSTs; other POSTs are
 /// iCalendar or attachments).
@@ -75,6 +77,15 @@ fn href_path(href: &str) -> Option<&str> {
         Some((_, rest)) => rest.find('/').map(|i| &rest[i..]),
         None => href.starts_with('/').then_some(href),
     }
+}
+
+/// The group name of a group principal URL (`/dav/principals/groups/<name>/`,
+/// also as an absolute URL), not yet validated. Group principals are only
+/// accepted in sharing requests; they are not DAV resources.
+fn group_name(href: &str) -> Option<&str> {
+    let rest = href_path(href)?.strip_prefix("/dav/principals/groups/")?;
+    let name = rest.strip_suffix('/').unwrap_or(rest);
+    (!name.is_empty()).then_some(name)
 }
 
 /// The user an href of a sharing request names: a principal URL of this
@@ -134,22 +145,43 @@ pub(super) async fn post_share(ctx: Ctx<'_>, collection: Collection, request: Re
         Err(err) => return bad_request(&err),
     };
     let mut set = Vec::new();
+    let mut set_groups = Vec::new();
+    let mut remove_groups = Vec::new();
     for entry in &request.set {
-        match sharee(ctx, &entry.href).await {
-            Ok(Some(user)) if user.id != ctx.user.id => {
-                let access = if entry.read_write {
-                    ShareAccess::ReadWrite
-                } else {
-                    ShareAccess::Read
-                };
-                set.push((user, access));
+        let access = if entry.read_write {
+            ShareAccess::ReadWrite
+        } else {
+            ShareAccess::Read
+        };
+        if let Some(name) = group_name(&entry.href) {
+            // Only groups the owner may share with; others are unknown.
+            match shareable_group(&ctx.state.store, ctx.user, name).await {
+                Ok(Some(group)) => set_groups.push((group.id, access)),
+                Ok(None) => return cs_error("valid-sharee"),
+                Err(err) => return store_error(err),
             }
+            continue;
+        }
+        match sharee(ctx, &entry.href).await {
+            Ok(Some(user)) if user.id != ctx.user.id => set.push((user, access)),
             Ok(_) => return cs_error("valid-sharee"),
             Err(err) => return store_error(err),
         }
     }
     let mut remove = Vec::new();
     for href in &request.remove {
+        if let Some(name) = group_name(href) {
+            // Ending a group share needs no membership; an unknown group
+            // changes nothing.
+            if let Ok(name) = name.parse::<GroupName>() {
+                match ctx.state.store.group_by_name(&name).await {
+                    Ok(Some(group)) => remove_groups.push(group.id),
+                    Ok(None) => {}
+                    Err(err) => return store_error(err),
+                }
+            }
+            continue;
+        }
         match sharee(ctx, href).await {
             Ok(Some(user)) => remove.push(user),
             // Removing someone who is not a sharee changes nothing.
@@ -159,7 +191,13 @@ pub(super) async fn post_share(ctx: Ctx<'_>, collection: Collection, request: Re
     }
     // A subscription is shared read-only only; refused before anything
     // changes.
-    if collection.read_only && set.iter().any(|(_, access)| access.writable()) {
+    if collection.read_only
+        && set
+            .iter()
+            .map(|(_, access)| access)
+            .chain(set_groups.iter().map(|(_, access)| access))
+            .any(|access| access.writable())
+    {
         return cs_error("read-write-not-allowed");
     }
     // All entries in one transaction: any failure changes nothing.
@@ -168,14 +206,22 @@ pub(super) async fn post_share(ctx: Ctx<'_>, collection: Collection, request: Re
         .map(|(user, access)| (user.id, *access))
         .collect();
     let remove: Vec<i64> = remove.iter().map(|user| user.id).collect();
+    let changes = ShareChanges {
+        set: &set,
+        remove: &remove,
+        set_groups: &set_groups,
+        remove_groups: &remove_groups,
+    };
     match ctx
         .state
         .store
-        .apply_shares(collection.id, ctx.user.id, &set, &remove, now())
+        .apply_share_changes(collection.id, ctx.user.id, &changes, now())
         .await
     {
         Ok(Some(())) => StatusCode::OK.into_response(),
         Ok(None) => not_found(),
+        // A group deleted since it was resolved.
+        Err(StoreError::NoSuchGroup) => cs_error("valid-sharee"),
         Err(StoreError::ReadOnly) => cs_error("read-write-not-allowed"),
         Err(StoreError::NoSuchSharee) => cs_error("valid-sharee"),
         // The sharee declined or left a share of this owner recently.

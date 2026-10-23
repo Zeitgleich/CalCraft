@@ -57,17 +57,90 @@ max_objects = 10000     # most objects of one published calendar (1 – 100 000)
   disabled user's shares disappear at once and come back if the account is
   enabled again. Deleting a user or the collection deletes its shares;
   restoring a collection from the trash does not restore its shares.
-* Limits: 100 shares per collection; 100 pending invitations per sharee
-  in total and 5 from any one owner (further invitations are refused until
+* Limits: 100 direct shares and 20 group shares per collection; 100
+  pending invitations per sharee in total and 5 from any one owner (further invitations are refused until
   they accept or decline some). After a sharee declined or left one of an
   owner's shares, that owner cannot invite them again for 24 hours (REST
   `409`, DAV `403 CS:invite-declined-recently`); the owner removing a share
   blocks nothing. A `CS:share` request with several entries is applied in
   one transaction: if one entry fails, nothing changes.
-* Sharing with groups is not implemented (no groups exist yet). The store
-  keeps one row per sharee (`shares` table, migration `0013_sharing`);
-  groups would add a second kind of grantee without changing the access
-  checks.
+* Collections can also be shared with a **group** of users (see
+  [Groups](#groups)); every member then gets their own invitation. The
+  store keeps one row per sharee and collection (`shares` table, migrations
+  `0013_sharing` and `0014_groups`), whatever grants the access, so every
+  access check reads that one row.
+
+### Groups
+
+Administrators create groups and manage their members (`calcraft group
+add|remove|add-member|remove-member|list`, `/api/v1/admin/groups`, the
+*Groups* section of the admin page). Group names follow the username rules
+(1–64 characters `a-z`, `0-9`, `.`, `_`, `-`). At most `groups.max_groups`
+groups (default 100) with `groups.max_members` members each (default 200):
+
+```toml
+[groups]
+max_groups = 100   # 1 – 10 000
+max_members = 200  # 1 – 1 000
+```
+
+* **Who sees groups.** Users see the groups they are a member of, with
+  their enabled fellow members (account page, `GET /api/v1/me/groups`);
+  sharing with the group reaches exactly these people, so members may know
+  them. Groups a user does not belong to and their members are never shown
+  to them; administrators see all groups and members.
+* **Who shares with a group.** An owner shares one of their collections
+  with a group they are a **member** of (administrators: any group),
+  `read` or `read-write`, in the web UI (*Shared with groups* in the share
+  panel), with `PUT /api/v1/collections/{kind}/{slug}/group-shares/{group}`
+  or with Apple's `CS:share` (below). For everybody else a group does not
+  exist: sharing with a group one is not a member of answers exactly like
+  an unknown group (`404`, DAV `403 CS:valid-sharee`), so group names cannot
+  be probed. Ending a group share needs no membership. At most 20 group
+  shares per collection.
+* **Every member gets their own invitation**, like a direct share: nothing
+  appears until they accept, they decline or leave on their own, and their
+  name, colour and position of the collection are their own. The owner is
+  never invited to their own collection.
+* **Joining** a group invites the new member to every collection shared
+  with the group. **Leaving** (an administrator removes the member) ends
+  the access at once, in the same transaction, with exactly the semantics
+  of a revoked share: writes in flight fail with `404`, and every path of
+  the share, `sync-collection` and attachment downloads answer like paths
+  that never existed. **Deleting a group** ends all its shares the same
+  way; ending a group share does it for all members.
+* **Direct share and group share together** (or several groups): the
+  member has one share (one invitation, one path) with the **higher**
+  access of all grants. Removing one grant keeps the others: removing the
+  direct share of a member of a shared group leaves the group's access (the
+  share stays accepted), ending the group share leaves the direct one, and
+  only when no grant is left does the share end. `DELETE …/shares/{username}`
+  removes only a direct share (`404` for a member who has access only
+  through groups); the owner's share list shows for each sharee their
+  direct access and the groups that grant access. Leaving (or declining)
+  ends all grants at once.
+* **Spam limits apply per member.** An invitation through a group counts
+  against the same limits as a direct one: 5 pending invitations from one
+  owner and 100 in total per sharee, and no invitation within 24 hours
+  after the member declined or left one of the owner's shares. A member
+  who cannot be invited now is **skipped** (the answer says how many);
+  saving the group share again later, or a change of the group's members,
+  invites them then.
+* **Declines are remembered per member.** A member who declines a group
+  share's invitation, or leaves the collection, is never invited by that
+  group share again – not when the owner saves it again, and not after
+  leaving and rejoining the group. A new group share (after ending the old
+  one) is subject to the 24-hour block like a new direct share.
+* **Disabled users** are excluded like everywhere: a disabled member's
+  shares are hidden and come back when the account is enabled again; a
+  disabled owner's group shares are hidden for all members. Disabled users
+  can be members (and get their invitations, hidden while disabled).
+* Groups are not principals of DAV (no `DAV:group-membership`,
+  `group-member-set` or group principal resources), and scheduling does not
+  expand groups: inviting a group to a meeting is not supported (there are
+  no group calendar user addresses). The CLI never prints group names or
+  usernames of a change, and group names are never logged (REST paths with
+  a group name are logged without it).
 
 ### Rights
 
@@ -183,6 +256,13 @@ macOS and iOS Calendar use to share and to accept:
   their principal URL (`/dav/principals/<user>/`). Unknown, disabled users
   and the owner are refused with `403 CS:valid-sharee`, and the request
   changes nothing. Sharees cannot share (`403`).
+* Groups are named by a **group principal URL**,
+  `/dav/principals/groups/<group>/` (also as absolute URL), in `CS:set`
+  and `CS:remove`. Only groups the owner is a member of (administrators:
+  any) are accepted; others are refused like unknown sharees
+  (`403 CS:valid-sharee`, identical answers). The URL is only understood in
+  share requests; it is not a DAV resource (`PROPFIND` answers `404`), and
+  `CS:invite` lists the members' shares, not the group.
 * `CS:invite` on the owner's collection lists all sharees (principal URL,
   name, `invite-accepted`/`invite-noresponse`, access); `DAV:resourcetype`
   has `CS:shared-owner` while it is shared.
@@ -200,8 +280,8 @@ macOS and iOS Calendar use to share and to accept:
   other).
 
 Not implemented (documented deviations): `CS:shared-url` (the owner's URL
-is not reachable for sharees), shares with groups or external e-mail
-addresses (no iMIP), `CS:invite-reply` notifications back to the owner
+is not reachable for sharees), shares with external e-mail addresses (no
+iMIP) or with `mailto:` addresses of groups (groups have none), `CS:invite-reply` notifications back to the owner
 (the owner sees the state in `CS:invite`), sync-collection on the
 notification collection, and the IETF `DAV:share-resource` POST of
 `draft-pot-webdav-resource-sharing`. Sharing has not been tried with a real
@@ -214,7 +294,13 @@ shares but see accepted ones like any other collection.
 |---|---|---|
 | `GET /api/v1/collections/{kind}/{slug}/shares` | owner | shares of a collection |
 | `PUT /api/v1/collections/{kind}/{slug}/shares/{username}` | owner | share (`{"access": "read"\|"read-write"}`) or change access |
-| `DELETE /api/v1/collections/{kind}/{slug}/shares/{username}` | owner | end a share or withdraw the invitation |
+| `DELETE /api/v1/collections/{kind}/{slug}/shares/{username}` | owner | end a direct share or withdraw the invitation (group shares stay) |
+| `GET /api/v1/collections/{kind}/{slug}/group-shares` | owner | group shares of a collection |
+| `PUT /api/v1/collections/{kind}/{slug}/group-shares/{group}` | owner (member of the group, or admin) | share with a group (`{"access": …}`), change access, invite members not invited yet |
+| `DELETE /api/v1/collections/{kind}/{slug}/group-shares/{group}` | owner | end a group share |
+| `GET /api/v1/me/groups` | user | own groups with their enabled members |
+| `GET`/`POST /api/v1/admin/groups`, `GET`/`DELETE /api/v1/admin/groups/{group}` | admin | list, create, show (with members), delete groups |
+| `PUT`/`DELETE /api/v1/admin/groups/{group}/members/{username}` | admin | add or remove a member |
 | `GET /api/v1/shared` | sharee | invitations and accepted shares |
 | `POST /api/v1/shared/{id}/accept` | sharee | accept |
 | `DELETE /api/v1/shared/{id}` | sharee | decline or leave |
@@ -285,7 +371,9 @@ expansion):
 ## Privacy defaults
 
 * Sharing needs acceptance; sharees can decline and leave at any time.
-* Sharees do not see each other; the owner sees all sharees.
+* Sharees do not see each other; the owner sees all sharees. Group members
+  see their fellow members, nobody else sees a group or its members
+  (except administrators).
 * Sharees do not see the owner's client settings (dead properties).
 * `CLASS:PRIVATE`/`CONFIDENTIAL` events are busy stubs for read-only
   sharees (see above) and busy blocks in public links by default;
@@ -307,6 +395,13 @@ owners, the miss limit), the authorization matrix (`tests/authz_matrix.rs`:
 shared read, shared read-write, pending, revoked and not shared
 collections against every method, destination and credential; the new
 REST routes), `tests/log_secrets.rs` (share requests, sharee writes, link
-tokens), store tests (`sharing/tests.rs`, `publish/tests.rs`), parser tests
+tokens, group names), `tests/groups.rs` (group management and the CLI,
+each member's invitation, joining and leaving incl. `sync-collection` and
+attachments, direct and group shares together, deleting groups,
+remembered declines, limits, disabled users, who may share with a group,
+`CS:share` with group principals, a member removed while writing; the
+matrix also covers group shares: accepted read and read-write, pending,
+former member, non-member, ended), store tests (`sharing/tests.rs`,
+`groups/tests.rs`, `publish/tests.rs`, the `0014` upgrade), parser tests
 and the `dav_xml` fuzz target (sharing bodies), and the python-caldav
 compatibility job (`tests/compat/sharing_client.py`).

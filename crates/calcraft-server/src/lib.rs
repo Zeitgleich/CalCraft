@@ -7,6 +7,7 @@ pub mod attachments;
 pub mod auth;
 pub mod config;
 pub mod dav;
+pub mod groups;
 #[cfg(feature = "https-client")]
 pub mod https;
 pub mod limits;
