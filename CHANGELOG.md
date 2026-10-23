@@ -33,9 +33,20 @@ follow [Semantic Versioning](https://semver.org/). Release process:
   `base_url`): `<base_url>/public/<token>.ics` (also `webcal://`), 256-bit
   tokens stored as hashes, uniform 404, per-client limit for unknown tokens,
   ETag/304, optional "busy only", private events as busy blocks (or left
-  out or shown), never attachments, alarms or (unless chosen) organizer and
-  attendee addresses.
-- Database migration `0013_sharing` (tables `shares` and `publish_links`).
+  out or shown), a property whitelist (never attachments, alarms,
+  related-to, URLs, `X-` properties or, unless chosen, organizer and
+  attendee addresses), left-out overrides excluded from their series.
+- Read-only sharees see private events (`CLASS` other than `PUBLIC`,
+  inherited by overrides) as busy stubs (times, recurrence, status, class,
+  `SUMMARY:Busy`) with an ETag of their own, everywhere (GET, PROPFIND,
+  multiget, query, sync), and cannot download their attachments.
+- Limits against invitation spam: 5 pending invitations per owner and
+  sharee, 24 hours without new invitations from an owner after the sharee
+  declined or left one of their shares; multi-entry `CS:share` requests are
+  all or nothing. Sharees cannot MOVE/COPY over or move away the owner's
+  scheduling objects.
+- Database migration `0013_sharing` (tables `shares`, `share_declines`,
+  `publish_links`, column `items.private`).
 
 ## [0.1.0-alpha.3] – 2026-10-23
 

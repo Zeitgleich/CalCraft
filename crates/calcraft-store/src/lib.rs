@@ -57,8 +57,8 @@ pub use scheduling::{
     FreeBusyCandidate, InboxMessage, MAX_EMAIL_LEN, NewInboxMessage, SchedulingObject,
 };
 pub use sharing::{
-    MAX_PENDING_SHARES_PER_USER, MAX_SHARES_PER_COLLECTION, SetShare, Share, ShareAccess,
-    ShareView, SharedVia,
+    DECLINE_COOLDOWN_SECS, MAX_PENDING_PER_OWNER, MAX_PENDING_SHARES_PER_USER,
+    MAX_SHARES_PER_COLLECTION, SetShare, Share, ShareAccess, ShareView, SharedVia,
 };
 pub use subscriptions::{
     FeedItem, FeedState, NewSubscription, ReplaceOutcome, Subscription, SubscriptionFailure,
@@ -101,6 +101,10 @@ pub enum StoreError {
     /// DAV answers 404, like for any path the user cannot see.
     #[error("share no longer exists")]
     ShareRevoked,
+    /// Sharing: the user declined or left a share of this owner recently
+    /// ([`DECLINE_COOLDOWN_SECS`]).
+    #[error("the user declined a share recently")]
+    ShareDeclined,
     /// The calendar user address is already used by another user.
     #[error("address already in use")]
     AddressTaken,

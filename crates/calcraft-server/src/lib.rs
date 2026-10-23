@@ -16,6 +16,7 @@ pub mod net;
 #[cfg(feature = "oidc")]
 pub mod oidc;
 pub mod publish;
+pub mod redact;
 pub mod reindex;
 pub mod scheduling;
 pub mod sd_notify;

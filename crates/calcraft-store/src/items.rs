@@ -634,6 +634,11 @@ impl Store {
                 let existing: Option<String> =
                     row.as_ref().map(|row| row.try_get("etag")).transpose()?;
                 check(precondition, existing.as_deref())?;
+                // Sharees never change scheduling objects (see
+                // `scheduling_object_guard`), checked here atomically.
+                if share.is_some() {
+                    scheduling_object_guard(row.as_ref())?;
+                }
                 if let Some(expected) = schedule.if_match {
                     let current: Option<String> = row
                         .as_ref()
@@ -798,18 +803,22 @@ impl Store {
                 if let Some(share) = share {
                     crate::sharing::ensure_share(&mut tx, share, collection_id, true).await?;
                 }
+                let row = sqlx::query(
+                    "SELECT etag, schedule_tag FROM items WHERE collection_id = ? AND name = ?",
+                )
+                .bind(collection_id)
+                .bind(name)
+                .fetch_optional(&mut *tx)
+                .await?;
                 let existing: Option<String> =
-                    sqlx::query("SELECT etag FROM items WHERE collection_id = ? AND name = ?")
-                        .bind(collection_id)
-                        .bind(name)
-                        .fetch_optional(&mut *tx)
-                        .await?
-                        .map(|row| row.try_get("etag"))
-                        .transpose()?;
+                    row.as_ref().map(|row| row.try_get("etag")).transpose()?;
                 if existing.is_none() {
                     return Ok(false);
                 }
                 check(precondition, existing.as_deref())?;
+                if share.is_some() {
+                    scheduling_object_guard(row.as_ref())?;
+                }
                 sqlx::query("DELETE FROM items WHERE collection_id = ? AND name = ?")
                     .bind(collection_id)
                     .bind(name)
@@ -919,7 +928,7 @@ impl Store {
 
                 let Some(item) = sqlx::query(
                     "SELECT id, uid, etag, component, range_start, range_end, recurring, index_version, \
-                       content FROM items WHERE collection_id = ? AND name = ?",
+                       content, schedule_tag FROM items WHERE collection_id = ? AND name = ?",
                 )
                 .bind(source_collection)
                 .bind(source_name)
@@ -938,6 +947,11 @@ impl Store {
                 let content: Vec<u8> = item.try_get("content")?;
                 let source_id: i64 = item.try_get("id")?;
                 check(source_precondition, Some(&etag))?;
+                // A sharee moves no scheduling object (a copy is fine: it is
+                // a plain object, and the original stays).
+                if source_share.is_some() && remove_source {
+                    scheduling_object_guard(Some(&item))?;
+                }
 
                 if kind == CollectionKind::Calendar.as_str() {
                     let components: String = destination.try_get("components")?;
@@ -946,14 +960,20 @@ impl Store {
                     }
                 }
 
-                let existing = sqlx::query("SELECT 1 FROM items WHERE collection_id = ? AND name = ?")
-                    .bind(destination_collection)
-                    .bind(destination_name)
-                    .fetch_optional(&mut *tx)
-                    .await?
-                    .is_some();
+                let replaced = sqlx::query(
+                    "SELECT schedule_tag FROM items WHERE collection_id = ? AND name = ?",
+                )
+                .bind(destination_collection)
+                .bind(destination_name)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let existing = replaced.is_some();
                 if existing && !overwrite {
                     return Err(StoreError::PreconditionFailed);
+                }
+                // ... nor replaces one.
+                if destination_share.is_some() {
+                    scheduling_object_guard(replaced.as_ref())?;
                 }
 
                 // The UID must stay unique in the destination; the source itself
@@ -1185,6 +1205,21 @@ impl Store {
 
 /// Refuses changes to the objects of a read-only collection (a
 /// subscription); only [`Store::apply_subscription_feed`] writes there.
+/// A sharee's write must not change a scheduling object (one with a
+/// Schedule-Tag: the owner's meetings and invitations), which would change
+/// without the attendees being told: [`StoreError::ReadOnly`]. `row` is the
+/// object's row with its `schedule_tag`, `None` if it does not exist.
+pub(crate) fn scheduling_object_guard(row: Option<&SqliteRow>) -> Result<()> {
+    let tag: Option<String> = row
+        .map(|row| row.try_get("schedule_tag"))
+        .transpose()?
+        .flatten();
+    if tag.is_some() {
+        return Err(StoreError::ReadOnly);
+    }
+    Ok(())
+}
+
 pub(crate) async fn ensure_writable(
     tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
     collection_id: i64,

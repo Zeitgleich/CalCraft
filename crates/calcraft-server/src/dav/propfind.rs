@@ -55,6 +55,7 @@ pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
         }
         Resource::Item(collection, name) => match ctx.state.store.item(collection.id, name).await {
             Ok(Some(item)) => {
+                let item = super::sharing::sharee_item(collection, item);
                 let props = item_properties(user, collection, &item.etag, item.content.len(), None);
                 responses.push(respond(&href_of(&resource, username), &props, &query));
             }
@@ -166,7 +167,20 @@ pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
             }
             Resource::Collection(collection) => match ctx.state.store.items(collection.id).await {
                 Ok(items) => {
-                    for item in items {
+                    for mut item in items {
+                        // Read-only sharees: ETag and length of the stubs of
+                        // private events.
+                        if super::sharing::hides_private(collection) {
+                            match ctx.state.store.item(collection.id, &item.name).await {
+                                Ok(Some(full)) => {
+                                    let seen = super::sharing::sharee_item(collection, full);
+                                    item.etag = seen.etag;
+                                    item.size = i64::try_from(seen.content.len()).unwrap_or(0);
+                                }
+                                Ok(None) => continue,
+                                Err(err) => return store_error(err),
+                            }
+                        }
                         let size = usize::try_from(item.size).unwrap_or(0);
                         let props = item_properties(user, collection, &item.etag, size, None);
                         responses.push(respond(

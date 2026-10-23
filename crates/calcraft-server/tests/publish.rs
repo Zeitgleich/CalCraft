@@ -541,11 +541,48 @@ async fn guessing_clients_are_blocked() {
         let reply = fx.get(&format!("/public/{n:064x}.ics"), 7).await;
         assert_eq!(reply.status, 404);
     }
-    // Now every publish request of that client is refused, even a valid one.
-    let reply = fx.get(&format!("/public/{:064x}.ics", 999), 7).await;
-    assert_eq!(reply.status, 429);
-    assert!(reply.header("retry-after").is_some());
-    assert_eq!(fx.get(&path, 7).await.status, 429);
+    // Now every further miss of that client is refused, also malformed
+    // paths; valid links keep working (a shared address must not lock
+    // others out of their links).
+    for miss in [
+        format!("/public/{:064x}.ics", 999),
+        "/public/%ff.ics".to_owned(),
+    ] {
+        let reply = fx.get(&miss, 7).await;
+        assert_eq!(reply.status, 429, "{miss}");
+        assert!(reply.header("retry-after").is_some());
+    }
+    assert_eq!(fx.get(&path, 7).await.status, 200);
     // Other clients are not affected.
+    assert_eq!(
+        fx.get(&format!("/public/{:064x}.ics", 999), 8).await.status,
+        404
+    );
     assert_eq!(fx.get(&path, 8).await.status, 200);
+}
+
+#[tokio::test]
+async fn malformed_paths_count_as_misses_and_look_like_unknown_ones() {
+    let fx = fixture(&enabled()).await;
+    let nothing = fx.get("/no-such-path", 9).await;
+    // Invalid escapes or UTF-8 never reach a decoder: the same 404 as an
+    // unknown path, never a 400 that tells publishing is on.
+    for path in [
+        "/public/%ff.ics",
+        "/public/%zz.ics",
+        "/public/%C3%28.ics",
+        "/public/a%00.ics",
+    ] {
+        assert_eq!(fx.get(path, 9).await, nothing, "{path}");
+    }
+    // They count against the miss limit like unknown tokens.
+    for n in 0..MISSES_PER_CLIENT - 4 {
+        fx.get(&format!("/public/{n:064x}.ics"), 9).await;
+    }
+    assert_eq!(fx.get("/public/%ff.ics", 9).await.status, 429);
+    // With publishing off, the same paths are the same 404.
+    let off = fixture(&Config::default()).await;
+    for path in ["/public/%ff.ics", "/public/%zz.ics"] {
+        assert_eq!(off.get(path, 9).await, nothing, "{path}");
+    }
 }

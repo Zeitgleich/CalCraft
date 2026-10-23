@@ -1141,6 +1141,10 @@ async fn rest_api_manages_shares() {
     sqlx_set_read_only(&fx.store, fx.alice.id).await;
     let reply = put("alice", "bob", "read-write").await;
     assert_eq!(reply.status, 403, "{}", reply.body);
+    // Bob left a share of alice: she cannot invite him again for a day.
+    let reply = put("alice", "bob", "read").await;
+    assert_eq!(reply.status, 409, "{}", reply.body);
+    fx.store.clear_share_declines_for_tests().await.unwrap();
     assert_eq!(put("alice", "bob", "read").await.status, 201);
 }
 
@@ -1194,6 +1198,31 @@ async fn sharees_never_schedule_in_the_owners_name() {
         403
     );
     assert_eq!(fx.dav("bob", "DELETE", &item, &[], "").await.status, 403);
+    // Nor move it away, nor move or copy a plain object over it.
+    let before = fx
+        .dav("alice", "GET", &format!("{ALICE_CAL}own.ics"), &[], "")
+        .await;
+    for (method, from, to) in [
+        ("MOVE", item.clone(), format!("{share}moved.ics")),
+        ("MOVE", format!("{share}m.ics"), item.clone()),
+        ("COPY", format!("{share}m.ics"), item.clone()),
+    ] {
+        let reply = fx
+            .dav(
+                "bob",
+                method,
+                &from,
+                &[("destination", &to), ("overwrite", "T")],
+                "",
+            )
+            .await;
+        assert_eq!(reply.status, 403, "{method} {from} -> {to}: {}", reply.body);
+    }
+    let after = fx
+        .dav("alice", "GET", &format!("{ALICE_CAL}own.ics"), &[], "")
+        .await;
+    assert_eq!(before, after);
+    assert!(after.header("schedule-tag").is_some());
     let reply = fx
         .dav(
             "bob",
@@ -1318,4 +1347,332 @@ async fn share_removed_while_the_sharee_writes() {
         .put("bob", &format!("{share}late.ics"), &event("late", "x", ""))
         .await;
     assert_eq!(after.status, 404);
+}
+
+// --- private events -----------------------------------------------------
+
+/// The value of the first `<{tag}>` element.
+fn element<'a>(body: &'a str, tag: &str) -> &'a str {
+    let open = format!("<{tag}>");
+    let start = body.find(&open).unwrap() + open.len();
+    let end = body[start..].find('<').unwrap() + start;
+    &body[start..end]
+}
+
+#[tokio::test]
+async fn read_sharees_see_private_events_as_busy_stubs() {
+    let fx = fixture_with(config(false, true)).await;
+    let private = event(
+        "up",
+        "Doctor",
+        "CLASS:PRIVATE\r\nRRULE:FREQ=WEEKLY;COUNT=3\r\nDESCRIPTION:Diagnosis\r\nLOCATION:Clinic\r\nATTENDEE:mailto:doc@example.org\r\nURL:https://clinic.example/x\r\nX-NOTE:secret\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Pills\r\nTRIGGER:-PT5M\r\nEND:VALARM\r\n",
+    );
+    assert_eq!(
+        fx.put("alice", &format!("{ALICE_CAL}p.ics"), &private)
+            .await
+            .status,
+        201
+    );
+    assert_eq!(
+        fx.put(
+            "alice",
+            &format!("{ALICE_CAL}o.ics"),
+            &event("uo", "Open meeting", "DESCRIPTION:Agenda\r\n")
+        )
+        .await
+        .status,
+        201
+    );
+    let reply = fx
+        .dav(
+            "alice",
+            "POST",
+            &format!("{ALICE_CAL}p.ics?action=attachment-add"),
+            &[("content-type", "text/plain")],
+            "lab results",
+        )
+        .await;
+    assert_eq!(reply.status, 201);
+    let managed = reply.header("cal-managed-id").unwrap().to_owned();
+    let share = fx.share("calendar", "bob", "read").await;
+    let rw = fx.share("calendar", "carol", "read-write").await;
+
+    // GET: a stub.
+    let stub = fx
+        .dav("bob", "GET", &format!("{share}p.ics"), &[], "")
+        .await;
+    assert_eq!(stub.status, 200);
+    for kept in [
+        "UID:up",
+        "DTSTART:20261021T100000Z",
+        "RRULE:FREQ=WEEKLY",
+        "CLASS:PRIVATE",
+        "SUMMARY:Busy",
+    ] {
+        assert!(stub.body.contains(kept), "{kept}:\n{}", stub.body);
+    }
+    for hidden in [
+        "Doctor",
+        "Diagnosis",
+        "Clinic",
+        "doc@example.org",
+        "clinic.example",
+        "secret",
+        "VALARM",
+        "Pills",
+        "ATTACH",
+        &managed,
+    ] {
+        assert!(!stub.body.contains(hidden), "{hidden}:\n{}", stub.body);
+    }
+    let full = fx
+        .dav("alice", "GET", &format!("{ALICE_CAL}p.ics"), &[], "")
+        .await;
+    assert!(full.body.contains("Diagnosis") && full.body.contains("ATTACH"));
+    let etag = stub.header("etag").unwrap().to_owned();
+    assert_ne!(Some(etag.as_str()), full.header("etag"));
+    // The read-write sharee and the owner see everything.
+    let theirs = fx.dav("carol", "GET", &format!("{rw}p.ics"), &[], "").await;
+    assert_eq!(theirs.body, full.body);
+    assert_eq!(theirs.header("etag"), full.header("etag"));
+    // Public events of the read share are unchanged.
+    let open = fx
+        .dav("bob", "GET", &format!("{share}o.ics"), &[], "")
+        .await;
+    assert!(open.body.contains("Agenda"));
+
+    // PROPFIND (object and listing), multiget, query and sync agree on the
+    // stub's ETag and length.
+    let length = stub.body.len().to_string();
+    let props = "<D:prop><D:getetag/><D:getcontentlength/></D:prop>";
+    let d0 = fx
+        .dav(
+            "bob",
+            "PROPFIND",
+            &format!("{share}p.ics"),
+            &[("depth", "0")],
+            &format!("<D:propfind {NS}>{props}</D:propfind>"),
+        )
+        .await;
+    assert_eq!(element(&d0.body, "d:getetag").replace("&quot;", "\""), etag);
+    assert_eq!(element(&d0.body, "d:getcontentlength"), length);
+    let d1 = fx
+        .dav(
+            "bob",
+            "PROPFIND",
+            &share,
+            &[("depth", "1")],
+            &format!("<D:propfind {NS}>{props}</D:propfind>"),
+        )
+        .await;
+    let entry = &d1.body[d1.body.find(&format!("{share}p.ics")).unwrap()..];
+    assert_eq!(element(entry, "d:getetag").replace("&quot;", "\""), etag);
+    assert_eq!(element(entry, "d:getcontentlength"), length);
+    let multiget = format!(
+        "<C:calendar-multiget {NS}><D:prop><D:getetag/><C:calendar-data/></D:prop><D:href>{share}p.ics</D:href></C:calendar-multiget>"
+    );
+    let report = fx
+        .dav("bob", "REPORT", &share, &[("depth", "1")], &multiget)
+        .await;
+    assert_eq!(
+        element(&report.body, "d:getetag").replace("&quot;", "\""),
+        etag
+    );
+    assert!(report.body.contains("SUMMARY:Busy") && !report.body.contains("Diagnosis"));
+    let query = |start: &str, end: &str| {
+        format!(
+            r#"<C:calendar-query {NS}><D:prop><D:getetag/><C:calendar-data/></D:prop><C:filter><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:time-range start="{start}" end="{end}"/></C:comp-filter></C:comp-filter></C:filter></C:calendar-query>"#
+        )
+    };
+    // The second instance, from the recurrence rule the stub keeps.
+    let hit = fx
+        .dav(
+            "bob",
+            "REPORT",
+            &share,
+            &[("depth", "1")],
+            &query("20261028T000000Z", "20261029T000000Z"),
+        )
+        .await;
+    assert!(
+        hit.body.contains(&format!("{share}p.ics")) && !hit.body.contains("Diagnosis"),
+        "{}",
+        hit.body
+    );
+    let owner_hit = fx
+        .dav(
+            "alice",
+            "REPORT",
+            ALICE_CAL,
+            &[("depth", "1")],
+            &query("20261028T000000Z", "20261029T000000Z"),
+        )
+        .await;
+    assert!(owner_hit.body.contains("p.ics"));
+    let miss = fx
+        .dav(
+            "bob",
+            "REPORT",
+            &share,
+            &[("depth", "1")],
+            &query("20271028T000000Z", "20271029T000000Z"),
+        )
+        .await;
+    assert!(!miss.body.contains("p.ics"));
+    let sync = format!(
+        "<D:sync-collection {NS}><D:sync-token/><D:sync-level>1</D:sync-level><D:prop><D:getetag/><C:calendar-data/></D:prop></D:sync-collection>"
+    );
+    let synced = fx.dav("bob", "REPORT", &share, &[], &sync).await;
+    let entry = &synced.body[synced.body.find(&format!("{share}p.ics")).unwrap()..];
+    assert_eq!(element(entry, "d:getetag").replace("&quot;", "\""), etag);
+    assert!(!synced.body.contains("Diagnosis"));
+
+    // No oracle: a text-match on the hidden text answers exactly like one
+    // on text that exists nowhere (and like on the user's own calendar).
+    let text_match = |text: &str| {
+        format!(
+            r#"<C:calendar-query {NS}><D:prop><D:getetag/></D:prop><C:filter><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:prop-filter name="DESCRIPTION"><C:text-match>{text}</C:text-match></C:prop-filter></C:comp-filter></C:comp-filter></C:filter></C:calendar-query>"#
+        )
+    };
+    let hidden = fx
+        .dav(
+            "bob",
+            "REPORT",
+            &share,
+            &[("depth", "1")],
+            &text_match("Diagnosis"),
+        )
+        .await;
+    let absent = fx
+        .dav(
+            "bob",
+            "REPORT",
+            &share,
+            &[("depth", "1")],
+            &text_match("zz-nowhere"),
+        )
+        .await;
+    let own = fx
+        .dav(
+            "bob",
+            "REPORT",
+            "/dav/calendars/bob/default/",
+            &[("depth", "1")],
+            &text_match("Diagnosis"),
+        )
+        .await;
+    assert_eq!(hidden, absent);
+    assert_eq!(hidden, own);
+    assert!(!hidden.body.contains("p.ics"));
+
+    // The attachment of the private event: not for the read sharee, like
+    // an id that was never issued; the read-write sharee may.
+    let attachment = format!("/dav/attachments/{managed}");
+    let denied = fx.dav("bob", "GET", &attachment, &[], "").await;
+    let missing = fx
+        .dav(
+            "bob",
+            "GET",
+            "/dav/attachments/0123456789abcdef0123456789abcdef",
+            &[],
+            "",
+        )
+        .await;
+    assert_eq!(denied, missing);
+    assert_eq!(
+        fx.dav("carol", "GET", &attachment, &[], "").await.status,
+        200
+    );
+
+    // A change of hidden details only keeps the stub (and its ETag); a new
+    // time changes both.
+    let changed = private.replace("Diagnosis", "Other diagnosis");
+    fx.put("alice", &format!("{ALICE_CAL}p.ics"), &changed)
+        .await;
+    let again = fx
+        .dav("bob", "GET", &format!("{share}p.ics"), &[], "")
+        .await;
+    assert_eq!(again.header("etag"), Some(etag.as_str()));
+    assert_eq!(again.body, stub.body);
+    let moved = changed.replace("DTSTART:20261021T100000Z", "DTSTART:20261021T090000Z");
+    fx.put("alice", &format!("{ALICE_CAL}p.ics"), &moved).await;
+    let again = fx
+        .dav("bob", "GET", &format!("{share}p.ics"), &[], "")
+        .await;
+    assert_ne!(again.header("etag"), Some(etag.as_str()));
+    assert!(again.body.contains("DTSTART:20261021T090000Z"));
+}
+
+#[tokio::test]
+async fn a_failing_entry_makes_a_share_request_change_nothing() {
+    let fx = fixture().await;
+    // Alice has as many invitations pending with bob as one owner may.
+    for n in 0..calcraft_store::MAX_PENDING_PER_OWNER {
+        let collection = fx
+            .store
+            .create_collection(
+                fx.alice.id,
+                CollectionKind::Calendar,
+                &format!("c{n}").parse().unwrap(),
+                None,
+                None,
+                None,
+                "VEVENT",
+            )
+            .await
+            .unwrap();
+        fx.store
+            .set_share(
+                collection.id,
+                fx.alice.id,
+                fx.bob.id,
+                calcraft_store::ShareAccess::Read,
+                now(),
+            )
+            .await
+            .unwrap();
+    }
+    let xml = [("content-type", "application/xml")];
+    let body = format!(
+        "<CS:share {NS}><CS:set><D:href>/dav/principals/carol/</D:href><CS:read/></CS:set><CS:set><D:href>/dav/principals/bob/</D:href><CS:read/></CS:set></CS:share>"
+    );
+    let reply = fx.dav("alice", "POST", ALICE_CAL, &xml, &body).await;
+    assert_eq!(reply.status, 403, "{}", reply.body);
+    assert!(
+        fx.store
+            .incoming_shares(fx.carol.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // A sharee who declined cannot be invited again by the same owner for a
+    // day.
+    let carol = format!(
+        "<CS:share {NS}><CS:set><D:href>/dav/principals/carol/</D:href><CS:read/></CS:set></CS:share>"
+    );
+    assert_eq!(
+        fx.dav("alice", "POST", ALICE_CAL, &xml, &carol)
+            .await
+            .status,
+        200
+    );
+    let id = fx.store.incoming_shares(fx.carol.id).await.unwrap()[0]
+        .public_id
+        .clone();
+    assert_eq!(
+        fx.api("carol", "DELETE", &format!("/api/v1/shared/{id}"), None)
+            .await
+            .status,
+        204
+    );
+    let reply = fx.dav("alice", "POST", ALICE_CAL, &xml, &carol).await;
+    assert_eq!(reply.status, 403);
+    assert!(reply.body.contains("invite-declined-recently"));
+    assert!(
+        fx.store
+            .incoming_shares(fx.carol.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

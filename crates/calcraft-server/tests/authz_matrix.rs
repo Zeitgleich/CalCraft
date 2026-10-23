@@ -623,6 +623,9 @@ async fn seed_shares(store: &Store, alice: &User, bob: &User) -> String {
 /// shares after a request that may have changed them: alice may write the
 /// read-write shares (into bob's trash) and leave any share.
 async fn reset_shares(store: &Store, alice: &User, bob: &User) {
+    // Alice may have left a share, which keeps bob from inviting her again
+    // for a day.
+    store.clear_share_declines_for_tests().await.unwrap();
     let rw = [
         (CollectionKind::Calendar, SHARED_EVENT),
         (CollectionKind::Addressbook, SHARED_CARD),

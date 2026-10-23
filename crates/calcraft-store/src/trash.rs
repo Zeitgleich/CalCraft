@@ -371,7 +371,7 @@ impl Store {
                     crate::sharing::ensure_share(&mut tx, share, collection_id, true).await?;
                 }
                 let Some(row) = sqlx::query(
-                    "SELECT i.id, i.etag, c.owner_id FROM items i JOIN collections c ON c.id = i.collection_id \
+                    "SELECT i.id, i.etag, i.schedule_tag, c.owner_id FROM items i JOIN collections c ON c.id = i.collection_id \
                      WHERE i.collection_id = ? AND i.name = ?",
                 )
                 .bind(collection_id)
@@ -383,6 +383,9 @@ impl Store {
                 };
                 let etag: String = row.try_get("etag")?;
                 check(precondition, Some(&etag))?;
+                if share.is_some() {
+                    crate::items::scheduling_object_guard(Some(&row))?;
+                }
                 let summary = summary.filter(|_| etag == before.etag);
                 let owner_id: i64 = row.try_get("owner_id")?;
                 let item_id: i64 = row.try_get("id")?;

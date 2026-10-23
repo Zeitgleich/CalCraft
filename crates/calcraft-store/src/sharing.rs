@@ -23,6 +23,12 @@ pub const MAX_SHARES_PER_COLLECTION: i64 = 100;
 /// Most pending invitations one user can have; further shares with them
 /// are refused until they accept or decline some.
 pub const MAX_PENDING_SHARES_PER_USER: i64 = 100;
+/// Most pending invitations one owner can have with one user, so that a
+/// single owner cannot fill the user's [`MAX_PENDING_SHARES_PER_USER`].
+pub const MAX_PENDING_PER_OWNER: i64 = 5;
+/// After a sharee declined or left one of an owner's shares, that owner
+/// cannot invite them again for this long (seconds).
+pub const DECLINE_COOLDOWN_SECS: i64 = 24 * 3600;
 
 /// What a sharee may do with a shared collection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -317,6 +323,105 @@ async fn free_slug(
     Err(StoreError::Limit("no free name for the shared collection"))
 }
 
+/// [`Store::set_share`] inside a write transaction: `(share id, created)`.
+async fn set_share_in(
+    tx: &mut Transaction<'static, Sqlite>,
+    collection_id: i64,
+    owner_id: i64,
+    sharee_id: i64,
+    access: ShareAccess,
+    now: i64,
+) -> Result<Option<(i64, bool)>> {
+    let Some(collection) =
+        sqlx::query("SELECT kind, read_only FROM collections WHERE id = ? AND owner_id = ?")
+            .bind(collection_id)
+            .bind(owner_id)
+            .fetch_optional(&mut **tx)
+            .await?
+    else {
+        return Ok(None);
+    };
+    if sharee_id == owner_id {
+        return Err(StoreError::NoSuchSharee);
+    }
+    let sharee_ok = sqlx::query("SELECT 1 FROM users WHERE id = ? AND disabled = 0")
+        .bind(sharee_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .is_some();
+    if !sharee_ok {
+        return Err(StoreError::NoSuchSharee);
+    }
+    if access.writable() && collection.try_get::<bool, _>("read_only")? {
+        return Err(StoreError::ReadOnly);
+    }
+    let existing: Option<i64> =
+        sqlx::query("SELECT id FROM shares WHERE collection_id = ? AND sharee_id = ?")
+            .bind(collection_id)
+            .bind(sharee_id)
+            .fetch_optional(&mut **tx)
+            .await?
+            .map(|row| row.try_get("id"))
+            .transpose()?;
+    if let Some(id) = existing {
+        sqlx::query("UPDATE shares SET access = ? WHERE id = ?")
+            .bind(access.as_str())
+            .bind(id)
+            .execute(&mut **tx)
+            .await?;
+        return Ok(Some((id, false)));
+    }
+    let declined = sqlx::query(
+        "SELECT 1 FROM share_declines WHERE owner_id = ? AND sharee_id = ? AND declined_at > ?",
+    )
+    .bind(owner_id)
+    .bind(sharee_id)
+    .bind(now.saturating_sub(DECLINE_COOLDOWN_SECS))
+    .fetch_optional(&mut **tx)
+    .await?
+    .is_some();
+    if declined {
+        return Err(StoreError::ShareDeclined);
+    }
+    let counts = sqlx::query(
+        "SELECT (SELECT COUNT(*) FROM shares WHERE collection_id = ?1) AS shares, \
+           (SELECT COUNT(*) FROM shares WHERE sharee_id = ?2 AND accepted_at IS NULL) AS pending, \
+           (SELECT COUNT(*) FROM shares s JOIN collections c ON c.id = s.collection_id \
+              WHERE s.sharee_id = ?2 AND s.accepted_at IS NULL AND c.owner_id = ?3) AS from_owner",
+    )
+    .bind(collection_id)
+    .bind(sharee_id)
+    .bind(owner_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if counts.try_get::<i64, _>("shares")? >= MAX_SHARES_PER_COLLECTION {
+        return Err(StoreError::Limit("too many shares of this collection"));
+    }
+    if counts.try_get::<i64, _>("from_owner")? >= MAX_PENDING_PER_OWNER {
+        return Err(StoreError::Limit(
+            "too many pending invitations from you for this user",
+        ));
+    }
+    if counts.try_get::<i64, _>("pending")? >= MAX_PENDING_SHARES_PER_USER {
+        return Err(StoreError::Limit(
+            "too many pending invitations for this user",
+        ));
+    }
+    let id: i64 = sqlx::query(
+        "INSERT INTO shares (public_id, collection_id, sharee_id, kind, access, created_at) \
+         VALUES (lower(hex(randomblob(16))), ?, ?, ?, ?, ?) RETURNING id",
+    )
+    .bind(collection_id)
+    .bind(sharee_id)
+    .bind(collection.try_get::<String, _>("kind")?)
+    .bind(access.as_str())
+    .bind(now)
+    .fetch_one(&mut **tx)
+    .await?
+    .try_get("id")?;
+    Ok(Some((id, true)))
+}
+
 impl Store {
     /// Marks a collection read-only like a subscription, for tests
     /// (feature `test-hooks`).
@@ -341,10 +446,11 @@ impl Store {
     /// changes the access of an existing share (which stays accepted or
     /// pending). Fails with [`StoreError::NoSuchSharee`] if the sharee does
     /// not exist, is disabled or is the owner, [`StoreError::ReadOnly`] for
-    /// write access to a subscription, [`StoreError::Limit`] beyond
-    /// [`MAX_SHARES_PER_COLLECTION`] or the sharee's
-    /// [`MAX_PENDING_SHARES_PER_USER`], and returns `None` if the collection
-    /// is not the owner's.
+    /// write access to a subscription, [`StoreError::ShareDeclined`] within
+    /// [`DECLINE_COOLDOWN_SECS`] after the sharee declined or left a share of
+    /// this owner, [`StoreError::Limit`] beyond [`MAX_SHARES_PER_COLLECTION`],
+    /// [`MAX_PENDING_PER_OWNER`] or [`MAX_PENDING_SHARES_PER_USER`], and
+    /// returns `None` if the collection is not the owner's.
     pub async fn set_share(
         &self,
         collection_id: i64,
@@ -353,83 +459,18 @@ impl Store {
         access: ShareAccess,
         now: i64,
     ) -> Result<Option<SetShare>> {
-        let id = self
-            .observe(
-                async {
-                    let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
-                    let Some(collection) = sqlx::query(
-                        "SELECT kind, read_only FROM collections WHERE id = ? AND owner_id = ?",
-                    )
-                    .bind(collection_id)
-                    .bind(owner_id)
-                    .fetch_optional(&mut *tx)
-                    .await?
-                    else {
-                        return Ok(None);
-                    };
-                    if sharee_id == owner_id {
-                        return Err(StoreError::NoSuchSharee);
-                    }
-                    let sharee_ok = sqlx::query("SELECT 1 FROM users WHERE id = ? AND disabled = 0")
-                        .bind(sharee_id)
-                        .fetch_optional(&mut *tx)
-                        .await?
-                        .is_some();
-                    if !sharee_ok {
-                        return Err(StoreError::NoSuchSharee);
-                    }
-                    if access.writable() && collection.try_get::<bool, _>("read_only")? {
-                        return Err(StoreError::ReadOnly);
-                    }
-                    let existing: Option<i64> = sqlx::query(
-                        "SELECT id FROM shares WHERE collection_id = ? AND sharee_id = ?",
-                    )
-                    .bind(collection_id)
-                    .bind(sharee_id)
-                    .fetch_optional(&mut *tx)
-                    .await?
-                    .map(|row| row.try_get("id"))
-                    .transpose()?;
-                    if let Some(id) = existing {
-                        sqlx::query("UPDATE shares SET access = ? WHERE id = ?")
-                            .bind(access.as_str())
-                            .bind(id)
-                            .execute(&mut *tx)
-                            .await?;
-                        tx.commit().await?;
-                        return Ok(Some((id, false)));
-                    }
-                    let counts = sqlx::query(
-                        "SELECT (SELECT COUNT(*) FROM shares WHERE collection_id = ?1) AS shares, \
-                           (SELECT COUNT(*) FROM shares WHERE sharee_id = ?2 AND accepted_at IS NULL) AS pending",
-                    )
-                    .bind(collection_id)
-                    .bind(sharee_id)
-                    .fetch_one(&mut *tx)
-                    .await?;
-                    if counts.try_get::<i64, _>("shares")? >= MAX_SHARES_PER_COLLECTION {
-                        return Err(StoreError::Limit("too many shares of this collection"));
-                    }
-                    if counts.try_get::<i64, _>("pending")? >= MAX_PENDING_SHARES_PER_USER {
-                        return Err(StoreError::Limit("too many pending invitations for this user"));
-                    }
-                    let id: i64 = sqlx::query(
-                        "INSERT INTO shares (public_id, collection_id, sharee_id, kind, access, created_at) \
-                         VALUES (lower(hex(randomblob(16))), ?, ?, ?, ?, ?) RETURNING id",
-                    )
-                        .bind(collection_id)
-                        .bind(sharee_id)
-                        .bind(collection.try_get::<String, _>("kind")?)
-                        .bind(access.as_str())
-                        .bind(now)
-                        .fetch_one(&mut *tx)
-                        .await?
-                        .try_get("id")?;
+        let id = self.observe(
+            async {
+                let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                let result =
+                    set_share_in(&mut tx, collection_id, owner_id, sharee_id, access, now).await?;
+                if result.is_some() {
                     tx.commit().await?;
-                    Ok(Some((id, true)))
                 }
-                .await,
-            )?;
+                Ok(result)
+            }
+            .await,
+        )?;
         let Some((id, created)) = id else {
             return Ok(None);
         };
@@ -442,6 +483,46 @@ impl Store {
         } else {
             SetShare::Updated(share)
         }))
+    }
+
+    /// Several [`Store::set_share`] and [`Store::remove_share`] of one
+    /// collection in one transaction: all or nothing (the first error
+    /// rolls everything back). `None` if the collection is not the owner's.
+    pub async fn apply_shares(
+        &self,
+        collection_id: i64,
+        owner_id: i64,
+        set: &[(i64, ShareAccess)],
+        remove: &[i64],
+        now: i64,
+    ) -> Result<Option<()>> {
+        self.observe(
+            async {
+                let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                for &(sharee_id, access) in set {
+                    if set_share_in(&mut tx, collection_id, owner_id, sharee_id, access, now)
+                        .await?
+                        .is_none()
+                    {
+                        return Ok(None);
+                    }
+                }
+                for &sharee_id in remove {
+                    sqlx::query(
+                        "DELETE FROM shares WHERE collection_id = ? AND sharee_id = ? \
+                           AND collection_id IN (SELECT id FROM collections WHERE owner_id = ?)",
+                    )
+                    .bind(collection_id)
+                    .bind(sharee_id)
+                    .bind(owner_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                tx.commit().await?;
+                Ok(Some(()))
+            }
+            .await,
+        )
     }
 
     /// Removes the share of collection `collection_id` (of `owner_id`) with
@@ -591,19 +672,54 @@ impl Store {
     }
 
     /// The sharee declines a pending share or unsubscribes from an
-    /// accepted one: the share is removed. Returns whether there was one.
-    pub async fn leave_share(&self, sharee_id: i64, public_id: &str) -> Result<bool> {
+    /// accepted one: the share is removed, and the owner cannot invite
+    /// them again for [`DECLINE_COOLDOWN_SECS`]. Returns whether there was
+    /// one.
+    pub async fn leave_share(&self, sharee_id: i64, public_id: &str, now: i64) -> Result<bool> {
         self.observe(
             async {
-                let done = sqlx::query("DELETE FROM shares WHERE sharee_id = ? AND public_id = ?")
+                let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
+                let owner: Option<i64> = sqlx::query(
+                    "SELECT c.owner_id FROM shares s JOIN collections c ON c.id = s.collection_id \
+                     WHERE s.sharee_id = ? AND s.public_id = ?",
+                )
+                .bind(sharee_id)
+                .bind(public_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .map(|row| row.try_get("owner_id"))
+                .transpose()?;
+                let Some(owner) = owner else {
+                    return Ok(false);
+                };
+                sqlx::query("DELETE FROM shares WHERE sharee_id = ? AND public_id = ?")
                     .bind(sharee_id)
                     .bind(public_id)
-                    .execute(&self.writer)
+                    .execute(&mut *tx)
                     .await?;
-                Ok(done.rows_affected() == 1)
+                sqlx::query(
+                    "INSERT INTO share_declines (owner_id, sharee_id, declined_at) VALUES (?, ?, ?) \
+                     ON CONFLICT (owner_id, sharee_id) DO UPDATE SET declined_at = excluded.declined_at",
+                )
+                .bind(owner)
+                .bind(sharee_id)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok(true)
             }
             .await,
         )
+    }
+
+    /// Forgets all declines, for tests (feature `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    pub async fn clear_share_declines_for_tests(&self) -> Result<()> {
+        sqlx::query("DELETE FROM share_declines")
+            .execute(&self.writer)
+            .await?;
+        Ok(())
     }
 
     /// A collection shared with (and accepted by) `sharee_id`, at `slug`

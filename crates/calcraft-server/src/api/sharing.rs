@@ -122,6 +122,9 @@ pub async fn set(
         Ok(Some(SetShare::Created(share))) => Ok((StatusCode::CREATED, Json(info(share)))),
         Ok(Some(SetShare::Updated(share))) => Ok((StatusCode::OK, Json(info(share)))),
         Ok(None) | Err(StoreError::NoSuchSharee) => Err(ApiError::NotFound),
+        Err(StoreError::ShareDeclined) => Err(ApiError::Conflict(
+            "the user declined or left one of your shares within the last day",
+        )),
         Err(err) => Err(err.into()),
     }
 }
@@ -202,7 +205,7 @@ pub async fn leave(
     enabled(&state)?;
     if state
         .store
-        .leave_share(session.user.id, share_id(&id)?)
+        .leave_share(session.user.id, share_id(&id)?, now())
         .await?
     {
         Ok(StatusCode::NO_CONTENT)

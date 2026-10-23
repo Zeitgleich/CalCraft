@@ -58,3 +58,42 @@ CREATE TABLE publish_links (
 ) STRICT;
 
 CREATE INDEX publish_links_by_collection ON publish_links (collection_id);
+
+-- Invitations a sharee declined or shares they left, per owner: the owner
+-- cannot invite them again for a day (`sharing.rs`), so declining cannot
+-- be answered with a flood of new invitations.
+CREATE TABLE share_declines (
+    owner_id    INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    sharee_id   INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    -- Unix seconds.
+    declined_at INTEGER NOT NULL,
+    PRIMARY KEY (owner_id, sharee_id)
+) STRICT;
+
+-- Whether an object has a component with a CLASS other than PUBLIC.
+-- Read-only sharees may not download the attachments of such objects
+-- (their events are shown to them as busy stubs). Computed by the
+-- triggers below from the content with folded lines unfolded (CRLF or LF); a CLASS line
+-- with parameters counts as private (conservative). The server decides
+-- what a sharee sees from the parsed content, this flag only guards the
+-- attachment downloads.
+ALTER TABLE items ADD COLUMN private INTEGER NOT NULL DEFAULT 0 CHECK (private IN (0, 1));
+
+-- The same expression three times: number of CLASS lines greater than
+-- the number of CLASS:PUBLIC lines (content unfolded, upper-cased).
+UPDATE items SET private = (length((char(10) || upper(replace(replace(replace(replace(CAST(content AS TEXT), char(13, 10, 32), ''), char(13, 10, 9), ''), char(10, 32), ''), char(10, 9), '')))) - length(replace((char(10) || upper(replace(replace(replace(replace(CAST(content AS TEXT), char(13, 10, 32), ''), char(13, 10, 9), ''), char(10, 32), ''), char(10, 9), ''))), char(10) || 'CLASS', ''))) / 6
+        > (length((char(10) || upper(replace(replace(replace(replace(CAST(content AS TEXT), char(13, 10, 32), ''), char(13, 10, 9), ''), char(10, 32), ''), char(10, 9), '')))) - length(replace((char(10) || upper(replace(replace(replace(replace(CAST(content AS TEXT), char(13, 10, 32), ''), char(13, 10, 9), ''), char(10, 32), ''), char(10, 9), ''))), char(10) || 'CLASS:PUBLIC' || char(13), ''))) / 14;
+
+CREATE TRIGGER items_private_insert AFTER INSERT ON items
+BEGIN
+    UPDATE items SET private = (length((char(10) || upper(replace(replace(replace(replace(CAST(NEW.content AS TEXT), char(13, 10, 32), ''), char(13, 10, 9), ''), char(10, 32), ''), char(10, 9), '')))) - length(replace((char(10) || upper(replace(replace(replace(replace(CAST(NEW.content AS TEXT), char(13, 10, 32), ''), char(13, 10, 9), ''), char(10, 32), ''), char(10, 9), ''))), char(10) || 'CLASS', ''))) / 6
+        > (length((char(10) || upper(replace(replace(replace(replace(CAST(NEW.content AS TEXT), char(13, 10, 32), ''), char(13, 10, 9), ''), char(10, 32), ''), char(10, 9), '')))) - length(replace((char(10) || upper(replace(replace(replace(replace(CAST(NEW.content AS TEXT), char(13, 10, 32), ''), char(13, 10, 9), ''), char(10, 32), ''), char(10, 9), ''))), char(10) || 'CLASS:PUBLIC' || char(13), ''))) / 14
+    WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER items_private_update AFTER UPDATE OF content ON items
+BEGIN
+    UPDATE items SET private = (length((char(10) || upper(replace(replace(replace(replace(CAST(NEW.content AS TEXT), char(13, 10, 32), ''), char(13, 10, 9), ''), char(10, 32), ''), char(10, 9), '')))) - length(replace((char(10) || upper(replace(replace(replace(replace(CAST(NEW.content AS TEXT), char(13, 10, 32), ''), char(13, 10, 9), ''), char(10, 32), ''), char(10, 9), ''))), char(10) || 'CLASS', ''))) / 6
+        > (length((char(10) || upper(replace(replace(replace(replace(CAST(NEW.content AS TEXT), char(13, 10, 32), ''), char(13, 10, 9), ''), char(10, 32), ''), char(10, 9), '')))) - length(replace((char(10) || upper(replace(replace(replace(replace(CAST(NEW.content AS TEXT), char(13, 10, 32), ''), char(13, 10, 9), ''), char(10, 32), ''), char(10, 9), ''))), char(10) || 'CLASS:PUBLIC' || char(13), ''))) / 14
+    WHERE id = NEW.id;
+END;

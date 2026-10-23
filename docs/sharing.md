@@ -57,8 +57,13 @@ max_objects = 10000     # most objects of one published calendar (1 – 100 000)
   disabled user's shares disappear at once and come back if the account is
   enabled again. Deleting a user or the collection deletes its shares;
   restoring a collection from the trash does not restore its shares.
-* Limits: 100 shares per collection, 100 pending invitations per sharee
-  (further invitations are refused until they accept or decline some).
+* Limits: 100 shares per collection; 100 pending invitations per sharee
+  in total and 5 from any one owner (further invitations are refused until
+  they accept or decline some). After a sharee declined or left one of an
+  owner's shares, that owner cannot invite them again for 24 hours (REST
+  `409`, DAV `403 CS:invite-declined-recently`); the owner removing a share
+  blocks nothing. A `CS:share` request with several entries is applied in
+  one transaction: if one entry fails, nothing changes.
 * Sharing with groups is not implemented (no groups exist yet). The store
   keeps one row per sharee (`shares` table, migration `0013_sharing`);
   groups would add a second kind of grantee without changing the access
@@ -78,7 +83,9 @@ max_objects = 10000     # most objects of one published calendar (1 – 100 000)
 | Other properties (description, time zone, dead properties) | ✓ | 403 | 403 | 404 |
 | Delete the collection | ✓ (into the trash, ends all shares) | leaves the share | leaves the share | 404 |
 | Share, change or end shares, public links | ✓ | 403 | 403 | 404 |
-| Change scheduling objects (the owner's meetings and invitations) | ✓ | 403 | 403 | 404 |
+| Change scheduling objects (the owner's meetings and invitations), also by MOVE/COPY over them or MOVE away | ✓ | 403 | 403 | 404 |
+| Details of private events (`CLASS:PRIVATE`/`CONFIDENTIAL`) | ✓ | ✓ | busy stub | 404 |
+| Attachments of private events | ✓ | ✓ | 404 | 404 |
 
 * `current-user-privilege-set` says the same: owners and read-write
   sharees get `read`, `write`, `write-properties`, `write-content`, `bind`,
@@ -102,6 +109,36 @@ max_objects = 10000     # most objects of one published calendar (1 – 100 000)
   path that never existed in the sharee's home, including
   `sync-collection` and attachment downloads.
 
+### Private events and read-only sharees
+
+Read-only sharees see events whose class is not `PUBLIC` (`PRIVATE`,
+`CONFIDENTIAL`, any other value; an override without its own `CLASS`
+inherits the master's) as **busy stubs**. A stub keeps exactly `UID`,
+`DTSTART`, `DTEND`, `DURATION`, `DUE`, `RRULE`, `RDATE`, `EXDATE`,
+`RECURRENCE-ID`, `STATUS`, `TRANSP`, `CLASS`, `DTSTAMP`, `SEQUENCE` and
+gets `SUMMARY:Busy`; everything else (description, location, organizer and
+attendees, attachments, alarms, URL, conference, related-to, `X-`
+properties, …) is removed, also the VCALENDAR's own properties except
+`VERSION`, `PRODID`, `CALSCALE` (a whitelist). Public components of the
+same object stay as they are.
+
+* The stub is what the sharee gets everywhere: `GET`/`HEAD`, `getetag`
+  and `getcontentlength` in `PROPFIND`, multiget, `calendar-query` and
+  `sync-collection`. Its ETag is a hash of the stub's bytes: it changes
+  when the stub changes (new time, status, …) and stays the same when only
+  hidden details change, so it reveals nothing of them. (Such a change
+  still appears in `sync-collection`, with the unchanged ETag.)
+* Queries: time ranges are evaluated on the times the stub keeps, so the
+  results are the same as for the owner; `text-match`, `prop-filter` and
+  `param-filter` are refused for every collection
+  (`CALDAV:supported-filter`), so there is no way to probe hidden text.
+* Managed attachments of private objects are not readable by read-only
+  sharees (like an id that was never issued). The store keeps a flag per
+  object (any CLASS line other than `CLASS:PUBLIC`, computed by a database
+  trigger from the unfolded content, conservatively: a `CLASS` with
+  parameters counts as private).
+* Read-write sharees and the owner see everything; free/busy is unchanged.
+
 ### Scheduling
 
 * A sharee's `PUT` and `DELETE` are stored **without implicit scheduling**:
@@ -111,9 +148,10 @@ max_objects = 10000     # most objects of one published calendar (1 – 100 000)
 * Objects the owner's scheduling manages (the owner's meetings and the
   invitations the owner received, i.e. objects with a Schedule-Tag) cannot
   be changed or deleted by sharees (`403 DAV:need-privileges`), also not
-  their attachments: otherwise attendees would never learn about the
-  change. The check is atomic with the write (`If-Match` on the checked
-  ETag).
+  their attachments, not moved away and not replaced by a MOVE or COPY:
+  otherwise attendees would never learn about the change. The check is
+  part of the write transaction (no Schedule-Tag on the object when it is
+  written).
 * Free/busy answers for the owner contain the owner's own calendars only;
   calendars shared with somebody never count for the sharee. The default
   calendar for invitations (`schedule-default-calendar-URL`) is always one
@@ -203,8 +241,11 @@ user addresses. Only authenticated users can ask.
   lookup goes by the hash (a database index); the stored hash is compared
   again in constant time.
 * **Rate limit:** a client that tries 30 unknown tokens within 10 minutes
-  gets `429` for every `/public/` request until the window ends (on top of
-  the general per-client request limits).
+  gets `429` for every further miss until the window ends (on top of the
+  general per-client request limits). Valid links are looked up first and
+  always served, so other users behind the same address keep their links.
+  The path is read raw (not decoded): malformed escapes are misses like
+  any unknown token, never a `400`.
 * **Logs:** trace spans record `/public/` only, never the token; tokens are
   never logged (checked by `tests/log_secrets.rs`).
 * **Served** as `text/calendar; charset=utf-8` with `Content-Disposition:
@@ -218,9 +259,20 @@ expansion):
 
 * Only `VEVENT`s (no tasks or journal entries) plus the `VTIMEZONE`s they
   need, the calendar's name as `NAME`/`X-WR-CALNAME`.
+* Full events are a whitelist: `SUMMARY`, `DESCRIPTION`, `LOCATION`,
+  `DTSTART`, `DTEND`, `DURATION`, `RRULE`, `RDATE`, `EXDATE`,
+  `RECURRENCE-ID`, `STATUS`, `TRANSP`, `CLASS`, `CATEGORIES`, `DTSTAMP`,
+  `SEQUENCE`, `CREATED`, `LAST-MODIFIED`, `GEO`.
 * **Never:** alarms (`VALARM`, they would ring for every subscriber),
-  attachments (`ATTACH`; managed attachments are not public), the original
-  UIDs (replaced by a hash per link, so links cannot be correlated).
+  attachments (`ATTACH`; managed attachments are not public), `RELATED-TO`,
+  `URL`, `CONFERENCE`, `CONTACT`, `COMMENT`, `IMAGE`, `X-` properties, the
+  original UIDs (replaced by a hash per link, so links cannot be
+  correlated).
+* An override that is left out (private and hidden, or free/cancelled in a
+  busy-only link) becomes an `EXDATE` of the master, so the master's
+  original instance does not show up in its place; a master that is left
+  out takes its whole series along. Overrides without `CLASS` inherit the
+  master's.
 * **Organizer and attendees** (`ORGANIZER`, `ATTENDEE` – e-mail addresses)
   only if the owner ticks *include attendees* (default off).
 * **Busy only** links have nothing but the times (`DTSTART`, `DTEND`,
@@ -235,10 +287,10 @@ expansion):
 * Sharing needs acceptance; sharees can decline and leave at any time.
 * Sharees do not see each other; the owner sees all sharees.
 * Sharees do not see the owner's client settings (dead properties).
-* `CLASS:PRIVATE`/`CONFIDENTIAL` events are **not** hidden from sharees:
-  sharing a calendar shares all of its objects (like most CalDAV servers;
-  Apple's `X-CALENDARSERVER-ACCESS` is not interpreted). Public links hide
-  them by default.
+* `CLASS:PRIVATE`/`CONFIDENTIAL` events are busy stubs for read-only
+  sharees (see above) and busy blocks in public links by default;
+  read-write sharees see them in full (they can edit them anyway). Apple's
+  `X-CALENDARSERVER-ACCESS` is not interpreted.
 * Public links publish no attendee addresses, attachments or alarms unless
   stated above.
 

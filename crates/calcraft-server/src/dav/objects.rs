@@ -100,6 +100,7 @@ pub async fn get(ctx: Ctx<'_>, resource: Resource, with_body: bool) -> Response 
         .await
     {
         Ok(Some((item, schedule_tag))) => {
+            let item = super::sharing::sharee_item(&collection, item);
             let content_type = content_type(collection.kind);
             let body = if with_body {
                 Body::from(item.content)
@@ -500,7 +501,7 @@ pub async fn delete(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
                 return match ctx
                     .state
                     .store
-                    .leave_share(ctx.user.id, &via.public_id)
+                    .leave_share(ctx.user.id, &via.public_id, now())
                     .await
                 {
                     Ok(true) => StatusCode::NO_CONTENT.into_response(),

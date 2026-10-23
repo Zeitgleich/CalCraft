@@ -31,7 +31,7 @@ use calcraft_dav::{
     sharing::{InviteReply, MAX_SHARE_BODY, ShareRequest, SharingPost},
     xml::{NS_CALDAV, NS_CALENDARSERVER as CS, NS_DAV, escape_text},
 };
-use calcraft_store::{Collection, SetShare, Share, ShareAccess, StoreError, User};
+use calcraft_store::{Collection, Share, ShareAccess, StoreError, User};
 
 use super::{
     Ctx, XML_CONTENT_TYPE, bad_request, method_not_allowed, multistatus, need_privileges,
@@ -162,28 +162,27 @@ pub(super) async fn post_share(ctx: Ctx<'_>, collection: Collection, request: Re
     if collection.read_only && set.iter().any(|(_, access)| access.writable()) {
         return cs_error("read-write-not-allowed");
     }
-    let store = &ctx.state.store;
-    for (user, access) in set {
-        match store
-            .set_share(collection.id, ctx.user.id, user.id, access, now())
-            .await
-        {
-            Ok(Some(SetShare::Created(_) | SetShare::Updated(_))) => {}
-            Ok(None) => return not_found(),
-            Err(StoreError::ReadOnly) => return cs_error("read-write-not-allowed"),
-            Err(StoreError::NoSuchSharee) => return cs_error("valid-sharee"),
-            Err(err) => return store_error(err),
-        }
+    // All entries in one transaction: any failure changes nothing.
+    let set: Vec<(i64, ShareAccess)> = set
+        .iter()
+        .map(|(user, access)| (user.id, *access))
+        .collect();
+    let remove: Vec<i64> = remove.iter().map(|user| user.id).collect();
+    match ctx
+        .state
+        .store
+        .apply_shares(collection.id, ctx.user.id, &set, &remove, now())
+        .await
+    {
+        Ok(Some(())) => StatusCode::OK.into_response(),
+        Ok(None) => not_found(),
+        Err(StoreError::ReadOnly) => cs_error("read-write-not-allowed"),
+        Err(StoreError::NoSuchSharee) => cs_error("valid-sharee"),
+        // The sharee declined or left a share of this owner recently.
+        Err(StoreError::ShareDeclined) => cs_error("invite-declined-recently"),
+        Err(StoreError::Limit(_)) => cs_error("too-many-invitations"),
+        Err(err) => store_error(err),
     }
-    for user in remove {
-        if let Err(err) = store
-            .remove_share(collection.id, ctx.user.id, user.id)
-            .await
-        {
-            return store_error(err);
-        }
-    }
-    StatusCode::OK.into_response()
 }
 
 /// The pending or accepted share an invite reply answers.
@@ -245,7 +244,10 @@ pub(super) async fn post_invite_reply(
     };
     let store = &ctx.state.store;
     if !reply.accepted {
-        return match store.leave_share(ctx.user.id, &share.public_id).await {
+        return match store
+            .leave_share(ctx.user.id, &share.public_id, now())
+            .await
+        {
             Ok(_) => StatusCode::NO_CONTENT.into_response(),
             Err(err) => store_error(err),
         };
@@ -601,7 +603,12 @@ pub(super) async fn notifications(ctx: Ctx<'_>, resource: Resource, request: Req
                 .into_response()
         }
         ("DELETE", Resource::Notification(share)) => {
-            match ctx.state.store.leave_share(user.id, &share.public_id).await {
+            match ctx
+                .state
+                .store
+                .leave_share(user.id, &share.public_id, now())
+                .await
+            {
                 Ok(_) => StatusCode::NO_CONTENT.into_response(),
                 Err(err) => store_error(err),
             }
@@ -647,4 +654,35 @@ pub(super) fn sharee_dead_properties(
         });
     }
     visible
+}
+
+/// Whether the user sees `collection` through a read-only share of a
+/// calendar: private events are then served as busy stubs
+/// ([`crate::redact::sharee_view`]).
+pub(super) fn hides_private(collection: &Collection) -> bool {
+    collection.kind == CollectionKind::Calendar
+        && collection
+            .shared
+            .as_ref()
+            .is_some_and(|via| !via.access.writable())
+}
+
+/// The object as the user may see it: for read-only sharees private
+/// events are busy stubs, with an ETag of the stub's bytes (it changes when
+/// the stub changes, and never reveals the hidden content).
+pub(super) fn sharee_item(
+    collection: &Collection,
+    item: calcraft_store::Item,
+) -> calcraft_store::Item {
+    if !hides_private(collection) {
+        return item;
+    }
+    match crate::redact::sharee_view(&item.content) {
+        Some(stub) => calcraft_store::Item {
+            etag: super::etag(&stub),
+            content: stub,
+            name: item.name,
+        },
+        None => item,
+    }
 }

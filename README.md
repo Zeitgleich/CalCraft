@@ -460,7 +460,8 @@ Calendar's invitation); then it appears in the sharee's own home
 Sharees can decline and leave at any time; the owner keeps sole control of
 the collection, its settings and its shares. Sharees' writes count against
 the owner's quota, deletions go into the owner's trash, and they are never
-scheduled (no invitations in the owner's name). Apple's CalendarServer
+scheduled (no invitations in the owner's name). Read-only sharees see private
+events (`CLASS:PRIVATE`/`CONFIDENTIAL`) only as busy stubs. Apple's CalendarServer
 sharing (`CS:share`, notifications, `CS:invite-reply`) is implemented.
 
 Calendars can also be published as secret read-only links

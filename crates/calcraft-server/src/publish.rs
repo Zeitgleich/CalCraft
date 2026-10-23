@@ -9,8 +9,9 @@
 //!   the token.
 //! * Clients with many unknown tokens are blocked for a while
 //!   ([`MISSES_PER_CLIENT`] per [`MISS_WINDOW`], then `429` for every
-//!   publish request of that client), on top of the general per-client
-//!   limits.
+//!   further miss of that client), on top of the general per-client
+//!   limits. Valid links are looked up first and always served, so clients
+//!   behind a shared address are not locked out of their links.
 //! * The calendar is rendered from the stored objects (no recurrence
 //!   expansion), VEVENTs only, at most `publish.max_objects` objects and
 //!   `publish.max_bytes` bytes. Never published: alarms (VALARM),
@@ -29,7 +30,7 @@ use std::{
 };
 
 use axum::{
-    extract::{Path, Request, State},
+    extract::{Request, State},
     http::{
         HeaderValue, Method, StatusCode,
         header::{
@@ -47,6 +48,7 @@ use crate::{
     config::PublishConfig,
     limits::FailureTable,
     net::ClientKey,
+    redact::{self, property},
     secrets::{hash_secret, hashes_equal},
 };
 
@@ -131,12 +133,24 @@ fn token_of(file: &str) -> Option<&str> {
     .then_some(token)
 }
 
-/// `GET`/`HEAD /public/<token>.ics`.
-pub async fn serve(
-    State(state): State<AppState>,
-    Path(file): Path<String>,
-    request: Request,
-) -> Response {
+/// The answer for a miss: `404`, or `429` once the client used up its
+/// misses (counted only for misses, so valid links always work).
+fn miss(publish: &Publish, client: Option<ClientKey>) -> Response {
+    if publish.blocked(client) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(RETRY_AFTER, MISS_WINDOW.as_secs().to_string())],
+            "too many requests",
+        )
+            .into_response();
+    }
+    publish.miss(client);
+    not_found()
+}
+
+/// `GET`/`HEAD /public/<token>.ics`. The path is read raw (not decoded),
+/// so malformed escapes are just another unknown token.
+pub async fn serve(State(state): State<AppState>, request: Request) -> Response {
     // Only GET and HEAD; anything else looks like an unknown path, so the
     // route does not even reveal that publishing is on.
     let Some(publish) = &state.publish else {
@@ -146,17 +160,13 @@ pub async fn serve(
         return not_found();
     }
     let client = request.extensions().get::<ClientKey>().copied();
-    if publish.blocked(client) {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            [(RETRY_AFTER, MISS_WINDOW.as_secs().to_string())],
-            "too many requests",
-        )
-            .into_response();
-    }
-    let Some(token) = token_of(&file) else {
-        publish.miss(client);
-        return not_found();
+    let file = request
+        .uri()
+        .path()
+        .strip_prefix(PUBLIC_PATH)
+        .unwrap_or_default();
+    let Some(token) = token_of(file) else {
+        return miss(publish, client);
     };
     let hash = hash_secret(token);
     let found = match state.store.published_calendar(&hash).await {
@@ -166,8 +176,7 @@ pub async fn serve(
     let Some((link, stored, collection)) =
         found.filter(|(_, stored, _)| hashes_equal(stored, &hash))
     else {
-        publish.miss(client);
-        return not_found();
+        return miss(publish, client);
     };
     let etag = etag(&link, &collection, &publish.config);
     let headers = request.headers();
@@ -246,22 +255,6 @@ fn etag(link: &PublishLink, collection: &Collection, config: &PublishConfig) -> 
     format!("\"{}\"", &blake3::hash(input.as_bytes()).to_hex()[..32])
 }
 
-/// Whether a component's class is anything but PUBLIC (RFC 5545 §3.8.1.3:
-/// unknown classes are treated as private).
-fn is_private(component: &Component) -> bool {
-    component
-        .property("CLASS")
-        .is_some_and(|class| !class.value.trim().eq_ignore_ascii_case("PUBLIC"))
-}
-
-fn property(name: &str, value: &str) -> Property {
-    Property {
-        name: name.to_owned(),
-        parameters: Vec::new(),
-        value: value.to_owned(),
-    }
-}
-
 /// The UID of a published event: a hash per link, so neither the original
 /// UID nor its relation to other links is revealed.
 fn published_uid(link: &PublishLink, uid: &str) -> String {
@@ -272,7 +265,7 @@ fn published_uid(link: &PublishLink, uid: &str) -> String {
     )
 }
 
-/// Properties kept in a busy block.
+/// Properties of a busy block (besides the hashed UID and `SUMMARY:Busy`).
 const BUSY_PROPERTIES: [&str; 8] = [
     "DTSTART",
     "DTEND",
@@ -284,58 +277,110 @@ const BUSY_PROPERTIES: [&str; 8] = [
     "DTSTAMP",
 ];
 
-/// Properties never published.
-const PRIVATE_PROPERTIES: [&str; 1] = ["ATTACH"];
+/// Properties of a full event (besides the hashed UID). Everything else –
+/// attachments, alarms, `RELATED-TO` (original UIDs), `URL`,
+/// `CONFERENCE`, `CONTACT`, `COMMENT`, `IMAGE`, `X-` properties – is
+/// never published.
+const FULL_PROPERTIES: [&str; 19] = [
+    "SUMMARY",
+    "DESCRIPTION",
+    "LOCATION",
+    "DTSTART",
+    "DTEND",
+    "DURATION",
+    "RRULE",
+    "RDATE",
+    "EXDATE",
+    "RECURRENCE-ID",
+    "STATUS",
+    "TRANSP",
+    "CLASS",
+    "CATEGORIES",
+    "DTSTAMP",
+    "SEQUENCE",
+    "CREATED",
+    "LAST-MODIFIED",
+    "GEO",
+];
+/// Published only if the link includes attendees.
 const ADDRESS_PROPERTIES: [&str; 2] = ["ORGANIZER", "ATTENDEE"];
 
-/// One VEVENT as published, or `None` if it is left out.
-fn publish_event(link: &PublishLink, event: &Component) -> Option<Component> {
-    let private = is_private(event);
-    let busy = link.busy_only || (private && link.private_events == PrivateEvents::Busy);
+/// Whether a busy block would show free time (transparent or cancelled).
+fn no_busy_block(event: &Component) -> bool {
+    let is = |name: &str, value: &str| {
+        event
+            .property(name)
+            .is_some_and(|p| p.value.trim().eq_ignore_ascii_case(value))
+    };
+    is("TRANSP", "TRANSPARENT") || is("STATUS", "CANCELLED")
+}
+
+/// One VEVENT as published, or `None` if it is left out; `master_private`:
+/// the class the series' master gives overrides without their own.
+fn publish_event(link: &PublishLink, event: &Component, master_private: bool) -> Option<Component> {
+    let private = redact::is_private(event, master_private);
     if private && link.private_events == PrivateEvents::Hide {
         return None;
     }
-    let uid = event
-        .property("UID")
-        .map(|p| p.value.as_str())
-        .unwrap_or("");
-    let mut out = Component {
-        name: "VEVENT".to_owned(),
-        properties: vec![property("UID", &published_uid(link, uid))],
-        components: Vec::new(),
-    };
-    if busy {
-        // Free time and cancelled events are no busy blocks.
-        let transparent = event
-            .property("TRANSP")
-            .is_some_and(|p| p.value.trim().eq_ignore_ascii_case("TRANSPARENT"));
-        let cancelled = event
-            .property("STATUS")
-            .is_some_and(|p| p.value.trim().eq_ignore_ascii_case("CANCELLED"));
-        if transparent || cancelled {
-            return None;
-        }
-        out.properties.extend(
-            event
+    let busy = link.busy_only || (private && link.private_events == PrivateEvents::Busy);
+    if busy && no_busy_block(event) {
+        return None;
+    }
+    let mut out = if busy {
+        redact::busy_stub(event, &BUSY_PROPERTIES)
+    } else {
+        Component {
+            name: event.name.clone(),
+            properties: event
                 .properties
                 .iter()
-                .filter(|p| BUSY_PROPERTIES.contains(&p.name.as_str()))
-                .cloned(),
-        );
-        out.properties.push(property("SUMMARY", "Busy"));
-        return Some(out);
-    }
-    out.properties.extend(
-        event
-            .properties
-            .iter()
-            .filter(|p| p.name != "UID" && !PRIVATE_PROPERTIES.contains(&p.name.as_str()))
-            .filter(|p| link.include_attendees || !ADDRESS_PROPERTIES.contains(&p.name.as_str()))
-            .cloned(),
-    );
-    // No alarms (they would ring for every subscriber) and no other
-    // nested components.
+                .filter(|p| {
+                    FULL_PROPERTIES.contains(&p.name.as_str())
+                        || (link.include_attendees && ADDRESS_PROPERTIES.contains(&p.name.as_str()))
+                })
+                .cloned()
+                .collect(),
+            components: Vec::new(),
+        }
+    };
+    let uid = event.property("UID").map_or("", |p| p.value.as_str());
+    out.properties
+        .insert(0, redact::property("UID", &published_uid(link, uid)));
     Some(out)
+}
+
+/// The published VEVENTs of one object. An override that is left out
+/// excludes its instance from the master (an `EXDATE`), so the master's
+/// original instance is not shown in its place; a master that is left out
+/// takes the whole series along.
+fn publish_object(link: &PublishLink, tree: &Component) -> Vec<Component> {
+    let master_private = redact::master_private(tree);
+    let mut published = Vec::new();
+    let mut excluded = Vec::new();
+    for event in tree.components.iter().filter(|c| c.name == "VEVENT") {
+        let instance = event.property("RECURRENCE-ID");
+        match (publish_event(link, event, master_private), instance) {
+            (Some(out), _) => published.push(out),
+            (None, Some(instance)) => excluded.push(Property {
+                name: "EXDATE".to_owned(),
+                parameters: instance
+                    .parameters
+                    .iter()
+                    .filter(|p| p.name == "TZID" || p.name == "VALUE")
+                    .cloned()
+                    .collect(),
+                value: instance.value.clone(),
+            }),
+            (None, None) => return Vec::new(),
+        }
+    }
+    if let Some(master) = published
+        .iter_mut()
+        .find(|c| c.property("RECURRENCE-ID").is_none())
+    {
+        master.properties.extend(excluded);
+    }
+    published
 }
 
 /// The published calendar.
@@ -361,12 +406,7 @@ async fn render(
         let Ok(tree) = parse(&item.content) else {
             continue;
         };
-        let published: Vec<Component> = tree
-            .components
-            .iter()
-            .filter(|c| c.name == "VEVENT")
-            .filter_map(|event| publish_event(link, event))
-            .collect();
+        let published = publish_object(link, &tree);
         if published.is_empty() {
             continue;
         }
