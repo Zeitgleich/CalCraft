@@ -1354,12 +1354,12 @@ async fn move_and_copy() {
 async fn parallel_uploads_lose_nothing() {
     let fx = fixture().await;
     put(&fx.app, "alice", EVENT, &event("e", "")).await;
-    let (a, b, c) = tokio::join!(
+    // Two at a time: the most one user may upload in parallel.
+    let (a, b) = tokio::join!(
         add(&fx.app, "alice", EVENT, "", "p0.txt", b"parallel"),
         add(&fx.app, "alice", EVENT, "", "p1.txt", b"parallel"),
-        add(&fx.app, "alice", EVENT, "", "p2.txt", b"parallel"),
     );
-    let replies = [a, b, c];
+    let replies = [a, b];
     let mut ids = Vec::new();
     for reply in replies {
         assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.text());
@@ -1369,7 +1369,7 @@ async fn parallel_uploads_lose_nothing() {
     for id in &ids {
         assert!(text.contains(id.as_str()), "{text}");
     }
-    assert_eq!(fx.store.attachment_usage(fx.alice.id).await.unwrap().0, 3);
+    assert_eq!(fx.store.attachment_usage(fx.alice.id).await.unwrap().0, 2);
 }
 
 #[tokio::test]
@@ -1472,4 +1472,307 @@ async fn backups_contain_attachments() {
         b"backed up"
     );
     store.close().await;
+}
+
+/// Alice's meeting with bob and an attachment; returns (managed id, bob's
+/// path of his copy).
+async fn invitation_with_attachment(fx: &Fx) -> (String, String) {
+    let uri = format!("{CAL}m.ics");
+    put(&fx.app, "alice", &uri, &meeting(BOB_LINE)).await;
+    let id = added(fx, &uri, b"agenda").await;
+    let object = fx
+        .store
+        .scheduling_object(fx.bob.id, "m")
+        .await
+        .unwrap()
+        .unwrap();
+    let bob_uri = format!(
+        "/dav/calendars/bob/{}/{}",
+        object.collection.slug, object.name
+    );
+    assert_eq!(
+        send(
+            &fx.app,
+            "bob",
+            "GET",
+            &attachment_path(&id),
+            &[],
+            Vec::new()
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    (id, bob_uri)
+}
+
+async fn bob_copy(fx: &Fx) -> String {
+    unfold(
+        &String::from_utf8(
+            fx.store
+                .scheduling_object(fx.bob.id, "m")
+                .await
+                .unwrap()
+                .unwrap()
+                .content,
+        )
+        .unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn a_detached_attendee_copy_loses_access() {
+    let fx = fixture_with(scheduling_fixture_config()).await;
+    let (id, bob_uri) = invitation_with_attachment(&fx).await;
+    // Bob strips ORGANIZER and ATTENDEE: a plain event of his own.
+    let detached: String = bob_copy(&fx)
+        .await
+        .split_inclusive("\r\n")
+        .filter(|line| !line.starts_with("ORGANIZER") && !line.starts_with("ATTENDEE"))
+        .collect();
+    assert!(detached.contains(&id));
+    let reply = put(&fx.app, "bob", &bob_uri, &detached).await;
+    assert!(reply.status.is_success(), "{}", reply.text());
+    assert_eq!(
+        send(
+            &fx.app,
+            "bob",
+            "GET",
+            &attachment_path(&id),
+            &[],
+            Vec::new()
+        )
+        .await
+        .status,
+        StatusCode::NOT_FOUND
+    );
+    // Alice deletes her event: the file is gone and no longer charged.
+    send(
+        &fx.app,
+        "alice",
+        "DELETE",
+        &format!("{CAL}m.ics"),
+        &[],
+        Vec::new(),
+    )
+    .await;
+    fx.store.empty_trash(fx.alice.id).await.unwrap();
+    while fx
+        .store
+        .purge_expired_trash(i64::MAX / 2, 100)
+        .await
+        .unwrap()
+        > 0
+    {}
+    assert_eq!(
+        fx.store.attachment_usage(fx.alice.id).await.unwrap(),
+        (0, 0)
+    );
+}
+
+#[tokio::test]
+async fn an_attendee_cannot_reshare_the_organizer_attachment() {
+    let fx = fixture_with(scheduling_fixture_config()).await;
+    let (id, bob_uri) = invitation_with_attachment(&fx).await;
+    // Bob makes himself organizer and invites carol, keeping the ATTACH.
+    let pivot: String = bob_copy(&fx)
+        .await
+        .split_inclusive("\r\n")
+        .map(|line| {
+            if line.starts_with("ORGANIZER") {
+                "ORGANIZER:mailto:bob@example.org\r\n".to_owned()
+            } else if line.starts_with("ATTENDEE") {
+                String::new()
+            } else if line.starts_with("END:VEVENT") {
+                format!(
+                    "ATTENDEE;PARTSTAT=ACCEPTED:mailto:bob@example.org\r\nATTENDEE;RSVP=TRUE:mailto:carol@example.org\r\n{line}"
+                )
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect();
+    let reply = put(&fx.app, "bob", &bob_uri, &pivot).await;
+    assert!(reply.status.is_success(), "{}", reply.text());
+    let carol = fx
+        .store
+        .user_by_name(&"carol".parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    // Carol got bob's invitation, but no access to alice's file.
+    assert!(
+        fx.store
+            .scheduling_object(carol.id, "m")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    for user in ["carol", "bob"] {
+        assert_eq!(
+            send(&fx.app, user, "GET", &attachment_path(&id), &[], Vec::new())
+                .await
+                .status,
+            StatusCode::NOT_FOUND,
+            "{user}"
+        );
+    }
+    // Alice removes it: nothing keeps it alive or charged to her.
+    let reply = send(
+        &fx.app,
+        "alice",
+        "POST",
+        &format!("{CAL}m.ics?action=attachment-remove&managed-id={id}"),
+        &[],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.text());
+    assert_eq!(
+        fx.store.attachment_usage(fx.alice.id).await.unwrap(),
+        (0, 0)
+    );
+}
+
+#[tokio::test]
+async fn removal_revokes_access_even_if_the_update_is_not_delivered() {
+    let mut config = scheduling_fixture_config();
+    // Room for the invitation (copy and inbox message), not for an update.
+    config.scheduling.max_delivered_bytes_per_hour = 64 * 1024;
+    let fx = fixture_with(config).await;
+    let uri = format!("{CAL}m.ics");
+    put(&fx.app, "alice", &uri, &event("m", "")).await;
+    let id = added(&fx, &uri, b"agenda").await;
+    let with_attach = unfold(&get_text(&fx.app, "alice", &uri).await);
+    let padding = format!("DESCRIPTION:{}\r\n", "x".repeat(24 * 1024));
+    let invite = with_attach.replace(
+        "SUMMARY:Meeting\r\n",
+        &format!(
+            "SUMMARY:Meeting\r\n{padding}ORGANIZER:mailto:alice@example.org\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:alice@example.org\r\n{BOB_LINE}"
+        ),
+    );
+    let reply = put(&fx.app, "alice", &uri, &invite).await;
+    assert!(reply.status.is_success(), "{}", reply.text());
+    assert!(bob_copy(&fx).await.contains(&id));
+    assert_eq!(
+        send(
+            &fx.app,
+            "bob",
+            "GET",
+            &attachment_path(&id),
+            &[],
+            Vec::new()
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    let reply = send(
+        &fx.app,
+        "alice",
+        "POST",
+        &format!("{uri}?action=attachment-remove&managed-id={id}"),
+        &[],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.text());
+    // The update did not reach bob: his copy still names the file …
+    assert!(bob_copy(&fx).await.contains(&id));
+    // … but he cannot download it, and it is not charged to alice.
+    assert_eq!(
+        send(
+            &fx.app,
+            "bob",
+            "GET",
+            &attachment_path(&id),
+            &[],
+            Vec::new()
+        )
+        .await
+        .status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        fx.store.attachment_usage(fx.alice.id).await.unwrap(),
+        (0, 0)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slow_uploads_of_one_user_do_not_block_others() {
+    let fx = fixture().await;
+    put(&fx.app, "alice", EVENT, &event("e", "")).await;
+    put(
+        &fx.app,
+        "bob",
+        "/dav/calendars/bob/default/b.ics",
+        &event("b", ""),
+    )
+    .await;
+    // Two uploads that send one byte and then nothing.
+    let mut senders = Vec::new();
+    let mut tasks = Vec::new();
+    for _ in 0..2 {
+        let (mut sender, body) = http_body_util::channel::Channel::<bytes::Bytes>::new(1);
+        sender
+            .send_data(bytes::Bytes::from_static(b"x"))
+            .await
+            .unwrap();
+        senders.push(sender);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("{EVENT}?action=attachment-add"))
+            .header(header::AUTHORIZATION, basic("alice"))
+            .body(Body::new(body))
+            .unwrap();
+        let app = fx.app.clone();
+        tasks.push(tokio::spawn(async move {
+            app.oneshot(request).await.unwrap().status()
+        }));
+    }
+    // Let them reach the point where they hold their slots.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // A third upload of alice is refused at once (no waiting) …
+    let mut refused = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        let reply = add(&fx.app, "alice", EVENT, "", "third.txt", b"3").await;
+        if reply.status == StatusCode::SERVICE_UNAVAILABLE {
+            refused = Some(reply);
+            break;
+        }
+        assert_eq!(reply.status, StatusCode::CREATED);
+        let id = reply.header("cal-managed-id").unwrap().to_owned();
+        send(
+            &fx.app,
+            "alice",
+            "POST",
+            &format!("{EVENT}?action=attachment-remove&managed-id={id}"),
+            &[],
+            Vec::new(),
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let refused = refused.expect("alice's third upload was not refused");
+    assert_eq!(refused.header("retry-after"), Some("1"));
+    // … while bob uploads as usual.
+    let reply = add(
+        &fx.app,
+        "bob",
+        "/dav/calendars/bob/default/b.ics",
+        "",
+        "b.txt",
+        b"b",
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.text());
+    // The slow bodies end: their uploads go through.
+    drop(senders);
+    for task in tasks {
+        assert_eq!(task.await.unwrap(), StatusCode::CREATED);
+    }
+    let reply = add(&fx.app, "alice", EVENT, "", "fourth.txt", b"4").await;
+    assert_eq!(reply.status, StatusCode::CREATED);
 }

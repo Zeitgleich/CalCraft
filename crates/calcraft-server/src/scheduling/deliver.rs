@@ -124,6 +124,7 @@ async fn store_text(
                 set: tag,
                 if_match: None,
                 requires: origin.map(|o| (o.collection_id, o.name, o.tag)),
+                keep_delivered: false,
             },
         )
         .await?;
@@ -313,6 +314,14 @@ pub async fn cancel(
     let uid = itip::uid(projection)
         .ok_or(Failure::NotDelivered)?
         .to_owned();
+    // Access to the organizer's attachments ends now, whether or not the
+    // cancellation reaches the recipient's calendar (quota, limits).
+    if let Some(origin) = origin {
+        state
+            .store
+            .revoke_delivered_attachments(origin.collection_id, origin.name, recipient.id)
+            .await?;
+    }
     let recipient_addresses = scheduling.addresses(&state.store, recipient).await?;
     let is_recipient = |v: &str| recipient_addresses.contains(&normalize(v));
     for attempt in 0..ATTEMPTS {

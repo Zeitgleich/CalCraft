@@ -55,3 +55,22 @@ fn urls_come_from_the_configured_base() {
         "https://cal.example.org/dav/attachments/0123"
     );
 }
+
+#[test]
+fn slots_are_bounded_per_user_and_server_wide() {
+    let slots = Slots::new(3, 2);
+    let a1 = slots.try_take(1).unwrap();
+    let a2 = slots.try_take(1).unwrap();
+    // One user cannot take more than two …
+    assert!(slots.try_take(1).is_none());
+    // … others still can, up to the server-wide limit.
+    let b1 = slots.try_take(2).unwrap();
+    assert!(slots.try_take(3).is_none());
+    drop(a1);
+    let c1 = slots.try_take(3).unwrap();
+    // Server-wide limit again.
+    assert!(slots.try_take(1).is_none());
+    drop((a2, b1, c1));
+    let again: Vec<_> = (0..2).map(|_| slots.try_take(1).unwrap()).collect();
+    assert_eq!(again.len(), 2);
+}

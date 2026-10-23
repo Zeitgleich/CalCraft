@@ -82,10 +82,10 @@ pub async fn handle(State(state): State<AppState>, request: Request) -> Response
         user: &user,
     };
     // Attachments are only downloaded; nothing else applies to them.
-    if let Resource::Attachment(meta) = &resource {
+    if let (Resource::Attachment(meta), Some(managed)) = (&resource, &state.attachments) {
         return match request.method().as_str() {
-            "GET" => attachments::get(ctx, meta, request.headers(), true).await,
-            "HEAD" => attachments::get(ctx, meta, request.headers(), false).await,
+            "GET" => attachments::get(ctx, managed, meta, request.headers(), true).await,
+            "HEAD" => attachments::get(ctx, managed, meta, request.headers(), false).await,
             _ => method_not_allowed(),
         };
     }

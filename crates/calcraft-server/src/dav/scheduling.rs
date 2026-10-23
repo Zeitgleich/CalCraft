@@ -140,7 +140,9 @@ enum Attempt {
 }
 
 /// Stores a scheduling object built by the server. `Err(Retry)` if the
-/// object changed since it was read.
+/// object changed since it was read. `keep_delivered`: an attendee's
+/// change of their copy of the same organizer's invitation, which keeps the
+/// organizer's attachments it got by delivery.
 async fn store_object(
     ctx: Ctx<'_>,
     collection: &Collection,
@@ -148,6 +150,7 @@ async fn store_object(
     tree: &Component,
     guard: &Precondition,
     tag: &str,
+    keep_delivered: bool,
 ) -> Result<(PutOutcome, String), Attempt> {
     let calendar = collection.kind == CollectionKind::Calendar;
     let text = to_string(tree)
@@ -187,6 +190,7 @@ async fn store_object(
                 set: Some(tag),
                 if_match: None,
                 requires: None,
+                keep_delivered,
             },
         )
         .await
@@ -281,6 +285,7 @@ pub(super) async fn put(
             set: None,
             if_match: if_tag.as_deref(),
             requires: None,
+            keep_delivered: false,
         };
         return match store
             .put_item_scheduled(collection.id, name, &item, &precondition, &tags)
@@ -588,6 +593,7 @@ async fn organizer_put(
         &tree,
         target.guard,
         &tag,
+        false,
     )
     .await
     {
@@ -769,6 +775,11 @@ async fn attendee_put(
         }
     }
 
+    // The organizer's attachments stay only while this is still their
+    // invitation (RFC 8607 §3.6; see `attachments::set_item_refs`).
+    let same_organizer = old.is_some_and(|old| {
+        matches!(itip::organizer(old), Ok(Some(o)) if normalize(&o.value) == normalize(&organizer.value))
+    });
     let tag = new_schedule_tag();
     let outcome = match store_object(
         ctx,
@@ -777,6 +788,7 @@ async fn attendee_put(
         &tree,
         target.guard,
         &tag,
+        same_organizer,
     )
     .await
     {

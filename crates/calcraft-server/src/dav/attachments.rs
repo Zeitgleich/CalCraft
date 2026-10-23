@@ -38,6 +38,7 @@ use calcraft_ical::{
     write::to_string,
 };
 use calcraft_store::{AttachmentMeta, Collection, NewAttachment, Precondition, StoreError};
+use http_body_util::{BodyExt, Full};
 
 use super::{
     Ctx, dav_error, need_privileges, not_found,
@@ -269,8 +270,10 @@ pub(super) async fn post(
         if declared.is_some_and(|length| length > u64::try_from(max).unwrap_or(u64::MAX)) {
             return precondition_error("max-attachment-size");
         }
-        // Bounds the memory of uploads in flight.
-        let Ok(_permit) = attachments.uploads.acquire().await else {
+        // Bounds the memory of uploads in flight. Never waits: a user with
+        // slow uploads holds at most a few of the slots, everybody else gets
+        // `503` with `Retry-After` while the server is at its limit.
+        let Some(_slot) = attachments.uploads.try_take(ctx.user.id) else {
             return service_unavailable();
         };
         let body = match read_body(request, max).await {
@@ -509,6 +512,7 @@ fn download_headers(meta: &AttachmentMeta, response: &mut Response) {
 /// `GET`/`HEAD` of an attachment the user may read.
 pub(super) async fn get(
     ctx: Ctx<'_>,
+    attachments: &Attachments,
     meta: &AttachmentMeta,
     headers: &HeaderMap,
     with_body: bool,
@@ -528,13 +532,25 @@ pub(super) async fn get(
         return response;
     }
     let body = if with_body {
+        // The file stays in memory until it is sent: bounded like uploads.
+        let Some(slot) = attachments.downloads.try_take(ctx.user.id) else {
+            return service_unavailable();
+        };
         match ctx
             .state
             .store
             .attachment_content(&meta.managed_id, ctx.user.id)
             .await
         {
-            Ok(Some(content)) => Body::from(content),
+            Ok(Some(content)) => {
+                // The slot is released when the body is dropped (sent or
+                // the connection closed), not when this handler returns.
+                let body = Full::new(Bytes::from(content)).map_frame(move |frame| {
+                    let _ = &slot;
+                    frame
+                });
+                Body::new(body)
+            }
             // Removed or no longer readable since the path was resolved.
             Ok(None) => return not_found(),
             Err(err) => return store_error(err),

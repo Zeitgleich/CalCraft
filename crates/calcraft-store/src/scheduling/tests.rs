@@ -101,6 +101,7 @@ async fn schedule_tag_is_stored_and_checked() {
         set: Some("\"t1\""),
         if_match: None,
         requires: None,
+        keep_delivered: false,
     };
     let outcome = store
         .put_item_scheduled(
@@ -125,6 +126,7 @@ async fn schedule_tag_is_stored_and_checked() {
         set: Some("\"t2\""),
         if_match: Some("\"other\""),
         requires: None,
+        keep_delivered: false,
     };
     assert!(matches!(
         store
@@ -142,6 +144,7 @@ async fn schedule_tag_is_stored_and_checked() {
         set: Some("\"t2\""),
         if_match: Some("\"t1\""),
         requires: None,
+        keep_delivered: false,
     };
     store
         .put_item_scheduled(
@@ -411,6 +414,7 @@ async fn deliveries_of_superseded_versions_are_refused() {
         set: Some(set),
         if_match: None,
         requires: None,
+        keep_delivered: false,
     };
     store
         .put_item_scheduled(
@@ -427,6 +431,7 @@ async fn deliveries_of_superseded_versions_are_refused() {
         set: Some("\"c\""),
         if_match: None,
         requires: Some((alice_cal.id, "o.ics", from)),
+        keep_delivered: false,
     };
     store
         .put_item_scheduled(

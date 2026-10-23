@@ -32,7 +32,13 @@ CREATE TABLE attachment_refs (
     attachment_id INTEGER NOT NULL REFERENCES attachments (id) ON DELETE CASCADE,
     item_id       INTEGER REFERENCES items (id) ON DELETE CASCADE,
     trash_id      INTEGER REFERENCES trash (id) ON DELETE CASCADE,
-    CHECK ((item_id IS NULL) <> (trash_id IS NULL))
+    -- References to another user's attachment (an attendee's copy of an
+    -- invitation): the organizer's object it was delivered from. The
+    -- reference lives only as long as that object exists and references
+    -- the attachment itself; NULL for the owner's own attachments.
+    via_item_id   INTEGER REFERENCES items (id) ON DELETE CASCADE,
+    CHECK ((item_id IS NULL) <> (trash_id IS NULL)),
+    CHECK (via_item_id IS NULL OR item_id IS NOT NULL)
 ) STRICT;
 
 CREATE UNIQUE INDEX attachment_refs_by_item ON attachment_refs (item_id, attachment_id)
@@ -40,6 +46,8 @@ CREATE UNIQUE INDEX attachment_refs_by_item ON attachment_refs (item_id, attachm
 CREATE UNIQUE INDEX attachment_refs_by_trash ON attachment_refs (trash_id, attachment_id)
     WHERE trash_id IS NOT NULL;
 CREATE INDEX attachment_refs_by_attachment ON attachment_refs (attachment_id);
+CREATE INDEX attachment_refs_by_via ON attachment_refs (via_item_id, attachment_id)
+    WHERE via_item_id IS NOT NULL;
 
 -- Garbage collection: an attachment goes with its last reference, however
 -- that disappears (PUT without the ATTACH, DELETE without trash, purged

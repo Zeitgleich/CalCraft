@@ -210,6 +210,7 @@ async fn foreign_managed_ids_grant_nothing() {
         set: Some("\"t\""),
         if_match: None,
         requires: Some((s.bob_cal.id, "x.ics", "\"none\"")),
+        keep_delivered: false,
     };
     assert!(matches!(
         put_with(&s.store, s.bob_cal.id, "y.ics", "y", &[A1], &tags).await,
@@ -225,6 +226,7 @@ async fn deliveries_share_the_organizer_attachment_until_removed() {
         set: Some("\"tag1\""),
         if_match: None,
         requires: None,
+        keep_delivered: false,
     };
     put_with(&s.store, s.alice_cal.id, "m.ics", "m", &[A1], &organizer)
         .await
@@ -233,13 +235,23 @@ async fn deliveries_share_the_organizer_attachment_until_removed() {
         set: Some("\"copy\""),
         if_match: None,
         requires: Some((s.alice_cal.id, "m.ics", "\"tag1\"")),
+        keep_delivered: false,
     };
     put_with(&s.store, s.bob_cal.id, "m.ics", "m", &[A1], &delivery)
         .await
         .unwrap();
     assert!(readable(&s.store, A1, &s.bob).await);
     // Bob keeps it with his own updates (PARTSTAT).
-    put(&s.store, s.bob_cal.id, "m.ics", "m", &[A1]).await;
+    put_with(
+        &s.store,
+        s.bob_cal.id,
+        "m.ics",
+        "m",
+        &[A1],
+        &attendee_update(),
+    )
+    .await
+    .unwrap();
     assert!(readable(&s.store, A1, &s.bob).await);
     // Bob's copy goes into his trash: the reference to alice's attachment
     // does not follow, and a restore does not bring it back.
@@ -268,13 +280,14 @@ async fn deliveries_share_the_organizer_attachment_until_removed() {
 }
 
 #[tokio::test]
-async fn the_last_reference_keeps_an_attachment() {
+async fn deleting_the_organizer_object_ends_every_access() {
     let s = setup().await;
     upload(&s.store, s.alice.id, A1, b"agenda", 0).await;
     let organizer = ScheduleTag {
         set: Some("\"tag1\""),
         if_match: None,
         requires: None,
+        keep_delivered: false,
     };
     put_with(&s.store, s.alice_cal.id, "m.ics", "m", &[A1], &organizer)
         .await
@@ -283,20 +296,19 @@ async fn the_last_reference_keeps_an_attachment() {
         set: Some("\"copy\""),
         if_match: None,
         requires: Some((s.alice_cal.id, "m.ics", "\"tag1\"")),
+        keep_delivered: false,
     };
     put_with(&s.store, s.bob_cal.id, "m.ics", "m", &[A1], &delivery)
         .await
         .unwrap();
-    // The organizer's object goes; bob's copy still references it.
+    // The organizer's object goes.
     s.store
         .delete_item(s.alice_cal.id, "m.ics", &Precondition::None)
         .await
         .unwrap();
-    assert!(readable(&s.store, A1, &s.bob).await);
-    s.store
-        .delete_item(s.bob_cal.id, "m.ics", &Precondition::None)
-        .await
-        .unwrap();
+    // Delivered references live only as long as the organizer's object:
+    // bob's copy no longer grants anything and alice is not charged.
+    assert!(!readable(&s.store, A1, &s.bob).await);
     assert_eq!(exists(&s.store, s.alice.id).await, 0);
 }
 
@@ -477,6 +489,7 @@ async fn copies_do_not_carry_foreign_attachments() {
         set: Some("\"tag1\""),
         if_match: None,
         requires: None,
+        keep_delivered: false,
     };
     put_with(&s.store, s.alice_cal.id, "m.ics", "m", &[A1], &organizer)
         .await
@@ -485,6 +498,7 @@ async fn copies_do_not_carry_foreign_attachments() {
         set: Some("\"copy\""),
         if_match: None,
         requires: Some((s.alice_cal.id, "m.ics", "\"tag1\"")),
+        keep_delivered: false,
     };
     put_with(&s.store, s.bob_cal.id, "m.ics", "m", &[A1, B1], &delivery)
         .await
@@ -645,4 +659,180 @@ fn managed_id_syntax() {
     ] {
         assert!(!valid_managed_id(bad), "{bad}");
     }
+}
+
+/// An attendee's change of their copy (same organizer, still scheduled).
+fn attendee_update() -> ScheduleTag<'static> {
+    ScheduleTag {
+        set: Some("\"copy2\""),
+        if_match: None,
+        requires: None,
+        keep_delivered: true,
+    }
+}
+
+/// Alice organizes `m.ics` with A1 and bob got his copy by delivery.
+async fn invited(s: &Setup) {
+    upload(&s.store, s.alice.id, A1, b"agenda", 0).await;
+    let organizer = ScheduleTag {
+        set: Some("\"tag1\""),
+        if_match: None,
+        requires: None,
+        keep_delivered: false,
+    };
+    put_with(&s.store, s.alice_cal.id, "m.ics", "m", &[A1], &organizer)
+        .await
+        .unwrap();
+    let delivery = ScheduleTag {
+        set: Some("\"copy\""),
+        if_match: None,
+        requires: Some((s.alice_cal.id, "m.ics", "\"tag1\"")),
+        keep_delivered: false,
+    };
+    put_with(&s.store, s.bob_cal.id, "m.ics", "m", &[A1], &delivery)
+        .await
+        .unwrap();
+    assert!(readable(&s.store, A1, &s.bob).await);
+}
+
+#[tokio::test]
+async fn a_detached_copy_loses_the_organizer_attachment() {
+    let s = setup().await;
+    invited(&s).await;
+    // Bob strips ORGANIZER/ATTENDEE: a plain object of his, no Schedule-Tag.
+    put(&s.store, s.bob_cal.id, "m.ics", "m", &[A1]).await;
+    assert!(!readable(&s.store, A1, &s.bob).await);
+    // Not even back as "an attendee update" afterwards.
+    put_with(
+        &s.store,
+        s.bob_cal.id,
+        "m.ics",
+        "m",
+        &[A1],
+        &attendee_update(),
+    )
+    .await
+    .unwrap();
+    assert!(!readable(&s.store, A1, &s.bob).await);
+    // Alice deletes her event: the file is gone and no longer charged.
+    s.store
+        .delete_item(s.alice_cal.id, "m.ics", &Precondition::None)
+        .await
+        .unwrap();
+    assert_eq!(s.store.attachment_usage(s.alice.id).await.unwrap(), (0, 0));
+}
+
+#[tokio::test]
+async fn an_attendee_cannot_pass_the_organizer_attachment_on() {
+    let s = setup().await;
+    let carol = s
+        .store
+        .create_user(&"carol".parse().unwrap(), "h", None)
+        .await
+        .unwrap();
+    let carol_cal = s
+        .store
+        .collection(
+            carol.id,
+            CollectionKind::Calendar,
+            &DEFAULT_COLLECTION_SLUG.parse().unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    invited(&s).await;
+    // Even while bob's copy holds the delivered reference, a delivery
+    // derived from his copy gives carol nothing.
+    let from_bob = ScheduleTag {
+        set: Some("\"carol\""),
+        if_match: None,
+        requires: Some((s.bob_cal.id, "m.ics", "\"copy\"")),
+        keep_delivered: false,
+    };
+    put_with(&s.store, carol_cal.id, "m.ics", "m", &[A1], &from_bob)
+        .await
+        .unwrap();
+    assert!(!readable(&s.store, A1, &carol).await);
+    assert!(
+        s.store
+            .item_attachments(carol_cal.id, "m.ics")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // Bob turns his copy into his own invitation: the reference goes.
+    let pivot = ScheduleTag {
+        set: Some("\"bob-org\""),
+        if_match: None,
+        requires: None,
+        keep_delivered: false,
+    };
+    put_with(&s.store, s.bob_cal.id, "m.ics", "m", &[A1], &pivot)
+        .await
+        .unwrap();
+    assert!(!readable(&s.store, A1, &s.bob).await);
+}
+
+#[tokio::test]
+async fn organizer_changes_revoke_access_without_a_delivery() {
+    let s = setup().await;
+    invited(&s).await;
+    // Alice drops A1 from her event; the update never reaches bob.
+    upload(&s.store, s.alice.id, A2, b"v2", 0).await;
+    let organizer = ScheduleTag {
+        set: Some("\"tag2\""),
+        if_match: None,
+        requires: None,
+        keep_delivered: false,
+    };
+    put_with(&s.store, s.alice_cal.id, "m.ics", "m", &[A2], &organizer)
+        .await
+        .unwrap();
+    assert!(!readable(&s.store, A1, &s.bob).await);
+    assert_eq!(s.store.attachment_usage(s.alice.id).await.unwrap().0, 1);
+    // Bob's stale copy cannot bring it back either.
+    put_with(
+        &s.store,
+        s.bob_cal.id,
+        "m.ics",
+        "m",
+        &[A1],
+        &attendee_update(),
+    )
+    .await
+    .unwrap();
+    assert!(!readable(&s.store, A1, &s.bob).await);
+
+    // A cancellation for bob ends his access to the current one too.
+    let delivery = ScheduleTag {
+        set: Some("\"copy3\""),
+        if_match: None,
+        requires: Some((s.alice_cal.id, "m.ics", "\"tag2\"")),
+        keep_delivered: false,
+    };
+    put_with(&s.store, s.bob_cal.id, "m.ics", "m", &[A2], &delivery)
+        .await
+        .unwrap();
+    assert!(readable(&s.store, A2, &s.bob).await);
+    assert_eq!(
+        s.store
+            .revoke_delivered_attachments(s.alice_cal.id, "m.ics", s.bob.id)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(!readable(&s.store, A2, &s.bob).await);
+    assert!(readable(&s.store, A2, &s.alice).await);
+
+    // Deleting the organizer's object (into the trash) ends it as well.
+    put_with(&s.store, s.bob_cal.id, "m.ics", "m", &[A2], &delivery)
+        .await
+        .unwrap();
+    assert!(readable(&s.store, A2, &s.bob).await);
+    s.store
+        .delete_item_to_trash(s.alice_cal.id, "m.ics", &Precondition::None, 10, |_| None)
+        .await
+        .unwrap();
+    assert!(!readable(&s.store, A2, &s.bob).await);
+    assert!(readable(&s.store, A2, &s.alice).await);
 }

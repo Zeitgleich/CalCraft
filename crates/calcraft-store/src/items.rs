@@ -148,6 +148,12 @@ pub struct ScheduleTag<'a> {
     /// unchanged, so an older delivery can never overwrite a newer one
     /// ([`StoreError::Superseded`]).
     pub requires: Option<(i64, &'a str, &'a str)>,
+    /// The write is an attendee's change of their copy of an invitation
+    /// (same organizer, still a scheduling object): references to the
+    /// organizer's attachments that the copy got by delivery may stay, as
+    /// long as the organizer's object still references them. Every other
+    /// write drops references to attachments of other users.
+    pub keep_delivered: bool,
 }
 
 impl Precondition {
@@ -703,6 +709,7 @@ impl Store {
                     owner_id,
                     item.attachments,
                     guard_id,
+                    schedule.keep_delivered && schedule.set.is_some(),
                 )
                 .await?;
                 record_change(&mut tx, collection_id, revision, name, false).await?;

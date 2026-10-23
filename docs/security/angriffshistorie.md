@@ -246,6 +246,9 @@ Die Beschreibungen sind Payload-Ideen für **eigene** Tests gegen CalCraft. Sie 
 64. Teilnehmer ändert oder entfernt den Anhang des Organisators per POST → 403 `need-privileges`; nach Absage bzw. Entfernen aus der Teilnehmerliste kein Download mehr. ✅ (`attendees_read_but_cannot_change_and_lose_access_on_cancel`)
 65. Upload größer als `max_bytes` (mit und ohne `Content-Length`), mehr Anhänge als `max_per_object`, volle Quota (auch durch den Papierkorb) → 403/507 ohne Rückstände. ✅ (`size_limits_and_quota`)
 66. Parallele Uploads bzw. Upload parallel zu DELETE → nichts geht verloren, keine verwaisten Dateien. ✅ (`parallel_uploads_lose_nothing`, `upload_racing_a_delete_leaves_no_orphans`)
+67. Teilnehmer entfernt ORGANIZER/ATTENDEE aus seiner Kopie (oder macht sich selbst zum Organisator und lädt Dritte ein) und behält bzw. verteilt so den Anhang des Organisators weiter, auch nach dessen DELETE → Zugriff endet sofort, Dritte bekommen nichts, die Datei belastet den Organisator nicht mehr (Fund aus dem internen Review). ✅ (`a_detached_attendee_copy_loses_access`, `an_attendee_cannot_reshare_the_organizer_attachment`, Store-Tests)
+68. Entfernen eines Anhangs bzw. Absage, deren Zustellung scheitert (Byte-Budget, Quota) → Zugriff endet trotzdem. ✅ (`removal_revokes_access_even_if_the_update_is_not_delivered`, `organizer_changes_revoke_access_without_a_delivery`)
+69. Langsame Upload-Bodies (1 Byte, dann nichts) eines Benutzers blockieren Uploads anderer → nur eigene 2 Slots belegt, sonst sofort 503. ✅ (`slow_uploads_of_one_user_do_not_block_others`)
 
 ### Release (M7)
 60. Gesamter Autorisierungs-Matrix-Test grün. Fuzzing-Langlauf ohne Funde. `cargo audit` sauber. Header-Check (CSP, HSTS, nosniff, frame-ancestors, Referrer-Policy) auf allen UI- und API-Antworten.

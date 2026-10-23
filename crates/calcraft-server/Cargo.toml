@@ -75,7 +75,7 @@ zeroize = { workspace = true, optional = true }
 
 [dev-dependencies]
 calcraft-store = { workspace = true, features = ["test-hooks"] }
-http-body-util.workspace = true
+http-body-util = { workspace = true, features = ["channel"] }
 serde_json.workspace = true
 tower.workspace = true
 

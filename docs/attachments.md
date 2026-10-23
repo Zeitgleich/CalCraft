@@ -101,11 +101,24 @@ without 2FA, or an app password). A user may download an attachment if
 * one of their **live** calendar objects references it.
 
 References are rows in the database (`attachment_refs`) that only the
-store writes, when an object is stored, after checking that the object may
-reference the attachment: the owner's own attachments, attachments the
-object referenced before, and – for scheduling deliveries – attachments of
-the organizer's object the copy is derived from, checked in the same
-transaction. The content of an object never grants anything by itself:
+store writes, when an object is stored, after checking in the same
+transaction that the object may reference the attachment:
+
+* the owner's own attachments;
+* on a scheduling delivery: attachments the **organizer owns** and their
+  object references itself – never what that object only holds of a third
+  user, so an attendee who turns their copy into an invitation of their
+  own cannot pass the organizer's files on;
+* on an attendee's PUT of their copy (still a scheduling object, same
+  ORGANIZER): the references it got by delivery, as long as the
+  organizer's object still references the attachment.
+
+A delivered reference records the organizer's object it came from and
+lives only as long as that object exists and references the attachment.
+Any other write drops references to other users' attachments: an
+attendee who strips ORGANIZER/ATTENDEE from their copy, or makes
+themselves organizer, loses access at once (the `ATTACH` stays in their
+event as text and grants nothing). The content of an object never grants anything by itself:
 writing someone else's managed id or URL into an own event, an import, a
 subscription feed or a COPY of an invitation gives no access.
 
@@ -115,11 +128,11 @@ that never existed (`tests/authz_matrix.rs`).
 **Scheduling.** Invitations to users of this server reference the
 organizer's attachment, so attendees can download it; they cannot add,
 update or remove attachments (`DAV:need-privileges`). Access ends when the
-attendee no longer has a live copy that references the file: the organizer
-removes the attachment or the attendee (cancellation: a kept, cancelled
-copy loses its managed `ATTACH` properties), deletes the event (the
-untouched copy is removed, an answered one is cancelled), or the attendee
-deletes their copy. An attendee's copy in the trash keeps no reference to
+organizer removes the attachment, deletes the event or removes the
+attendee – directly in the database, **whether or not** the update or
+cancellation reaches the attendee (hourly byte budget, quota, no
+calendar); a kept, cancelled copy also loses its managed `ATTACH`
+properties – or when the attendee deletes or detaches their copy. An attendee's copy in the trash keeps no reference to
 the organizer's file, and restoring it does not bring the access back.
 Inbox messages are notifications only and grant nothing.
 
@@ -182,8 +195,15 @@ upload racing a DELETE leaves nothing behind
 ## Limits and abuse
 
 * The body is streamed with a hard limit of `max_bytes` (and refused before
-  reading if `Content-Length` is larger); no decompression happens. At most
-  4 uploads are held in memory at a time (others wait).
+  reading if `Content-Length` is larger) within `server.request_timeout_secs`;
+  no decompression happens. At most 16 uploads are in flight server-wide
+  and 2 per user; beyond that the request gets `503` with `Retry-After` at
+  once instead of waiting, so a user sending slow bodies blocks only their
+  own slots.
+* Downloads hold the file in memory until it is sent: at most 16 at a time
+  server-wide and 4 per user (the slot is released when the response body
+  is gone), else `503`. Worst case in memory: 32 × `max_bytes`, which is
+  why `max_bytes` is capped at 100 MiB (default 10 MiB: 320 MiB).
 * `max_per_object`, `max_bytes_per_user` and the storage quota bound what
   a user can store; the per-client request limits and the scheduling limits
   (recipients and delivered bytes per hour) apply as usual.
@@ -196,6 +216,10 @@ upload racing a DELETE leaves nothing behind
 
 ## Deviations from RFC 8607 and open points
 
+* An attachment's bytes are charged to the uploader while anything
+  references it. Attendees' references cannot keep a file alive after the
+  organizer dropped it, but an attendee's copy (or trash entry of the
+  organizer) can while the organizer's object still references it.
 * Attachments are answered with `404` when they are removed or not
   readable, never `410 Gone` (that would reveal that the id existed).
 * `Prefer: return=representation` is not supported; redirects (307/308)

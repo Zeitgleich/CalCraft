@@ -56,7 +56,13 @@ follow [Semantic Versioning](https://semver.org/). Release process:
   allowlisted media types; sanitised file names. PUTs may keep their own
   attachments (rewritten to the server's form) but not reference somebody
   else's (`CALDAV:valid-managed-id-parameter`); cancelled attendee copies
-  lose the organizer's attachments. Fuzz target `attach`.
+  lose the organizer's attachments. Attendees' access derives from the
+  organizer's object it was delivered from: it ends when the organizer
+  drops the file, deletes the event or removes the attendee (also when the
+  update cannot be delivered), and when the attendee detaches their copy or
+  makes themselves organizer; attendees cannot pass files on. Uploads and
+  downloads are bounded server-wide and per user (`503` instead of
+  waiting). Fuzz target `attach`.
 
 ### Changed
 

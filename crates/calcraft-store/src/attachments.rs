@@ -8,7 +8,9 @@
 //! [`set_item_refs`]). Read access for other users derives from these rows
 //! (an attendee's copy references the organizer's attachment), never from
 //! the content, so writing someone else's managed id or URL into an own
-//! event grants nothing.
+//! event grants nothing. A reference to another user's attachment records
+//! the organizer's object it was delivered from (`via_item_id`) and goes
+//! when that object goes or stops referencing the attachment.
 //!
 //! An attachment is deleted with its last reference (database trigger, see
 //! migration `0012_attachments`); uploads that never got a reference are
@@ -79,61 +81,110 @@ pub(crate) async fn owner_bytes(executor: impl SqliteExecutor<'_>, owner_id: i64
 }
 
 /// Makes the references of object `item_id` exactly the attachments among
-/// `ids` it may reference: attachments of `owner_id` (the collection's
-/// owner), attachments the object already references (an attendee keeping
-/// the organizer's attachment) and attachments the object `guard`
-/// references (a delivery derived from the organizer's object, see
-/// [`crate::ScheduleTag::requires`]). Other ids are ignored: they grant
-/// nothing. References that are no longer wanted are removed, which
-/// collects attachments nobody references any more.
+/// `ids` it may reference. Ids it may not reference are ignored: they grant
+/// nothing. References that are no longer wanted are removed, together with
+/// the references delivered from them (an organizer dropping an attachment
+/// ends the attendees' access at once, whether the update reaches them or
+/// not), which collects attachments nobody references any more.
+///
+/// An object may reference
+///
+/// * attachments of `owner_id`, the collection's owner;
+/// * on a delivery (`guard`, the organizer's object, see
+///   [`crate::ScheduleTag::requires`]): attachments the organizer owns and
+///   their object references itself – never attachments that object only
+///   holds of a third user, so an attendee who turns their copy into an
+///   own invitation cannot pass the organizer's files on;
+/// * with `keep_delivered` (the attendee changes their copy of the same
+///   organizer's invitation): the delivered references it already has, as
+///   long as the organizer's object still references the attachment.
+///
+/// Every other write drops references to other users' attachments.
 pub(crate) async fn set_item_refs(
     tx: &mut Transaction<'static, Sqlite>,
     item_id: i64,
     owner_id: i64,
     ids: &[String],
     guard: Option<i64>,
+    keep_delivered: bool,
 ) -> Result<()> {
-    let mut wanted: Vec<i64> = Vec::new();
+    let mut wanted: Vec<(i64, Option<i64>)> = Vec::new();
     for id in ids.iter().filter(|id| valid_managed_id(id)) {
         if wanted.len() >= MAX_REFS_PER_ITEM {
             break;
         }
-        let allowed: Option<i64> = sqlx::query(
-            "SELECT a.id FROM attachments a WHERE a.managed_id = ?1 AND (a.owner_id = ?2 \
-               OR EXISTS (SELECT 1 FROM attachment_refs r WHERE r.attachment_id = a.id \
-                 AND (r.item_id = ?3 OR r.item_id = ?4)))",
-        )
-        .bind(id)
-        .bind(owner_id)
-        .bind(item_id)
-        .bind(guard)
-        .fetch_optional(&mut **tx)
-        .await?
-        .map(|row| row.try_get("id"))
-        .transpose()?;
-        if let Some(allowed) = allowed
-            && !wanted.contains(&allowed)
+        let own: Option<i64> =
+            sqlx::query("SELECT id FROM attachments WHERE managed_id = ? AND owner_id = ?")
+                .bind(id)
+                .bind(owner_id)
+                .fetch_optional(&mut **tx)
+                .await?
+                .map(|row| row.try_get("id"))
+                .transpose()?;
+        let mut found = own.map(|attachment| (attachment, None));
+        if found.is_none()
+            && let Some(guard) = guard
         {
-            wanted.push(allowed);
+            found = sqlx::query(
+                "SELECT a.id FROM attachments a \
+                 JOIN attachment_refs g ON g.attachment_id = a.id AND g.item_id = ?2 \
+                   AND g.via_item_id IS NULL \
+                 JOIN items gi ON gi.id = g.item_id \
+                 JOIN collections gc ON gc.id = gi.collection_id AND gc.owner_id = a.owner_id \
+                 WHERE a.managed_id = ?1",
+            )
+            .bind(id)
+            .bind(guard)
+            .fetch_optional(&mut **tx)
+            .await?
+            .map(|row| row.try_get::<i64, _>("id"))
+            .transpose()?
+            .map(|attachment| (attachment, Some(guard)));
+        }
+        if found.is_none() && keep_delivered {
+            found = sqlx::query(
+                "SELECT a.id, r.via_item_id FROM attachments a \
+                 JOIN attachment_refs r ON r.attachment_id = a.id AND r.item_id = ?2 \
+                   AND r.via_item_id IS NOT NULL \
+                 WHERE a.managed_id = ?1 AND EXISTS (SELECT 1 FROM attachment_refs o \
+                   WHERE o.item_id = r.via_item_id AND o.attachment_id = a.id \
+                     AND o.via_item_id IS NULL)",
+            )
+            .bind(id)
+            .bind(item_id)
+            .fetch_optional(&mut **tx)
+            .await?
+            .map(|row| {
+                Ok::<_, sqlx::Error>((row.try_get::<i64, _>("id")?, row.try_get("via_item_id")?))
+            })
+            .transpose()?;
+        }
+        if let Some(found) = found
+            && !wanted.iter().any(|(a, _)| *a == found.0)
+        {
+            wanted.push(found);
         }
     }
     set_exact_refs(tx, item_id, &wanted).await
 }
 
-/// Replaces the references of `item_id` by `wanted` (attachment row ids):
-/// new ones first, so that an attachment kept by the object is never
-/// collected in between.
+/// Replaces the references of `item_id` by `wanted` (attachment row ids
+/// and the object each was delivered from): new ones first, so that an
+/// attachment kept by the object is never collected in between.
 async fn set_exact_refs(
     tx: &mut Transaction<'static, Sqlite>,
     item_id: i64,
-    wanted: &[i64],
+    wanted: &[(i64, Option<i64>)],
 ) -> Result<()> {
-    for attachment in wanted {
+    for (attachment, via) in wanted {
         sqlx::query(
-            "INSERT INTO attachment_refs (attachment_id, item_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
+            "INSERT INTO attachment_refs (attachment_id, item_id, via_item_id) VALUES (?, ?, ?) \
+             ON CONFLICT (item_id, attachment_id) WHERE item_id IS NOT NULL \
+             DO UPDATE SET via_item_id = excluded.via_item_id",
         )
         .bind(attachment)
         .bind(item_id)
+        .bind(via)
         .execute(&mut **tx)
         .await?;
     }
@@ -145,7 +196,16 @@ async fn set_exact_refs(
             .iter()
             .map(|row| row.try_get("attachment_id"))
             .collect::<std::result::Result<_, _>>()?;
-    for stale in current.iter().filter(|id| !wanted.contains(id)) {
+    for stale in current
+        .iter()
+        .filter(|id| !wanted.iter().any(|(a, _)| a == *id))
+    {
+        // What attendees got from this object goes first.
+        sqlx::query("DELETE FROM attachment_refs WHERE via_item_id = ? AND attachment_id = ?")
+            .bind(item_id)
+            .bind(stale)
+            .execute(&mut **tx)
+            .await?;
         sqlx::query("DELETE FROM attachment_refs WHERE item_id = ? AND attachment_id = ?")
             .bind(item_id)
             .bind(stale)
@@ -165,7 +225,7 @@ pub(crate) async fn copy_refs(
     to: i64,
     owner_id: i64,
 ) -> Result<()> {
-    let wanted: Vec<i64> = sqlx::query(
+    let wanted: Vec<(i64, Option<i64>)> = sqlx::query(
         "SELECT r.attachment_id FROM attachment_refs r JOIN attachments a ON a.id = r.attachment_id \
          WHERE r.item_id = ? AND a.owner_id = ?",
     )
@@ -174,7 +234,7 @@ pub(crate) async fn copy_refs(
     .fetch_all(&mut **tx)
     .await?
     .iter()
-    .map(|row| row.try_get("attachment_id"))
+    .map(|row| row.try_get("attachment_id").map(|id| (id, None)))
     .collect::<std::result::Result<_, _>>()?;
     set_exact_refs(tx, to, &wanted).await
 }
@@ -460,6 +520,36 @@ impl Store {
             }
         }
         Ok(found)
+    }
+
+    /// Ends `recipient`'s access to the attachments delivered to them from
+    /// object `name` of collection `collection_id` (the organizer's
+    /// object): the organizer cancelled the invitation for them. Runs
+    /// whether or not the cancellation itself can be delivered. Returns the
+    /// number of references removed.
+    pub async fn revoke_delivered_attachments(
+        &self,
+        collection_id: i64,
+        name: &str,
+        recipient: i64,
+    ) -> Result<u64> {
+        self.observe(
+            async {
+                let done = sqlx::query(
+                    "DELETE FROM attachment_refs \
+                     WHERE via_item_id = (SELECT id FROM items WHERE collection_id = ?1 AND name = ?2) \
+                       AND item_id IN (SELECT i.id FROM items i \
+                         JOIN collections c ON c.id = i.collection_id WHERE c.owner_id = ?3)",
+                )
+                .bind(collection_id)
+                .bind(name)
+                .bind(recipient)
+                .execute(&self.writer)
+                .await?;
+                Ok(done.rows_affected())
+            }
+            .await,
+        )
     }
 
     /// Number and bytes of the attachments a user owns.
