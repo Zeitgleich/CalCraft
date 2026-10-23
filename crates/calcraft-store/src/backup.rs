@@ -24,7 +24,7 @@ use std::{
 };
 
 use sqlx::{
-    Connection, Row, SqliteConnection, SqlitePool,
+    ConnectOptions, Connection, Row, SqliteConnection, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode},
 };
 
@@ -249,7 +249,13 @@ fn connect_options(path: &Path) -> SqliteConnectOptions {
         .journal_mode(SqliteJournalMode::Wal)
         .foreign_keys(true)
         .busy_timeout(BUSY_TIMEOUT)
+        // sqlx warns about slow statements with their SQL text; warnings and
+        // errors must not contain SQL, so these go to debug only.
+        .log_slow_statements(log::LevelFilter::Debug, SLOW_STATEMENT)
 }
+
+/// Statements slower than this are logged (at debug level).
+const SLOW_STATEMENT: Duration = Duration::from_secs(1);
 
 async fn connect_pool(
     path: &Path,

@@ -4,7 +4,7 @@ members = ["crates/*"]
 default-members = ["crates/calcraft-server"]
 
 [workspace.package]
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 edition = "2024"
 rust-version = "1.94"
 license = "AGPL-3.0-or-later"
@@ -13,11 +13,11 @@ homepage = "https://github.com/Zeitgleich/CalCraft"
 authors = ["CalCraft contributors"]
 
 [workspace.dependencies]
-calcraft-core = { path = "crates/calcraft-core", version = "0.1.0-alpha.2" }
-calcraft-ical = { path = "crates/calcraft-ical", version = "0.1.0-alpha.2" }
-calcraft-dav = { path = "crates/calcraft-dav", version = "0.1.0-alpha.2" }
-calcraft-store = { path = "crates/calcraft-store", version = "0.1.0-alpha.2" }
-calcraft-web = { path = "crates/calcraft-web", version = "0.1.0-alpha.2" }
+calcraft-core = { path = "crates/calcraft-core", version = "0.1.0-alpha.3" }
+calcraft-ical = { path = "crates/calcraft-ical", version = "0.1.0-alpha.3" }
+calcraft-dav = { path = "crates/calcraft-dav", version = "0.1.0-alpha.3" }
+calcraft-store = { path = "crates/calcraft-store", version = "0.1.0-alpha.3" }
+calcraft-web = { path = "crates/calcraft-web", version = "0.1.0-alpha.3" }
 
 anyhow = "1.0.104"
 argon2 = { version = "0.6.0", features = ["zeroize"] }
@@ -50,6 +50,8 @@ tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros", "net", "s
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.1", features = ["trace", "timeout", "limit", "catch-panic"] }
 tracing = "0.1.44"
+# Only for the level type of sqlx's statement logging (already a dependency of sqlx).
+log = { version = "0.4.34", default-features = false }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
 
 [workspace.lints.rust]
