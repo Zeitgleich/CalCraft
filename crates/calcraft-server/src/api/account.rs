@@ -10,7 +10,8 @@ use calcraft_core::{
     Username,
     api::{
         AppPasswordInfo, ChangePassword, CreateAppPassword, CreatedAppPassword, LoginRequest, Me,
-        RecoveryCodes, SsoLink, TotpDisable, TotpEnable, TotpSetup,
+        RecoveryCodes, SchedulingInfo, SsoLink, TotpDisable, TotpEnable, TotpSetup,
+        UpdateScheduling,
     },
 };
 use calcraft_store::{RECOVERY_CODES, TotpEnableOutcome, User};
@@ -38,7 +39,36 @@ pub async fn me_of(state: &AppState, user: &User) -> Result<Me, ApiError> {
         is_admin: user.is_admin,
         totp_enabled: user.totp_enabled,
         sso: sso_link(state, user).await?,
+        scheduling: match &state.scheduling {
+            Some(scheduling) => Some(SchedulingInfo {
+                accept_invitations: state.store.accepts_invitations(user.id).await?,
+                addresses: scheduling
+                    .address_set(&state.store, user)
+                    .await?
+                    .into_iter()
+                    .filter(|a| a.starts_with("mailto:"))
+                    .collect(),
+            }),
+            None => None,
+        },
     })
+}
+
+/// Whether other users may invite the logged-in user (and see their busy
+/// times). 404 if scheduling is off.
+pub async fn update_scheduling(
+    State(state): State<AppState>,
+    session: SessionUser,
+    ApiJson(request): ApiJson<UpdateScheduling>,
+) -> Result<StatusCode, ApiError> {
+    if state.scheduling.is_none() {
+        return Err(ApiError::NotFound);
+    }
+    state
+        .store
+        .set_accept_invitations(session.user.id, request.accept_invitations)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `None` if SSO is not configured (or not compiled in).

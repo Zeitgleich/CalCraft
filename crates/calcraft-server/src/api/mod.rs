@@ -52,6 +52,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("post", "/v1/me/totp/setup"),
     ("post", "/v1/me/totp/enable"),
     ("post", "/v1/me/totp/disable"),
+    ("patch", "/v1/me/scheduling"),
     ("get", "/v1/app-passwords"),
     ("post", "/v1/app-passwords"),
     ("delete", "/v1/app-passwords/{id}"),
@@ -90,6 +91,7 @@ pub fn router() -> Router<AppState> {
         .route("/v1/me/totp/setup", post(account::totp_setup))
         .route("/v1/me/totp/enable", post(account::totp_enable))
         .route("/v1/me/totp/disable", post(account::totp_disable))
+        .route("/v1/me/scheduling", patch(account::update_scheduling))
         .route(
             "/v1/app-passwords",
             get(account::list_app_passwords).post(account::create_app_password),

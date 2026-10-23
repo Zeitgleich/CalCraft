@@ -147,6 +147,10 @@ impl Span {
 struct Zones<'a> {
     root: &'a Component,
     cache: Vec<(&'a str, Option<Tz>)>,
+    /// Read floating times and dates as UTC instead of widening them (free
+    /// busy answers, which must not report ±14 h around every all-day
+    /// event).
+    floating_utc: bool,
 }
 
 impl<'a> Zones<'a> {
@@ -154,6 +158,7 @@ impl<'a> Zones<'a> {
         Self {
             root,
             cache: Vec::new(),
+            floating_utc: false,
         }
     }
 
@@ -211,6 +216,7 @@ impl<'a> Zones<'a> {
     fn bounds(&self, naive: i64, zone: Zone) -> (i64, i64) {
         let exact = match zone {
             Zone::Utc => Some(naive),
+            Zone::Floating if self.floating_utc => Some(naive),
             Zone::Tz(index) => self.tz(index).and_then(|tz| tz.to_utc(naive)),
             Zone::Floating | Zone::Unresolved => None,
         };
@@ -602,14 +608,17 @@ fn is_instance_component(component: &Component) -> bool {
     ComponentKind::from_name(&component.name).is_some()
 }
 
-/// Visits every instance of the object; `true` as soon as `visit` does.
+/// Visits every instance of the object with the component it comes from;
+/// `true` as soon as `visit` does.
 fn walk(
     root: &Component,
     budget: &mut Budget,
     mode: Mode,
-    visit: &mut dyn FnMut(Span) -> bool,
+    floating_utc: bool,
+    visit: &mut dyn FnMut(&Component, Span) -> bool,
 ) -> Result<bool, Inexact> {
     let mut zones = Zones::new(root);
+    zones.floating_utc = floating_utc;
     let components: Vec<&Component> = root
         .components
         .iter()
@@ -664,7 +673,9 @@ fn walk(
                 } else {
                     (&overridden, &shifts[..])
                 };
-                if s.walk(&zones, budget, mode, overridden, shifts, visit)? {
+                if s.walk(&zones, budget, mode, overridden, shifts, &mut |span| {
+                    visit(component, span)
+                })? {
                     return Ok(true);
                 }
             }
@@ -673,10 +684,13 @@ fn walk(
                 if component.property("RRULE").is_some() || component.property("RDATE").is_some() {
                     return Err(Inexact);
                 }
-                if visit(Span {
-                    lo: i64::MIN,
-                    hi: i64::MAX,
-                }) {
+                if visit(
+                    component,
+                    Span {
+                        lo: i64::MIN,
+                        hi: i64::MAX,
+                    },
+                ) {
                     return Ok(true);
                 }
             }
@@ -691,7 +705,7 @@ pub(crate) fn span(root: &Component, budget: &mut Budget) -> Result<TimeRange, I
     let mut lo = i64::MAX;
     let mut hi = i64::MIN;
     let mut any = false;
-    walk(root, budget, Mode::Span, &mut |span| {
+    walk(root, budget, Mode::Span, false, &mut |_, span| {
         any = true;
         lo = lo.min(span.lo);
         hi = hi.max(span.hi);
@@ -713,9 +727,168 @@ pub(crate) fn overlaps(
     end: Option<i64>,
     budget: &mut Budget,
 ) -> Result<bool, Inexact> {
-    walk(root, budget, Mode::Overlap(start, end), &mut |span| {
-        span.overlaps(start, end)
-    })
+    walk(
+        root,
+        budget,
+        Mode::Overlap(start, end),
+        false,
+        &mut |_, span| span.overlaps(start, end),
+    )
+}
+
+/// Instances of VEVENTs overlapping `[start, end)` for free/busy answers,
+/// clipped to the range, with the component (master or override) each
+/// comes from. Floating times and dates are read as UTC; times with a TZID
+/// that cannot be resolved stay widened (conservatively busy).
+pub(crate) fn busy_instances(
+    root: &Component,
+    start: i64,
+    end: i64,
+    budget: &mut Budget,
+    visit: &mut dyn FnMut(&Component, i64, i64),
+) -> Result<(), Inexact> {
+    walk(
+        root,
+        budget,
+        Mode::Overlap(Some(start), Some(end)),
+        true,
+        &mut |component, span| {
+            if component.name == "VEVENT"
+                && span.lo != i64::MIN
+                && span.overlaps(Some(start), Some(end))
+            {
+                visit(component, span.lo.max(start), span.hi.min(end));
+            }
+            false
+        },
+    )?;
+    Ok(())
+}
+
+/// Identity of a RECURRENCE-ID or EXDATE value, comparable between two
+/// objects (e.g. an organizer's and an attendee's copy of one event).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum InstantKey {
+    /// An exact instant.
+    Utc(i64),
+    /// A local time: floating, a date, or a TZID that cannot be resolved.
+    Local {
+        naive: i64,
+        is_date: bool,
+        tzid: Option<String>,
+    },
+}
+
+/// Computes [`InstantKey`]s of values in one object, caching its time zones.
+pub(crate) struct InstantKeys<'a> {
+    zones: Zones<'a>,
+    budget: Budget,
+}
+
+impl<'a> InstantKeys<'a> {
+    pub(crate) fn new(root: &'a Component) -> Self {
+        Self {
+            zones: Zones::new(root),
+            budget: Budget::new(OBJECT_BUDGET),
+        }
+    }
+
+    /// The key of `raw` (one value of `property`), `None` if it cannot be
+    /// read.
+    pub(crate) fn key(&mut self, property: &'a Property, raw: &str) -> Option<InstantKey> {
+        let value = self.zones.value(property, raw, &mut self.budget).ok()??;
+        instant_key(&self.zones, property, value)
+    }
+}
+
+fn instant_key(zones: &Zones<'_>, property: &Property, value: Value) -> Option<InstantKey> {
+    match zones.key(value)? {
+        Key { zone: 0, time, .. } => Some(InstantKey::Utc(time)),
+        key => Some(InstantKey::Local {
+            naive: value.naive,
+            is_date: key.is_date,
+            tzid: property
+                .parameter("TZID")
+                .and_then(|p| p.values.first())
+                .filter(|_| !value.is_date)
+                .cloned(),
+        }),
+    }
+}
+
+/// Whether the master component (without RECURRENCE-ID) of `root` has an
+/// instance at `target` that is not excluded. Returns the instance's start
+/// formatted like the master's DTSTART (for a new override's
+/// RECURRENCE-ID), `None` if there is no such instance.
+pub(crate) fn master_instance(
+    root: &Component,
+    target: &InstantKey,
+    budget: &mut Budget,
+) -> Result<Option<String>, Inexact> {
+    let mut zones = Zones::new(root);
+    let Some(master) = root
+        .components
+        .iter()
+        .find(|c| is_instance_component(c) && c.property("RECURRENCE-ID").is_none())
+    else {
+        return Ok(None);
+    };
+    let Some(start_property) = master.property("DTSTART") else {
+        return Ok(None);
+    };
+    let Some(series) = Series::build(&mut zones, master, budget)? else {
+        return Ok(None);
+    };
+    let start = series.start;
+    let found = |zones: &Zones<'_>, value: Value| -> bool {
+        let same_zone = value.zone == start.zone && value.is_date == start.is_date;
+        same_zone
+            && instant_key(zones, start_property, value).as_ref() == Some(target)
+            && !zones
+                .key(value)
+                .is_some_and(|k| series.exdates.contains(&k))
+    };
+    let format = |value: Value| {
+        crate::datetime::format_date_or_datetime(
+            value.naive,
+            value.is_date,
+            value.zone == Zone::Utc,
+        )
+    };
+    budget.charge(INSTANCE_COST)?;
+    if found(&zones, start) {
+        return Ok(format(start));
+    }
+    for &(value, _) in &series.rdates {
+        budget.charge(INSTANCE_COST)?;
+        if found(&zones, value) {
+            return Ok(format(value));
+        }
+    }
+    let Some(rule) = &series.rule else {
+        return Ok(None);
+    };
+    let time = match target {
+        InstantKey::Utc(time) => *time,
+        InstantKey::Local { naive, .. } => *naive,
+    };
+    let (until_local, _) = series.until(&zones, rule);
+    let mut expansion =
+        Expansion::new(rule, start.naive, start.is_date, until_local).ok_or(Inexact)?;
+    expansion.skip_to(time.saturating_sub(MARGIN));
+    let mut visited = 0usize;
+    while let Some(naive) = expansion.next(budget)? {
+        visited += 1;
+        if visited > MAX_INSTANCES || naive > time.saturating_add(MARGIN) {
+            break;
+        }
+        budget.charge(INSTANCE_COST)?;
+        let value = Value { naive, ..start };
+        if found(&zones, value) {
+            return Ok(format(value));
+        }
+    }
+    Ok(None)
 }
 
 /// Whether a stored calendar object has an instance overlapping the time

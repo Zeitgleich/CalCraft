@@ -227,7 +227,11 @@ pub fn properties(
             ));
         }
         // Unmapped paths and items are handled elsewhere.
-        Resource::Unmapped(..) | Resource::Item(..) => {}
+        Resource::Unmapped(..)
+        | Resource::Item(..)
+        | Resource::Inbox
+        | Resource::InboxItem(_)
+        | Resource::Outbox => {}
     }
     props
 }

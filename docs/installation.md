@@ -454,7 +454,14 @@ sudo -u calcraft env CALCRAFT_CONFIG=/etc/calcraft/calcraft.toml calcraft user a
 
 Further users can be created in the web UI (admin page) or with the same
 command without `--admin`. Other commands: `calcraft user list`,
-`passwd`, `disable`, `enable`, `set-admin`.
+`passwd`, `disable`, `enable`, `set-admin`, `set-email`, `set-invitations`.
+
+Invitations between users (CalDAV scheduling) are off by default. To use
+them, add `[scheduling] enabled = true` and, if your users' addresses are
+`<username>@example.org`, `domain = "example.org"` to the configuration;
+other addresses are set per user with `calcraft user set-email alice
+alice@example.com` (see [scheduling.md](scheduling.md)). Invitations to
+other servers are not sent by e-mail yet.
 
 Coming from Synology Calendar/Contacts, Radicale, Baïkal or Nextcloud? Copy a
 user's calendars and address books with `calcraft migrate` (try `--dry-run`

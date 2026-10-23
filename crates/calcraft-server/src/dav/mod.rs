@@ -11,6 +11,7 @@ mod paths;
 mod propfind;
 mod props;
 mod report;
+mod scheduling;
 mod sync;
 
 use axum::{
@@ -26,26 +27,30 @@ use calcraft_dav::{DavError, Multistatus};
 use calcraft_store::StoreError;
 
 use crate::{app::AppState, auth::AuthOutcome, net::ClientKey};
+use paths::Resource;
 
 pub(crate) use objects::{Rejection, Validated, check_object, etag};
-pub use paths::valid_item_name;
+pub use paths::{principal_href, valid_item_name};
 #[cfg(feature = "api")]
 pub(crate) use props::calendar_order;
+pub use scheduling::SCHEDULE_TAG;
 
 /// Methods the DAV handler routes, as advertised in `Allow`. The
 /// authorization matrix test (`tests/authz_matrix.rs`) fails for any method
 /// listed here that it does not cover.
-pub const ALLOWED_METHODS: &str =
-    "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, REPORT, MKCALENDAR, MKCOL, COPY, MOVE";
+pub const ALLOWED_METHODS: &str = "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, REPORT, MKCALENDAR, MKCOL, COPY, MOVE, POST";
 /// DAV compliance classes.
 const DAV_CLASSES: &str = "1, 3, calendar-access, addressbook, extended-mkcol";
+/// DAV compliance classes with scheduling enabled (RFC 6638 §2).
+const DAV_CLASSES_SCHEDULING: &str =
+    "1, 3, calendar-access, addressbook, extended-mkcol, calendar-auto-schedule";
 const WWW_AUTHENTICATE_VALUE: &str = "Basic realm=\"CalCraft\", charset=\"UTF-8\"";
 const XML_CONTENT_TYPE: &str = "application/xml; charset=utf-8";
 
 /// Entry point for every request below `/dav`.
 pub async fn handle(State(state): State<AppState>, request: Request) -> Response {
     if request.method() == Method::OPTIONS {
-        return options();
+        return options(state.scheduling.is_some());
     }
 
     let header = request
@@ -86,6 +91,12 @@ pub async fn handle(State(state): State<AppState>, request: Request) -> Response
         "DELETE" => objects::delete(ctx, resource, request).await,
         "COPY" => copymove::handle(ctx, resource, request, copymove::Mode::Copy).await,
         "MOVE" => copymove::handle(ctx, resource, request, copymove::Mode::Move).await,
+        "POST" => match (&resource, &state.scheduling) {
+            (Resource::Outbox, Some(scheduling)) => {
+                scheduling::post(ctx, scheduling, request).await
+            }
+            _ => method_not_allowed(),
+        },
         _ => method_not_allowed(),
     }
 }
@@ -97,10 +108,15 @@ struct Ctx<'a> {
     user: &'a calcraft_store::User,
 }
 
-fn options() -> Response {
+fn options(scheduling: bool) -> Response {
+    let classes = if scheduling {
+        DAV_CLASSES_SCHEDULING
+    } else {
+        DAV_CLASSES
+    };
     (
         StatusCode::OK,
-        [("dav", DAV_CLASSES), (ALLOW.as_str(), ALLOWED_METHODS)],
+        [("dav", classes), (ALLOW.as_str(), ALLOWED_METHODS)],
     )
         .into_response()
 }

@@ -41,9 +41,9 @@ use super::{
 };
 
 /// Maximum number of objects in one REPORT response.
-const MAX_RESULTS: usize = 5_000;
+pub(super) const MAX_RESULTS: usize = 5_000;
 /// Maximum total size of object data in one REPORT response.
-const MAX_DATA_BYTES: i64 = 32 * 1024 * 1024;
+pub(super) const MAX_DATA_BYTES: i64 = 32 * 1024 * 1024;
 /// Candidates read per storage query in calendar-query.
 const QUERY_PAGE: u32 = 500;
 /// Limits of the exact recurrence checks in one calendar-query: work (see
@@ -355,8 +355,10 @@ fn row_limit(max: usize) -> u32 {
 }
 
 pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request) -> Response {
-    let Resource::Collection(collection) = resource else {
-        return ReportError::Unsupported.into_response();
+    let collection = match resource {
+        Resource::Collection(collection) => collection,
+        Resource::Inbox => return super::scheduling::report(ctx, request).await,
+        _ => return ReportError::Unsupported.into_response(),
     };
     let body = match read_body(request, MAX_REPORT_BODY).await {
         Ok(body) => body,

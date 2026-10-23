@@ -117,6 +117,26 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install --quiet -r tests/compat/requirements.txt
           "$RUNNER_TEMP/venv/bin/python" tests/compat/caldav_client.py
+      - name: Start a second server with scheduling and two users
+        env:
+          CALCRAFT_STORAGE__DATABASE: ${{ runner.temp }}/scheduling.db
+          CALCRAFT_SCHEDULING__ENABLED: "true"
+          CALCRAFT_SCHEDULING__DOMAIN: example.org
+        run: |
+          for user in alice bob; do
+            echo "compat test password" | target/debug/calcraft user add "$user" --password-stdin
+          done
+          target/debug/calcraft serve --bind 127.0.0.1:5233 > "$RUNNER_TEMP/scheduling.log" 2>&1 &
+          for _ in $(seq 1 30); do curl -sf http://127.0.0.1:5233/readyz && break; sleep 1; done
+      - name: python-caldav scheduling session
+        env:
+          CALCRAFT_URL: http://127.0.0.1:5233
+          CALCRAFT_PASSWORD: compat test password
+        run: |
+          "$RUNNER_TEMP/venv/bin/python" tests/compat/scheduling_client.py
+      - name: Scheduling server log
+        if: always()
+        run: cat "$RUNNER_TEMP/scheduling.log" || true
       - name: Server log
         if: always()
         run: cat "$RUNNER_TEMP/server.log"
@@ -184,7 +204,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for target in ical_object dav_xml recurrence import; do
+          for target in ical_object dav_xml recurrence import itip; do
             # Checked-in seeds (fuzz/seeds/<target>) start the corpus.
             mkdir -p "fuzz/corpus/$target"
             if [ -d "fuzz/seeds/$target" ]; then cp fuzz/seeds/"$target"/* "fuzz/corpus/$target/"; fi

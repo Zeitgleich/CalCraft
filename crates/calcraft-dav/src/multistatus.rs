@@ -17,6 +17,9 @@ pub enum PropValue {
     Text(String),
     /// One `DAV:href` child.
     Href(String),
+    /// Any number of `DAV:href` children (e.g.
+    /// `CALDAV:calendar-user-address-set`).
+    Hrefs(Vec<String>),
     /// Child elements in known namespaces, e.g. `resourcetype` or
     /// `supported-calendar-component-set`.
     Elements(Vec<Element>),
@@ -201,6 +204,13 @@ fn write_prop(out: &mut String, name: &PropName, value: &PropValue) {
                 "<{open}><d:href>{}</d:href></{close}>",
                 escape_text(href)
             );
+        }
+        PropValue::Hrefs(hrefs) => {
+            let _ = write!(out, "<{open}>");
+            for href in hrefs {
+                let _ = write!(out, "<d:href>{}</d:href>", escape_text(href));
+            }
+            let _ = write!(out, "</{close}>");
         }
         PropValue::Elements(elements) => {
             let _ = write!(out, "<{open}>");

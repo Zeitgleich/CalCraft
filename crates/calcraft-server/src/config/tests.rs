@@ -280,3 +280,36 @@ fn missing_file_is_an_error() {
     let result = Config::load(Some(Path::new("does-not-exist.toml")));
     assert!(matches!(result, Err(ConfigError::FileNotFound(_))));
 }
+
+#[test]
+fn scheduling_is_off_by_default_and_validated() {
+    let scheduling = Config::default().scheduling;
+    assert!(!scheduling.enabled);
+    assert!(scheduling.free_busy);
+    assert_eq!(scheduling.domain, None);
+    let config = from_toml("[scheduling]\nenabled = true\ndomain = \"example.org\"\n").unwrap();
+    assert!(config.scheduling.enabled);
+    for bad in [
+        "domain = \"Example.org\"",
+        "domain = \"*.example.org\"",
+        "domain = \"\"",
+        "max_attendees = 0",
+        "max_attendees = 1001",
+        "max_recipients_per_hour = 0",
+        "inbox_max_messages = 5",
+        "max_freebusy_days = 0",
+        "max_freebusy_days = 4000",
+        "enable = true",
+    ] {
+        assert!(
+            from_toml(&format!("[scheduling]\n{bad}\n")).is_err(),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
+fn example_configuration_is_valid() {
+    let text = include_str!("../../../../calcraft.example.toml");
+    from_toml(text).unwrap();
+}

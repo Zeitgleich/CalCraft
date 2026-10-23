@@ -36,6 +36,17 @@ pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
     let mut responses = Vec::new();
     match &resource {
         Resource::Unmapped(..) => return not_found(),
+        Resource::Inbox | Resource::Outbox | Resource::InboxItem(_) => {
+            return match super::scheduling::propfind(ctx, &resource, &query, depth == Depth::One)
+                .await
+            {
+                Ok(responses) => multistatus(&Multistatus {
+                    responses,
+                    sync_token: None,
+                }),
+                Err(response) => response,
+            };
+        }
         Resource::Item(collection, name) => match ctx.state.store.item(collection.id, name).await {
             Ok(Some(item)) => {
                 let props = item_properties(user, collection, &item.etag, item.content.len(), None);
@@ -46,6 +57,14 @@ pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request) -> Respo
         },
         _ => {
             let mut props = properties(&resource, user, ctx.state.max_vcard_bytes);
+            if let (Resource::Principal, Some(scheduling)) = (&resource, &ctx.state.scheduling) {
+                match scheduling.address_set(&ctx.state.store, user).await {
+                    Ok(addresses) => {
+                        props.extend(super::scheduling::principal_properties(user, &addresses));
+                    }
+                    Err(err) => return store_error(err),
+                }
+            }
             if let Resource::Collection(collection) = &resource {
                 match ctx.state.store.dead_properties(collection.id).await {
                     Ok(stored) => props.extend(dead_properties(collection.id, &stored)),

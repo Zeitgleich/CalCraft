@@ -146,6 +146,31 @@ pub fn parse_date_or_datetime(value: &str) -> Result<DateTime, IcalError> {
     }
 }
 
+/// Formats seconds as `YYYYMMDD` (`is_date`) or `YYYYMMDDTHHMMSS[Z]`, the
+/// inverse of [`parse_date_or_datetime`]. `None` outside years 0–9999.
+pub fn format_date_or_datetime(seconds: i64, is_date: bool, is_utc: bool) -> Option<String> {
+    // 0000-01-01 up to the end of 9999.
+    if !(-62_167_219_200..MAX_TIME).contains(&seconds) {
+        return None;
+    }
+    let days = seconds.div_euclid(86_400);
+    let time = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    if !(0..=9999).contains(&year) {
+        return None;
+    }
+    if is_date {
+        return Some(format!("{year:04}{month:02}{day:02}"));
+    }
+    Some(format!(
+        "{year:04}{month:02}{day:02}T{:02}{:02}{:02}{}",
+        time / 3600,
+        time / 60 % 60,
+        time % 60,
+        if is_utc { "Z" } else { "" }
+    ))
+}
+
 /// Parses a UTC DATE-TIME as used in CalDAV `time-range` filters.
 pub fn parse_utc_datetime(value: &str) -> Result<i64, IcalError> {
     let parsed = parse_date_or_datetime(value)?;

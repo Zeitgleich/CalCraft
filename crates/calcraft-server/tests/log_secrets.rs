@@ -1,7 +1,9 @@
 //! The JSON logs, at the most verbose level, contain no passwords, app
 //! passwords, TOTP secrets or codes, recovery codes, session tokens,
 //! credentials headers, query strings or calendar and contact contents
-//! (also not when they are moved into the trash and restored).
+//! (also not when they are moved into the trash and restored), and no
+//! scheduling messages or calendar user addresses (invitations, replies,
+//! cancellations, free/busy lookups).
 //!
 //! This binary holds a single test because it installs the global
 //! subscriber (the same one `logging.format = "json"` uses), which also
@@ -400,6 +402,91 @@ mod api {
     }
 }
 
+/// Invitation, reply, cancellation and free/busy lookup with marked
+/// contents and addresses.
+async fn scheduling_flows(
+    app: &Router,
+    store: &Store,
+    alice: &str,
+    bob: &str,
+    bob_email: &str,
+    secrets: &mut Vec<String>,
+) {
+    let unknown = format!("{MARKER}nobody@example.org");
+    let external = format!("{MARKER}ext@elsewhere.example");
+    let summary = format!("{MARKER}MeetingSummary");
+    secrets.extend([
+        bob_email.to_owned(),
+        unknown.clone(),
+        external.clone(),
+        summary.clone(),
+        format!("{MARKER}MeetingUid"),
+        "bob@example.org".to_owned(),
+    ]);
+    let meeting = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\nBEGIN:VEVENT\r\nUID:{MARKER}MeetingUid\r\nDTSTAMP:20261001T000000Z\r\nDTSTART:20261101T100000Z\r\nDURATION:PT1H\r\nSUMMARY:{summary}\r\nORGANIZER:mailto:alice@example.org\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:{bob_email}\r\nATTENDEE:mailto:{unknown}\r\nATTENDEE:mailto:{external}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    );
+    let uri = "/dav/calendars/alice/default/meeting.ics";
+    let reply = dav(app, alice, "PUT", uri, "text/calendar", meeting).await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    let bob_user = store
+        .user_by_name(&"bob".parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let copy = store
+        .scheduling_object(bob_user.id, &format!("{MARKER}MeetingUid"))
+        .await
+        .unwrap()
+        .expect("bob got the invitation");
+    let bob_uri = format!("/dav/calendars/bob/{}/{}", copy.collection.slug, copy.name);
+    let accepted = String::from_utf8(copy.content)
+        .unwrap()
+        .replace("PARTSTAT=NEEDS-ACTION", "PARTSTAT=ACCEPTED");
+    let reply = dav(app, bob, "PUT", &bob_uri, "text/calendar", accepted).await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+    let freebusy = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\nMETHOD:REQUEST\r\nBEGIN:VFREEBUSY\r\nUID:{MARKER}FreeBusyUid\r\nDTSTART:20261101T000000Z\r\nDTEND:20261102T000000Z\r\nORGANIZER:mailto:alice@example.org\r\nATTENDEE:mailto:{bob_email}\r\nATTENDEE:mailto:{unknown}\r\nEND:VFREEBUSY\r\nEND:VCALENDAR\r\n"
+    );
+    secrets.push(format!("{MARKER}FreeBusyUid"));
+    let reply = dav(
+        app,
+        alice,
+        "POST",
+        "/dav/scheduling/alice/outbox/",
+        "text/calendar",
+        freebusy,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert!(reply.body.contains("FREEBUSY"));
+    let reply = dav(app, bob, "DELETE", &bob_uri, "text/calendar", String::new()).await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT);
+    let reply = dav(app, alice, "DELETE", uri, "text/calendar", String::new()).await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT);
+    // Out of alice's trash again: the account flows count its entries.
+    let alice_user = store
+        .user_by_name(&"alice".parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let entries = store
+        .trash_entries(alice_user.id, 100, 0)
+        .await
+        .unwrap()
+        .entries;
+    let entry = entries
+        .iter()
+        .find(|e| e.name.as_deref() == Some("meeting.ics"))
+        .unwrap();
+    assert!(
+        store
+            .delete_trash_entry(alice_user.id, &entry.id)
+            .await
+            .unwrap()
+    );
+}
+
 /// Fails if a secret occurs in the logs. Timestamps are dropped first, so
 /// that six-digit TOTP codes cannot match their fractional seconds.
 fn assert_absent(logs: &str, secrets: &[String]) {
@@ -451,7 +538,21 @@ async fn logs_contain_no_secrets_or_contents() {
         .create_user(&"dave".parse().unwrap(), &hash, None)
         .await
         .unwrap();
-    let app = router(&Config::default(), AppState::new(store).unwrap());
+    let bob_password = format!("{MARKER}BobPassword");
+    let hash = hash_password(&bob_password).unwrap();
+    let bob = store
+        .create_user(&"bob".parse().unwrap(), &hash, None)
+        .await
+        .unwrap();
+    let bob_email = format!("{MARKER}bob@corp.example").to_lowercase();
+    store
+        .set_user_email(bob.id, Some(&bob_email))
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    config.scheduling.enabled = true;
+    config.scheduling.domain = Some("example.org".to_owned());
+    let app = router(&config, AppState::new(store.clone()).unwrap());
 
     let mut secrets = vec![ALICE.1.to_owned()];
     let password_auth = basic(ALICE.0, ALICE.1);
@@ -470,6 +571,18 @@ async fn logs_contain_no_secrets_or_contents() {
         .await;
     }
     dav_flows(&app, &password_auth, &mut secrets).await;
+    let bob_auth = basic("bob", &bob_password);
+    secrets.push(bob_password.clone());
+    secrets.push(bob_auth["Basic ".len()..].to_owned());
+    scheduling_flows(
+        &app,
+        &store,
+        &password_auth,
+        &bob_auth,
+        &bob_email,
+        &mut secrets,
+    )
+    .await;
 
     // Lockout: repeated wrong guesses, then even the right password fails.
     secrets.push(dave_password.clone());
@@ -536,6 +649,9 @@ async fn logs_contain_no_secrets_or_contents() {
     assert!(logs.contains("INSERT INTO items"), "{logs}");
     assert!(logs.contains("INSERT INTO trash"), "{logs}");
     assert!(logs.contains("account locked after repeated failed logins"));
+    assert!(logs.contains("scheduling messages sent"), "{logs}");
+    assert!(logs.contains("scheduling reply sent"), "{logs}");
+    assert!(logs.contains("free/busy lookup"), "{logs}");
     assert!(logs.lines().count() > 50);
     assert_absent(&logs, &secrets);
 }

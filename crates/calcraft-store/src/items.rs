@@ -130,6 +130,30 @@ pub enum PutOutcome {
     Updated,
 }
 
+/// Schedule-Tag handling of a write ([`Store::put_item_scheduled`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScheduleTag<'a> {
+    /// Schedule-Tag stored with the object; `None` clears it (the object is
+    /// not a scheduling object resource).
+    pub set: Option<&'a str>,
+    /// `If-Schedule-Tag-Match`: the stored tag must be exactly this one.
+    pub if_match: Option<&'a str>,
+    /// Another object (collection id, name) that must still carry this
+    /// Schedule-Tag, checked in the same transaction: a delivery derived
+    /// from an organizer's object is only written while that object is
+    /// unchanged, so an older delivery can never overwrite a newer one
+    /// ([`StoreError::Superseded`]).
+    pub requires: Option<(i64, &'a str, &'a str)>,
+}
+
+impl Precondition {
+    /// Whether the condition holds for an object with entity tag
+    /// `existing` (`None`: no object).
+    pub fn holds(&self, existing: Option<&str>) -> bool {
+        check(self, existing).is_ok()
+    }
+}
+
 pub(crate) fn check(precondition: &Precondition, existing: Option<&str>) -> Result<()> {
     let ok = match precondition {
         Precondition::None => true,
@@ -506,6 +530,7 @@ impl Store {
     }
 
     /// Creates or replaces an object, enforcing preconditions and UID uniqueness.
+    /// The object is not a scheduling object afterwards (no Schedule-Tag).
     pub async fn put_item(
         &self,
         collection_id: i64,
@@ -513,21 +538,68 @@ impl Store {
         item: &NewItem<'_>,
         precondition: &Precondition,
     ) -> Result<PutOutcome> {
+        self.put_item_scheduled(
+            collection_id,
+            name,
+            item,
+            precondition,
+            &ScheduleTag::default(),
+        )
+        .await
+    }
+
+    /// [`Store::put_item`] that also sets the object's Schedule-Tag and
+    /// checks `If-Schedule-Tag-Match` (RFC 6638 §3.2.10, §8.3) in the same
+    /// transaction.
+    pub async fn put_item_scheduled(
+        &self,
+        collection_id: i64,
+        name: &str,
+        item: &NewItem<'_>,
+        precondition: &Precondition,
+        schedule: &ScheduleTag<'_>,
+    ) -> Result<PutOutcome> {
         self.observe(
             async {
                 // IMMEDIATE takes the write lock up front, so the checks below and
                 // the write are atomic and concurrent writers wait instead of failing.
                 let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
                 ensure_writable(&mut tx, collection_id).await?;
+                let row = sqlx::query(
+                    "SELECT etag, schedule_tag FROM items WHERE collection_id = ? AND name = ?",
+                )
+                .bind(collection_id)
+                .bind(name)
+                .fetch_optional(&mut *tx)
+                .await?;
                 let existing: Option<String> =
-                    sqlx::query("SELECT etag FROM items WHERE collection_id = ? AND name = ?")
-                        .bind(collection_id)
-                        .bind(name)
-                        .fetch_optional(&mut *tx)
-                        .await?
-                        .map(|row| row.try_get("etag"))
-                        .transpose()?;
+                    row.as_ref().map(|row| row.try_get("etag")).transpose()?;
                 check(precondition, existing.as_deref())?;
+                if let Some(expected) = schedule.if_match {
+                    let current: Option<String> = row
+                        .as_ref()
+                        .map(|row| row.try_get("schedule_tag"))
+                        .transpose()?
+                        .flatten();
+                    if current.as_deref() != Some(expected) {
+                        return Err(StoreError::PreconditionFailed);
+                    }
+                }
+                if let Some((guard_collection, guard_name, guard_tag)) = schedule.requires {
+                    let current: Option<String> = sqlx::query(
+                        "SELECT schedule_tag FROM items WHERE collection_id = ? AND name = ?",
+                    )
+                    .bind(guard_collection)
+                    .bind(guard_name)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .map(|row| row.try_get::<Option<String>, _>("schedule_tag"))
+                    .transpose()?
+                    .flatten();
+                    if current.as_deref() != Some(guard_tag) {
+                        return Err(StoreError::Superseded);
+                    }
+                }
 
                 let conflict: Option<String> =
                     sqlx::query("SELECT name FROM items WHERE collection_id = ? AND uid = ? AND name != ?")
@@ -553,8 +625,9 @@ impl Store {
                     }
                 }
 
-                // The trash counts towards the quota: deleting does not free space
-                // until the trash is emptied or its entries expire.
+                // The trash and the scheduling inbox count towards the quota:
+                // deleting does not free space until the trash is emptied or
+                // its entries expire.
                 let row = sqlx::query(
                     "SELECT c.owner_id, (SELECT COALESCE(SUM(length(i.content)), 0) FROM items i \
                        JOIN collections o ON o.id = i.collection_id \
@@ -570,7 +643,8 @@ impl Store {
                 let used = row
                     .try_get::<i64, _>("used")?
                     .saturating_add(crate::trash::trash_bytes(&mut *tx, owner_id).await?)
-                    .saturating_add(crate::properties::owner_bytes(&mut *tx, owner_id).await?);
+                    .saturating_add(crate::properties::owner_bytes(&mut *tx, owner_id).await?)
+                    .saturating_add(crate::scheduling::inbox_bytes(&mut *tx, owner_id).await?);
                 let size = i64::try_from(item.content.len()).unwrap_or(i64::MAX);
                 if used.saturating_add(size) > self.settings.quota_bytes() {
                     return Err(StoreError::Limit("storage quota exceeded"));
@@ -586,13 +660,14 @@ impl Store {
 
                 sqlx::query(
                     "INSERT INTO items (collection_id, name, uid, etag, component, range_start, range_end, \
-                       recurring, index_version, content, revision) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                       recurring, index_version, content, revision, schedule_tag) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                      ON CONFLICT (collection_id, name) DO UPDATE SET \
                        uid = excluded.uid, etag = excluded.etag, component = excluded.component, \
                        range_start = excluded.range_start, range_end = excluded.range_end, \
                        recurring = excluded.recurring, index_version = excluded.index_version, \
                        content = excluded.content, revision = excluded.revision, \
+                       schedule_tag = excluded.schedule_tag, \
                        modified_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
                 )
                 .bind(collection_id)
@@ -606,6 +681,7 @@ impl Store {
                 .bind(item.index_version)
                 .bind(item.content)
                 .bind(revision)
+                .bind(schedule.set)
                 .execute(&mut *tx)
                 .await?;
                 record_change(&mut tx, collection_id, revision, name, false).await?;
@@ -742,7 +818,7 @@ impl Store {
 
                 let Some(item) = sqlx::query(
                     "SELECT uid, etag, component, range_start, range_end, recurring, index_version, \
-                       content FROM items WHERE collection_id = ? AND name = ?",
+                       content, schedule_tag FROM items WHERE collection_id = ? AND name = ?",
                 )
                 .bind(source_collection)
                 .bind(source_name)
@@ -759,6 +835,7 @@ impl Store {
                 let recurring: bool = item.try_get("recurring")?;
                 let index_version: i64 = item.try_get("index_version")?;
                 let content: Vec<u8> = item.try_get("content")?;
+                let schedule_tag: Option<String> = item.try_get("schedule_tag")?;
                 check(source_precondition, Some(&etag))?;
 
                 if kind == CollectionKind::Calendar.as_str() {
@@ -827,7 +904,8 @@ impl Store {
                     // The trash counts towards the quota, as for PUT.
                     let used = used
                         .saturating_add(crate::trash::trash_bytes(&mut *tx, owner_id).await?)
-                        .saturating_add(crate::properties::owner_bytes(&mut *tx, owner_id).await?);
+                        .saturating_add(crate::properties::owner_bytes(&mut *tx, owner_id).await?)
+                        .saturating_add(crate::scheduling::inbox_bytes(&mut *tx, owner_id).await?);
                     let size = i64::try_from(content.len()).unwrap_or(i64::MAX);
                     if used.saturating_add(size) > self.settings.quota_bytes() {
                         return Err(StoreError::Limit("storage quota exceeded"));
@@ -848,13 +926,14 @@ impl Store {
                 let revision = bump_revision(&mut tx, destination_collection).await?;
                 sqlx::query(
                     "INSERT INTO items (collection_id, name, uid, etag, component, range_start, range_end, \
-                       recurring, index_version, content, revision) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                       recurring, index_version, content, revision, schedule_tag) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                      ON CONFLICT (collection_id, name) DO UPDATE SET \
                        uid = excluded.uid, etag = excluded.etag, component = excluded.component, \
                        range_start = excluded.range_start, range_end = excluded.range_end, \
                        recurring = excluded.recurring, index_version = excluded.index_version, \
                        content = excluded.content, revision = excluded.revision, \
+                       schedule_tag = excluded.schedule_tag, \
                        modified_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
                 )
                 .bind(destination_collection)
@@ -868,6 +947,8 @@ impl Store {
                 .bind(index_version)
                 .bind(&content)
                 .bind(revision)
+                // A moved scheduling object stays one; a copy is a plain object.
+                .bind(schedule_tag.filter(|_| remove_source))
                 .execute(&mut *tx)
                 .await?;
                 record_change(

@@ -15,10 +15,11 @@ use super::{AdminUser, ApiError, ApiJson};
 use crate::{
     app::AppState,
     auth::{PasswordError, hash_password_async},
+    scheduling::{EmailError, derived_address_taken, set_email},
     validate::{MAX_DISPLAY_NAME, clean_text},
 };
 
-fn info(user: User, sso_linked: bool) -> AdminUserInfo {
+fn info(user: User, sso_linked: bool, email: Option<String>) -> AdminUserInfo {
     AdminUserInfo {
         username: user.username.to_string(),
         display_name: user.display_name,
@@ -26,6 +27,23 @@ fn info(user: User, sso_linked: bool) -> AdminUserInfo {
         disabled: user.disabled,
         totp_enabled: user.totp_enabled,
         sso_linked,
+        email,
+    }
+}
+
+/// The scheduling domain for derived addresses, if scheduling is on.
+fn domain(state: &AppState) -> Option<&str> {
+    state
+        .scheduling
+        .as_ref()
+        .and_then(|s| s.config.domain.as_deref())
+}
+
+fn email_error(err: EmailError) -> ApiError {
+    match err {
+        EmailError::Invalid => ApiError::BadRequest("invalid e-mail address"),
+        EmailError::Taken => ApiError::Conflict("e-mail address already in use"),
+        EmailError::Store(err) => err.into(),
     }
 }
 
@@ -34,6 +52,8 @@ pub async fn list(
     _admin: AdminUser,
 ) -> Result<Json<Vec<AdminUserInfo>>, ApiError> {
     let linked = state.store.oidc_linked_user_ids().await?;
+    let emails: std::collections::HashMap<i64, String> =
+        state.store.user_emails().await?.into_iter().collect();
     Ok(Json(
         state
             .store
@@ -42,7 +62,8 @@ pub async fn list(
             .into_iter()
             .map(|user| {
                 let sso_linked = linked.contains(&user.id);
-                info(user, sso_linked)
+                let email = emails.get(&user.id).cloned();
+                info(user, sso_linked, email)
             })
             .collect(),
     ))
@@ -64,6 +85,28 @@ pub async fn create(
         None => None,
     }
     .filter(|name: &String| !name.is_empty());
+    let email = match request.email.as_deref().map(str::trim) {
+        Some("") | None => None,
+        Some(raw) => Some(
+            crate::scheduling::normalize_email(raw)
+                .ok_or(ApiError::BadRequest("invalid e-mail address"))?,
+        ),
+    };
+    // Checked before the account exists; `set_email` checks again.
+    if let Some(email) = &email {
+        let other_user = email
+            .rsplit_once('@')
+            .filter(|(_, host)| Some(*host) == domain(&state))
+            .is_some_and(|(local, _)| local != username.as_str());
+        if other_user || state.store.user_by_email(email).await?.is_some() {
+            return Err(ApiError::Conflict("e-mail address already in use"));
+        }
+    }
+    if derived_address_taken(&state.store, domain(&state), &username).await? {
+        return Err(ApiError::Conflict(
+            "the user's scheduling address is another user's e-mail address",
+        ));
+    }
     let hash = hash_password_async(request.password)
         .await
         .map_err(|err| match err {
@@ -76,7 +119,12 @@ pub async fn create(
         .store
         .create_user_with_role(&username, &hash, display_name.as_deref(), request.is_admin)
         .await?;
-    Ok((StatusCode::CREATED, Json(info(user, false))))
+    let email = match set_email(&state.store, domain(&state), &user, email.as_deref()).await {
+        Ok(email) => email,
+        // The account exists; report the address problem.
+        Err(err) => return Err(email_error(err)),
+    };
+    Ok((StatusCode::CREATED, Json(info(user, false, email))))
 }
 
 pub async fn update(
@@ -106,6 +154,12 @@ pub async fn update(
     }
     if let Some(is_admin) = request.is_admin {
         state.store.set_admin(&username, is_admin).await?;
+    }
+    if let Some(email) = request.email.as_deref() {
+        set_email(&state.store, domain(&state), &target, Some(email))
+            .await
+            .map_err(email_error)?;
+        tracing::info!(admin = %admin.username, user = %username, "admin changed e-mail address");
     }
     Ok(StatusCode::NO_CONTENT)
 }

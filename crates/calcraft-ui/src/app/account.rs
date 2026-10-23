@@ -1,6 +1,8 @@
 //! Account settings: password and two-factor authentication.
 
-use calcraft_core::api::{ChangePassword, RecoveryCodes, TotpDisable, TotpEnable, TotpSetup};
+use calcraft_core::api::{
+    ChangePassword, RecoveryCodes, TotpDisable, TotpEnable, TotpSetup, UpdateScheduling,
+};
 use calcraft_ui::{
     group_secret, sso, text as t,
     validate::{check_new_password, clean_code},
@@ -36,8 +38,67 @@ pub fn Settings() -> impl IntoView {
                 <SsoFacts />
             </dl>
         </section>
+        <Invitations />
         <PasswordForm />
         <TwoFactor />
+    }
+}
+
+/// Whether other users may invite this user; nothing if scheduling is off
+/// on the server.
+#[component]
+fn Invitations() -> impl IntoView {
+    let ctx = Ctx::get();
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let toggle = move |ev: leptos::ev::Event| {
+        let accept = event_target_checked(&ev);
+        if busy.get_untracked() {
+            return;
+        }
+        busy.set(true);
+        leptos::task::spawn_local(async move {
+            let request = UpdateScheduling {
+                accept_invitations: accept,
+            };
+            let result = api::send_no_content("PATCH", "/v1/me/scheduling", &request).await;
+            busy.try_set(false);
+            match result {
+                Ok(()) => ctx.refresh_me(),
+                Err(failure) => {
+                    error.try_set(Some(ctx.fail(&failure)));
+                }
+            }
+        });
+    };
+    move || {
+        ctx.me().and_then(|me| me.scheduling).map(|info| {
+            let addresses = info.addresses.join(", ");
+            view! {
+                <section>
+                    <h2>{t::INVITATIONS}</h2>
+                    {(!addresses.is_empty())
+                        .then(|| {
+                            view! {
+                                <p>
+                                    {t::SCHEDULING_ADDRESSES} ": " <code>{addresses}</code>
+                                </p>
+                            }
+                        })}
+                    <label class="inline">
+                        <input
+                            type="checkbox"
+                            prop:checked=info.accept_invitations
+                            disabled=move || busy.get()
+                            on:change=toggle
+                        />
+                        {t::ACCEPT_INVITATIONS}
+                    </label>
+                    <p class="hint">{t::INVITATIONS_HINT}</p>
+                    <ErrorText error />
+                </section>
+            }
+        })
     }
 }
 

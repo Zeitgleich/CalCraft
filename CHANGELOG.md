@@ -7,6 +7,47 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 
 ## [Unreleased]
 
+### Added
+
+- CalDAV scheduling (RFC 6638), stage A: between users of the same server,
+  off by default (`[scheduling] enabled = true`, see
+  [docs/scheduling.md](docs/scheduling.md)). Implicit scheduling on PUT and
+  DELETE: invitations (REQUEST) go into the attendees' default calendars and
+  scheduling inboxes, attendees' participation changes (REPLY) come back into
+  the organizer's event, removed attendees and deleted events are cancelled;
+  recurring events with overrides and per-instance replies (also via
+  EXDATE), `SCHEDULE-AGENT`, `SCHEDULE-FORCE-SEND`, server-set
+  `SCHEDULE-STATUS`, `Schedule-Tag` and `If-Schedule-Tag-Match`.
+  Scheduling inbox and outbox per user (`/dav/scheduling/<user>/inbox/` and
+  `/outbox/`), `calendar-user-address-set`, `schedule-default-calendar-URL`,
+  `calendar-auto-schedule` in the DAV header, POST (free/busy requests) on
+  the outbox. Free/busy answers contain busy periods only (opaque events,
+  `schedule-calendar-transp` respected).
+- Calendar user addresses: an e-mail address per user, set only by
+  administrators (`calcraft user set-email`, `calcraft user add --email`,
+  `email` in the admin REST API and web UI), unique across users, plus
+  `mailto:<username>@<scheduling.domain>`. Never taken from SSO claims.
+- Limits: `max_attendees`, `max_recipients_per_hour` (every delivery, every
+  new attendee and every free/busy recipient), `max_delivered_bytes_per_hour`
+  and `max_delivered_object_bytes` per recipient, `inbox_max_messages`,
+  `max_freebusy_days`; deliveries count towards the recipient's quota and are
+  refused with 5.1 instead of failing the organizer's request; disabled users
+  are treated like unknown ones. Cancelled invitations the attendee never
+  touched are removed instead of kept.
+- Users can refuse invitations (web UI *Settings*, `PATCH
+  /api/v1/me/scheduling`, `calcraft user set-invitations`); they then look
+  like unknown addresses.
+- Fuzz target `itip`; the client compatibility CI job also runs a
+  python-caldav scheduling session.
+
+### Changed
+
+- `POST` is part of the DAV `Allow` header (only the scheduling outbox
+  accepts it).
+- Migration `0011_scheduling` (columns `users.email`,
+  `users.accept_invitations`, `users.inbox_revision`, `items.schedule_tag`,
+  table `schedule_inbox`).
+
 ## [0.1.0-alpha.2] – 2026-10-22
 
 Second pre-release, for testing only – not for production use (open points:

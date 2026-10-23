@@ -155,7 +155,9 @@ token is empty.
 - `CALDAV:expand` and `CALDAV:limit-recurrence-set` in `calendar-data`:
   objects are always returned whole, with their rules (clients expand them
   themselves, which all common clients do).
-- `CALDAV:limit-freebusy-set` and free-busy queries.
+- `CALDAV:limit-freebusy-set` and the `CALDAV:free-busy-query` REPORT on
+  calendars. Free/busy lookups between users go through the scheduling
+  outbox instead ([scheduling.md](scheduling.md)).
 - The calendar's `CALDAV:calendar-timezone` for floating times, and a time
   zone database for `TZID`s without VTIMEZONE.
 - `prop-filter`, `param-filter` and `text-match` (rejected with

@@ -23,6 +23,12 @@ pub enum Resource {
     Unmapped(CollectionKind, Slug),
     /// An object path inside an existing collection; the object may not exist.
     Item(Collection, String),
+    /// The user's scheduling inbox (RFC 6638 §2.2); only with scheduling on.
+    Inbox,
+    /// A message path in the inbox; the message may not exist.
+    InboxItem(String),
+    /// The user's scheduling outbox (RFC 6638 §2.1); only with scheduling on.
+    Outbox,
 }
 
 /// Path below `/dav/` after splitting, still unvalidated against the user.
@@ -32,6 +38,9 @@ enum Target {
     Home(CollectionKind, Username),
     Collection(CollectionKind, Username, Slug),
     Item(CollectionKind, Username, Slug, String),
+    Inbox(Username),
+    InboxItem(Username, String),
+    Outbox(Username),
 }
 
 /// Decodes `%XX` escapes. Rejects encoded slashes and invalid UTF-8.
@@ -80,6 +89,14 @@ fn parse_target(path: &str) -> Option<Target> {
     };
     match segments.as_slice() {
         ["principals", user] => Some(Target::Principal(user.parse().ok()?)),
+        ["scheduling", user, "inbox"] => Some(Target::Inbox(user.parse().ok()?)),
+        ["scheduling", user, "outbox"] => Some(Target::Outbox(user.parse().ok()?)),
+        ["scheduling", user, "inbox", item] => {
+            let name = percent_decode(item)?;
+            valid_item_name(&name).then_some(())?;
+            Some(Target::InboxItem(user.parse().ok()?, name))
+        }
+        ["scheduling", ..] => None,
         [home, user] => Some(Target::Home(kind(home)?, user.parse().ok()?)),
         [home, user, slug] => Some(Target::Collection(
             kind(home)?,
@@ -107,6 +124,8 @@ pub async fn resolve(
     path: &str,
 ) -> Result<Option<Resource>, StoreError> {
     let own = |owner: &Username| owner == &user.username;
+    // Without scheduling the inbox and outbox do not exist.
+    let scheduling = state.scheduling.is_some();
     Ok(match parse_target(path) {
         None => None,
         Some(Target::Root) => Some(Resource::Root),
@@ -123,6 +142,11 @@ pub async fn resolve(
             .collection(user.id, kind, &slug)
             .await?
             .map(|collection| Resource::Item(collection, name)),
+        Some(Target::Inbox(owner)) => (scheduling && own(&owner)).then_some(Resource::Inbox),
+        Some(Target::Outbox(owner)) => (scheduling && own(&owner)).then_some(Resource::Outbox),
+        Some(Target::InboxItem(owner, name)) => {
+            (scheduling && own(&owner)).then_some(Resource::InboxItem(name))
+        }
         Some(Target::Collection(..) | Target::Item(..)) => None,
     })
 }
@@ -226,6 +250,14 @@ pub fn principal_href(user: &Username) -> String {
     format!("{DAV_ROOT}principals/{user}/")
 }
 
+pub fn inbox_href(user: &Username) -> String {
+    format!("{DAV_ROOT}scheduling/{user}/inbox/")
+}
+
+pub fn outbox_href(user: &Username) -> String {
+    format!("{DAV_ROOT}scheduling/{user}/outbox/")
+}
+
 fn home_segment(kind: CollectionKind) -> &'static str {
     match kind {
         CollectionKind::Calendar => "calendars",
@@ -254,6 +286,10 @@ pub fn href_of(resource: &Resource, user: &Username) -> String {
         Resource::Collection(collection) => collection_href(collection, user),
         Resource::Unmapped(kind, slug) => format!("{}{slug}/", home_href(*kind, user)),
         Resource::Item(collection, name) => item_href(collection, user, name),
+        Resource::Inbox => inbox_href(user),
+        // Valid item names need no escaping.
+        Resource::InboxItem(name) => format!("{}{name}", inbox_href(user)),
+        Resource::Outbox => outbox_href(user),
     }
 }
 

@@ -767,3 +767,138 @@ async fn double_submitted_totp_enable_is_a_conflict_not_a_failure() {
     statuses.sort();
     assert_eq!(statuses, [StatusCode::OK, StatusCode::CONFLICT]);
 }
+
+/// Administrators set the e-mail address used for scheduling; it is
+/// validated, unique and kept out of the scheduling domain's derived
+/// addresses of other users.
+#[tokio::test]
+async fn admin_sets_scheduling_email() {
+    let store = Store::in_memory().await.unwrap();
+    for (user, password) in [ALICE, BOB] {
+        let hash = hash_password(password).unwrap();
+        store
+            .create_user(&user.parse().unwrap(), &hash, None)
+            .await
+            .unwrap();
+    }
+    store
+        .set_admin(&"alice".parse().unwrap(), true)
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    config.scheduling.enabled = true;
+    config.scheduling.domain = Some("example.org".to_owned());
+    let app = router(&config, AppState::new(store).unwrap());
+    let admin = cookie_of(&login(&app, ALICE, None).await);
+    let patch = |body: Value| {
+        let app = app.clone();
+        let admin = admin.clone();
+        async move {
+            call(
+                &app,
+                Method::PATCH,
+                "/api/v1/admin/users/bob",
+                Some(&admin),
+                Some(body),
+            )
+            .await
+            .status
+        }
+    };
+    assert_eq!(
+        patch(json!({"email": "Bob.B@Corp.Example"})).await,
+        StatusCode::NO_CONTENT
+    );
+    let users = call(&app, Method::GET, "/api/v1/admin/users", Some(&admin), None).await;
+    let bob = users
+        .json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["username"] == "bob")
+        .unwrap()
+        .clone();
+    assert_eq!(bob["email"], "bob.b@corp.example");
+    for (email, status) in [
+        ("not an address", StatusCode::BAD_REQUEST),
+        ("bö@example.com", StatusCode::BAD_REQUEST),
+        // Another user's derived address, or any other one in the domain.
+        ("alice@example.org", StatusCode::CONFLICT),
+        ("someone@example.org", StatusCode::CONFLICT),
+    ] {
+        assert_eq!(patch(json!({"email": email})).await, status, "{email}");
+    }
+    // Unique across users.
+    let created = call(
+        &app,
+        Method::POST,
+        "/api/v1/admin/users",
+        Some(&admin),
+        Some(json!({"username": "carol", "password": "carol password 1", "email": "bob.b@corp.example"})),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CONFLICT);
+    let created = call(
+        &app,
+        Method::POST,
+        "/api/v1/admin/users",
+        Some(&admin),
+        Some(json!({"username": "carol", "password": "carol password 1", "email": "carol@corp.example"})),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CREATED);
+    assert_eq!(created.json["email"], "carol@corp.example");
+    // An empty value removes the address; the user's own derived one is fine.
+    assert_eq!(patch(json!({"email": ""})).await, StatusCode::NO_CONTENT);
+    assert_eq!(
+        patch(json!({"email": "bob@example.org"})).await,
+        StatusCode::NO_CONTENT
+    );
+
+    // Each user decides whether they accept invitations.
+    let bob = cookie_of(&login(&app, BOB, None).await);
+    let me = call(&app, Method::GET, "/api/v1/me", Some(&bob), None).await;
+    assert_eq!(me.json["scheduling"]["accept_invitations"], true);
+    assert_eq!(
+        me.json["scheduling"]["addresses"],
+        json!(["mailto:bob@example.org"])
+    );
+    let refuse = call(
+        &app,
+        Method::PATCH,
+        "/api/v1/me/scheduling",
+        Some(&bob),
+        Some(json!({"accept_invitations": false})),
+    )
+    .await;
+    assert_eq!(refuse.status, StatusCode::NO_CONTENT);
+    let me = call(&app, Method::GET, "/api/v1/me", Some(&bob), None).await;
+    assert_eq!(me.json["scheduling"]["accept_invitations"], false);
+    let unknown = call(
+        &app,
+        Method::PATCH,
+        "/api/v1/me/scheduling",
+        Some(&bob),
+        Some(json!({"accept_invitations": false, "other": 1})),
+    )
+    .await;
+    assert_eq!(unknown.status, StatusCode::BAD_REQUEST);
+}
+
+/// Without scheduling the setting does not exist.
+#[tokio::test]
+async fn scheduling_settings_need_scheduling() {
+    let app = app().await;
+    let alice = cookie_of(&login(&app, ALICE, None).await);
+    let me = call(&app, Method::GET, "/api/v1/me", Some(&alice), None).await;
+    assert_eq!(me.json["scheduling"], Value::Null);
+    let reply = call(
+        &app,
+        Method::PATCH,
+        "/api/v1/me/scheduling",
+        Some(&alice),
+        Some(json!({"accept_invitations": false})),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+}

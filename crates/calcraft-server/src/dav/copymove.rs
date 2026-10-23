@@ -67,7 +67,12 @@ pub async fn handle(ctx: Ctx<'_>, resource: Resource, request: Request, mode: Mo
                 .into_response();
         }
         Resource::Unmapped(..) => return not_found(),
-        Resource::Root | Resource::Principal | Resource::Home(_) => return method_not_allowed(),
+        Resource::Root
+        | Resource::Principal
+        | Resource::Home(_)
+        | Resource::Inbox
+        | Resource::InboxItem(_)
+        | Resource::Outbox => return method_not_allowed(),
     };
     // Objects cannot be moved out of a subscription (copies are fine).
     if mode == Mode::Move && source.read_only {
