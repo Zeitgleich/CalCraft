@@ -154,8 +154,15 @@ pub async fn run(store: &Store, config: &Config, command: UserCommand) -> anyhow
                 bail!("user {username} does not exist");
             };
             store.set_accept_invitations(user.id, !refuse).await?;
-            let state = if refuse { "refuses" } else { "accepts" };
-            println!("{username} {state} invitations");
+            // The name is not repeated: the caller just typed it.
+            println!(
+                "{}",
+                if refuse {
+                    "invitations are refused"
+                } else {
+                    "invitations are accepted"
+                }
+            );
         }
         UserCommand::SetEmail {
             username,
@@ -175,8 +182,8 @@ pub async fn run(store: &Store, config: &Config, command: UserCommand) -> anyhow
             )
             .await?
             {
-                Some(email) => println!("e-mail address of {username} set to {email}"),
-                None => println!("e-mail address of {username} removed"),
+                Some(email) => println!("e-mail address set to {email}"),
+                None => println!("e-mail address removed"),
             }
         }
         UserCommand::Passwd { username, password } => {
