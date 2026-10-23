@@ -175,7 +175,8 @@ async fn check_limits(
     .try_get("used")?;
     let used = used
         .saturating_add(crate::trash::trash_bytes(&mut **tx, owner_id).await?)
-        .saturating_add(crate::scheduling::inbox_bytes(&mut **tx, owner_id).await?);
+        .saturating_add(crate::scheduling::inbox_bytes(&mut **tx, owner_id).await?)
+        .saturating_add(crate::attachments::owner_bytes(&mut **tx, owner_id).await?);
     let size = items.iter().fold(0i64, |sum, item| {
         sum.saturating_add(i64::try_from(item.content.len()).unwrap_or(i64::MAX))
     });

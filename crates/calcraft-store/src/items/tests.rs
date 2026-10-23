@@ -33,6 +33,7 @@ fn item<'a>(uid: &'a str, etag: &'a str, start: Option<i64>, end: Option<i64>) -
         index_version: 0,
         etag,
         content: b"BEGIN:VCALENDAR",
+        attachments: &[],
     }
 }
 

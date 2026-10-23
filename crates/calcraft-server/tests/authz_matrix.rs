@@ -22,7 +22,10 @@
 //!
 //! Scheduling (RFC 6638) is enabled, so the scheduling inbox and outbox of
 //! every user are targets too, and POST (free/busy requests to the outbox)
-//! is part of the matrix.
+//! is part of the matrix. Managed attachments (RFC 8607) are enabled too:
+//! every user's events reference an attachment, the download URLs of
+//! alice's, bob's and a missing attachment are targets, and attachment
+//! POSTs (`attachment-add`, `attachment-remove`) are sent everywhere.
 //!
 //! The REST API part does the same for every route in
 //! [`calcraft_server::api::ROUTES`]. Both parts check themselves: a DAV
@@ -98,6 +101,13 @@ const BOB_ISSUER: &str = "https://zqbobmark-idp.example";
 /// A user that does not exist; paths use bob's names.
 const NOBODY: &str = "carol";
 
+/// Managed ids of the attachments in alice's and bob's events, and one
+/// that does not exist.
+const ALICE_ATTACHMENT: &str = "a11ce0a11ce0a11ce0a11ce0a11ce0a1";
+const BOB_ATTACHMENT: &str = "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0";
+const MISSING_ATTACHMENT: &str = "0123456789abcdef0123456789abcdef";
+const ATTACHMENT_BASE: &str = "https://cal.example.org";
+
 struct Fixture {
     app: Router,
     store: Store,
@@ -121,8 +131,28 @@ struct Fixture {
 }
 
 fn event(uid: &str, summary: &str) -> String {
+    event_with(uid, summary, "")
+}
+
+fn event_with(uid: &str, summary: &str, extra: &str) -> String {
     format!(
-        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\nBEGIN:VEVENT\r\nUID:{uid}\r\nDTSTAMP:20261001T000000Z\r\nDTSTART:20261021T100000Z\r\nDTEND:20261021T110000Z\r\nSUMMARY:{summary}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\nBEGIN:VEVENT\r\nUID:{uid}\r\nDTSTAMP:20261001T000000Z\r\nDTSTART:20261021T100000Z\r\nDTEND:20261021T110000Z\r\nSUMMARY:{summary}\r\n{extra}END:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+}
+
+/// The managed id of a user's seeded attachment.
+fn attachment_of(n: &Names) -> &'static str {
+    if n.prefix == MARK {
+        BOB_ATTACHMENT
+    } else {
+        ALICE_ATTACHMENT
+    }
+}
+
+/// The ATTACH line referencing it.
+fn attach_line(id: &str) -> String {
+    format!(
+        "ATTACH;FMTTYPE=text/plain;SIZE=1;FILENAME=a.txt;MANAGED-ID={id}:{ATTACHMENT_BASE}/dav/attachments/{id}\r\n"
     )
 }
 
@@ -131,6 +161,17 @@ fn vcard(uid: &str, name: &str) -> String {
 }
 
 async fn put_seed(store: &Store, collection: &Collection, prefix: &str, name: &str, content: &str) {
+    put_seed_with(store, collection, prefix, name, content, &[]).await;
+}
+
+async fn put_seed_with(
+    store: &Store,
+    collection: &Collection,
+    prefix: &str,
+    name: &str,
+    content: &str,
+    attachments: &[String],
+) {
     let uid = format!("{prefix}-uid-{name}");
     let etag = format!("\"{prefix}-etag-{name}\"");
     let component = match collection.kind {
@@ -147,6 +188,7 @@ async fn put_seed(store: &Store, collection: &Collection, prefix: &str, name: &s
         index_version: 0,
         etag: &etag,
         content: content.as_bytes(),
+        attachments,
     };
     store
         .put_item(collection.id, name, &item, &Precondition::None)
@@ -193,20 +235,56 @@ async fn seed(store: &Store, user: &User, n: &Names) {
     let cal2 = create(CollectionKind::Calendar, n.cal2, "cal2").await;
     let ab = create(CollectionKind::Addressbook, "default", "ab").await;
     create(CollectionKind::Addressbook, n.ab2, "ab2").await;
-    put_seed(
+    // A managed attachment both events reference (kept if a trash entry
+    // still references it).
+    let attachment = attachment_of(n);
+    if store
+        .readable_attachment(attachment, user.id)
+        .await
+        .unwrap()
+        .is_none()
+    {
+        let content = format!("BEGIN: {p}-attachment-content");
+        store
+            .insert_attachment(
+                &calcraft_store::NewAttachment {
+                    managed_id: attachment,
+                    owner_id: user.id,
+                    filename: "a.txt",
+                    media_type: "text/plain",
+                    content: content.as_bytes(),
+                    now: now(),
+                },
+                i64::MAX,
+            )
+            .await
+            .unwrap();
+    }
+    let ids = [attachment.to_owned()];
+    put_seed_with(
         store,
         &cal,
         p,
         n.event,
-        &event("@UID@", &format!("{p}-summary-ev1")),
+        &event_with(
+            "@UID@",
+            &format!("{p}-summary-ev1"),
+            &attach_line(attachment),
+        ),
+        &ids,
     )
     .await;
-    put_seed(
+    put_seed_with(
         store,
         &cal2,
         p,
         n.event2,
-        &event("@UID@", &format!("{p}-summary-ev2")),
+        &event_with(
+            "@UID@",
+            &format!("{p}-summary-ev2"),
+            &attach_line(attachment),
+        ),
+        &ids,
     )
     .await;
     put_seed(store, &ab, p, n.card, &vcard("@UID@", &format!("{p}-fn"))).await;
@@ -303,6 +381,13 @@ async fn snapshot(store: &Store, user: &User, session: &str) -> String {
             for meta in store.items(collection.id).await.unwrap() {
                 let item = store.item(collection.id, &meta.name).await.unwrap();
                 out += &format!("{item:?}\n");
+                out += &format!(
+                    "{:?}\n",
+                    store
+                        .item_attachments(collection.id, &meta.name)
+                        .await
+                        .unwrap()
+                );
             }
         }
     }
@@ -319,6 +404,14 @@ async fn snapshot(store: &Store, user: &User, session: &str) -> String {
         );
     }
     out += &format!("{:?}\n", store.user_email(user.id).await.unwrap());
+    out += &format!(
+        "attachments {:?} {:?}\n",
+        store.attachment_usage(user.id).await.unwrap(),
+        store
+            .attachment_content(BOB_ATTACHMENT, user.id)
+            .await
+            .unwrap()
+    );
     out += &format!("{:?}\n", store.app_passwords(user.id).await.unwrap());
     out += &format!(
         "{:?}\n",
@@ -436,6 +529,8 @@ async fn fixture() -> Fixture {
         "zqbobmark-etag-msg",
         "zqbobmark-uid-msg",
         "zqbobmark-mail.example",
+        "zqbobmark-attachment-content",
+        BOB_ATTACHMENT,
     ]
     .iter()
     .map(|m| (*m).to_owned())
@@ -481,6 +576,9 @@ async fn fixture() -> Fixture {
     // Scheduling on: inboxes, outboxes and POST are part of the matrix.
     config.scheduling.enabled = true;
     config.scheduling.domain = Some("example.org".to_owned());
+    // Managed attachments on: download URLs and attachment POSTs too.
+    config.attachments.enabled = true;
+    config.attachments.base_url = Some(ATTACHMENT_BASE.to_owned());
     #[allow(unused_mut)]
     let mut state = AppState::new(store.clone()).unwrap();
     // Subscriptions enabled with the production rules: alice's attempt to
@@ -614,6 +712,8 @@ enum Res {
     InboxMessage,
     MissingInboxMessage,
     Outbox,
+    /// The download URL of a managed attachment.
+    Attachment,
     /// Does not resolve for alice: malformed, traversal, or below a
     /// collection that does not exist.
     Invalid,
@@ -752,6 +852,36 @@ fn all_targets() -> Vec<Target> {
     targets.extend(user_targets("alice", &ALICE, Owner::Own));
     targets.extend(user_targets("bob", &BOB, Owner::Other));
     targets.extend(user_targets(NOBODY, &BOB, Owner::Nobody));
+    let attachment = |id: &str| format!("/dav/attachments/{id}");
+    targets.extend([
+        Target::new(attachment(ALICE_ATTACHMENT), Res::Attachment, Owner::Own),
+        Target::new(
+            format!("{}/", attachment(ALICE_ATTACHMENT)),
+            Res::Attachment,
+            Owner::Own,
+        ),
+        Target::new(attachment(BOB_ATTACHMENT), Res::Attachment, Owner::Other),
+        Target::new(
+            attachment(MISSING_ATTACHMENT),
+            Res::Attachment,
+            Owner::Nobody,
+        ),
+    ]);
+    for path in [
+        "/dav/attachments/".to_owned(),
+        "/dav/attachments".to_owned(),
+        attachment(&BOB_ATTACHMENT.to_uppercase()),
+        attachment(&ALICE_ATTACHMENT.to_uppercase()),
+        attachment(&format!("%62{}", &BOB_ATTACHMENT[1..])),
+        attachment(&format!("{BOB_ATTACHMENT}0")),
+        attachment(&BOB_ATTACHMENT[1..]),
+        format!("{}/extra", attachment(BOB_ATTACHMENT)),
+        format!("/dav/attachments/../attachments/{BOB_ATTACHMENT}"),
+        format!("/dav/calendars/alice/default/../../attachments/{BOB_ATTACHMENT}"),
+        format!("/dav/attachments/{BOB_ATTACHMENT}%2f.."),
+    ] {
+        targets.push(Target::new(path, Res::Invalid, Owner::Tricky));
+    }
     for path in [
         "/dav/principals/",
         "/dav/principals/../calendars/bob/",
@@ -822,6 +952,10 @@ enum Case {
     Move(Dest),
     /// A free/busy request (outbox POST) for bob and for nobody.
     Post,
+    /// `POST …?action=attachment-add` with a file.
+    AttachmentAdd,
+    /// `POST …?action=attachment-remove` of the user's attachment.
+    AttachmentRemove,
     /// A method the server does not implement.
     Unknown(&'static str),
 }
@@ -992,6 +1126,8 @@ const COPY_MOVE_CASES: [Case; 26] = {
 };
 /// Scheduling: free/busy requests to the outbox.
 const SCHEDULING_CASES: &[Case] = &[Case::Post];
+/// Managed attachments: uploads and removals on every target.
+const ATTACHMENT_CASES: &[Case] = &[Case::AttachmentAdd, Case::AttachmentRemove];
 /// Unimplemented methods, sent to every target.
 const UNKNOWN_CASES: &[Case] = &[
     Case::Unknown("LOCK"),
@@ -1055,7 +1191,7 @@ impl Case {
             Self::MkcolExtended | Self::MkcolPlain => "MKCOL",
             Self::Copy(_) => "COPY",
             Self::Move(_) => "MOVE",
-            Self::Post => "POST",
+            Self::Post | Self::AttachmentAdd | Self::AttachmentRemove => "POST",
             Self::Unknown(method) => method,
         }
     }
@@ -1116,6 +1252,14 @@ impl Case {
                 "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\nMETHOD:REQUEST\r\nBEGIN:VFREEBUSY\r\nUID:zzattack-fb\r\nDTSTAMP:20261001T000000Z\r\nDTSTART:20261020T000000Z\r\nDTEND:20261023T000000Z\r\nORGANIZER:mailto:alice@example.org\r\nATTENDEE:mailto:bob@example.org\r\nATTENDEE:mailto:carol@example.org\r\nEND:VFREEBUSY\r\nEND:VCALENDAR\r\n".to_owned(),
             ),
             Self::DeleteIfMatch => (h(&[("if-match", "*")]), String::new()),
+            Self::AttachmentAdd => (
+                h(&[
+                    ("content-type", "text/plain"),
+                    ("content-disposition", "attachment; filename=zzattack.txt"),
+                ]),
+                "zzattack attachment".to_owned(),
+            ),
+            Self::AttachmentRemove => (Vec::new(), String::new()),
             Self::Put | Self::PutIfNoneMatch => {
                 let (content_type, body) = if card {
                     ("text/vcard", vcard(ATTACK_UID, "zzattack"))
@@ -1212,6 +1356,20 @@ impl Case {
         if matches!(res, Inbox | InboxMessage | MissingInboxMessage | Outbox) {
             return self.scheduling_status(res);
         }
+        if res == Attachment {
+            // Only downloads.
+            return match self {
+                Self::Options => 200,
+                Self::Get | Self::Head => 200,
+                _ => 405,
+            };
+        }
+        let calendar_object = matches!(res, CalObject | MissingCalObject);
+        match self {
+            Self::AttachmentAdd if calendar_object => return if object { 201 } else { 404 },
+            Self::AttachmentRemove if calendar_object => return if object { 204 } else { 404 },
+            _ => {}
+        }
         match self {
             Self::Options => 200,
             Self::Get | Self::Head => match () {
@@ -1288,8 +1446,8 @@ impl Case {
                 () if missing || unmapped => 404,
                 () => 405,
             },
-            // Only the outbox takes POST.
-            Self::Post | Self::Unknown(_) => 405,
+            // Only the outbox and (with an action) calendar objects take POST.
+            Self::Post | Self::AttachmentAdd | Self::AttachmentRemove | Self::Unknown(_) => 405,
         }
     }
 
@@ -1314,6 +1472,9 @@ impl Case {
             | Self::SyncInitial
             | Self::SyncForeignToken => 403,
             Self::Post if res == Outbox => 200,
+            // The outbox ignores the query: not a free/busy request.
+            Self::AttachmentAdd if res == Outbox => 403,
+            Self::AttachmentRemove if res == Outbox => 403,
             _ => 405,
         }
     }
@@ -1402,7 +1563,15 @@ async fn run_dav_matrix(cases: &[Case]) -> Stats {
                 let (mut headers, body) = case.request(&fx, target);
                 headers.extend(cred.headers(&fx));
                 let method = case.method();
-                let reply = send(&fx.app, method, &target.path, &headers, &body).await;
+                let uri = match case {
+                    Case::AttachmentAdd => format!("{}?action=attachment-add", target.path),
+                    Case::AttachmentRemove => format!(
+                        "{}?action=attachment-remove&managed-id={ALICE_ATTACHMENT}",
+                        target.path
+                    ),
+                    _ => target.path.clone(),
+                };
+                let reply = send(&fx.app, method, &uri, &headers, &body).await;
                 stats.requests += 1;
                 let context = format!("{case:?} {} as {cred:?} ({target:?})", target.path);
                 let request = format!("{method} {} {headers:?} {body}", target.path);
@@ -1593,6 +1762,11 @@ async fn dav_matrix_scheduling() {
 }
 
 #[tokio::test]
+async fn dav_matrix_attachments() {
+    report("attachments", &run_dav_matrix(ATTACHMENT_CASES).await);
+}
+
+#[tokio::test]
 async fn dav_matrix_unknown_methods() {
     report("unknown", &run_dav_matrix(UNKNOWN_CASES).await);
 }
@@ -1644,6 +1818,7 @@ fn dav_matrix_covers_every_allowed_method() {
         REPORT_CASES,
         &COPY_MOVE_CASES,
         SCHEDULING_CASES,
+        ATTACHMENT_CASES,
     ]
     .concat()
     .iter()

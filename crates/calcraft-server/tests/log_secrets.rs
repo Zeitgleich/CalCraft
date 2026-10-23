@@ -3,7 +3,8 @@
 //! credentials headers, query strings or calendar and contact contents
 //! (also not when they are moved into the trash and restored), and no
 //! scheduling messages or calendar user addresses (invitations, replies,
-//! cancellations, free/busy lookups).
+//! cancellations, free/busy lookups), and no managed attachments (file
+//! names, contents, managed ids).
 //!
 //! This binary holds a single test because it installs the global
 //! subscriber (the same one `logging.format = "json"` uses), which also
@@ -402,6 +403,73 @@ mod api {
     }
 }
 
+/// Managed attachments with marked file names and contents: upload,
+/// download, update, removal and refused uploads.
+async fn attachment_flows(app: &Router, auth: &str, secrets: &mut Vec<String>) {
+    let uri = "/dav/calendars/alice/default/attached.ics";
+    let event = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\nBEGIN:VEVENT\r\nUID:{MARKER}AttachedUid\r\nDTSTAMP:20261001T000000Z\r\nDTSTART:20261021T100000Z\r\nDURATION:PT1H\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    );
+    secrets.push(format!("{MARKER}AttachedUid"));
+    let reply = dav(app, auth, "PUT", uri, "text/calendar", event).await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    let filename = format!("{MARKER}File.pdf");
+    let content = format!("{MARKER}AttachmentContent");
+    secrets.extend([filename.clone(), content.clone()]);
+    let disposition = format!("attachment; filename=\"{filename}\"");
+    let post = |query: String, body: String| {
+        let disposition = disposition.clone();
+        async move {
+            send(
+                app,
+                "POST",
+                &format!("{uri}?{query}"),
+                &[
+                    ("authorization", auth),
+                    ("content-type", "application/pdf"),
+                    ("content-disposition", &disposition),
+                ],
+                body,
+            )
+            .await
+        }
+    };
+    let reply = post("action=attachment-add".to_owned(), content.clone()).await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    let id = reply.headers["cal-managed-id"].to_str().unwrap().to_owned();
+    secrets.push(id.clone());
+    let download = format!("/dav/attachments/{id}");
+    let reply = dav(app, auth, "GET", &download, "", String::new()).await;
+    assert_eq!(reply.body, content);
+    let reply = post(
+        format!("action=attachment-update&managed-id={id}"),
+        format!("{content}2"),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let new_id = reply.headers["cal-managed-id"].to_str().unwrap().to_owned();
+    secrets.push(new_id.clone());
+    // Refused: unknown id, too large, foreign id in a PUT.
+    let reply = post(
+        format!("action=attachment-remove&managed-id={id}"),
+        String::new(),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    let reply = post(
+        "action=attachment-add".to_owned(),
+        format!("{content}{}", "x".repeat(70 * 1024)),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    let reply = post(
+        format!("action=attachment-remove&managed-id={new_id}"),
+        String::new(),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+}
+
 /// Invitation, reply, cancellation and free/busy lookup with marked
 /// contents and addresses.
 async fn scheduling_flows(
@@ -552,6 +620,9 @@ async fn logs_contain_no_secrets_or_contents() {
     let mut config = Config::default();
     config.scheduling.enabled = true;
     config.scheduling.domain = Some("example.org".to_owned());
+    config.attachments.enabled = true;
+    config.attachments.base_url = Some("https://cal.example.org".to_owned());
+    config.attachments.max_bytes = 64 * 1024;
     let app = router(&config, AppState::new(store.clone()).unwrap());
 
     let mut secrets = vec![ALICE.1.to_owned()];
@@ -571,6 +642,7 @@ async fn logs_contain_no_secrets_or_contents() {
         .await;
     }
     dav_flows(&app, &password_auth, &mut secrets).await;
+    attachment_flows(&app, &password_auth, &mut secrets).await;
     let bob_auth = basic("bob", &bob_password);
     secrets.push(bob_password.clone());
     secrets.push(bob_auth["Basic ".len()..].to_owned());
@@ -648,6 +720,7 @@ async fn logs_contain_no_secrets_or_contents() {
     assert!(logs.contains("finished processing request"), "{logs}");
     assert!(logs.contains("INSERT INTO items"), "{logs}");
     assert!(logs.contains("INSERT INTO trash"), "{logs}");
+    assert!(logs.contains("INSERT INTO attachments"), "{logs}");
     assert!(logs.contains("account locked after repeated failed logins"));
     assert!(logs.contains("scheduling messages sent"), "{logs}");
     assert!(logs.contains("scheduling reply sent"), "{logs}");

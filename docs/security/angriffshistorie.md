@@ -239,6 +239,17 @@ Die Beschreibungen sind Payload-Ideen für **eigene** Tests gegen CalCraft. Sie 
 58. Export: TEXT mit CRLF + `BEGIN:VEVENT` → erzeugt kein zusätzliches Event (Wallos-Muster).
 59. Backup-Datei: Rechte 0600, Restore einer manipulierten Sicherung (Pfad-Einträge mit `../`, übergroße Objekte) → abgelehnt.
 
+### Managed Attachments (RFC 8607)
+61. Benutzer B schreibt die Managed-ID bzw. die Download-URL eines Anhangs von A in ein eigenes Termin-ATTACH (PUT, Import, Abo-Feed, COPY einer Einladung) → kein Zugriff, PUT mit `CALDAV:valid-managed-id-parameter` abgelehnt; Download fremder Anhänge byte-identisch zu nie vergebenen IDs (404). ✅ (`tests/attachments.rs`, `foreign_managed_ids_cannot_be_injected`, Matrix)
+62. Upload als `text/html`, `image/svg+xml` oder `application/xhtml+xml` mit Script → Auslieferung nur als `application/octet-stream` mit `Content-Disposition: attachment`, `nosniff` und `Content-Security-Policy: default-src 'none'; sandbox` (Nextcloud-Auto-Download-/XSS-Muster). ✅ (`hostile_file_names_and_media_types`)
+63. Dateiname mit `../`, Backslashes, CRLF + `Set-Cookie:`, RTL-Override (`invoice\u202Efdp.exe`), unsichtbaren Zeichen → bereinigt, kein Header-Injection, Header nur sichtbares ASCII (RFC 6266 §4.3). ✅ (Unit-Tests, Fuzz-Ziel `attach`)
+64. Teilnehmer ändert oder entfernt den Anhang des Organisators per POST → 403 `need-privileges`; nach Absage bzw. Entfernen aus der Teilnehmerliste kein Download mehr. ✅ (`attendees_read_but_cannot_change_and_lose_access_on_cancel`)
+65. Upload größer als `max_bytes` (mit und ohne `Content-Length`), mehr Anhänge als `max_per_object`, volle Quota (auch durch den Papierkorb) → 403/507 ohne Rückstände. ✅ (`size_limits_and_quota`)
+66. Parallele Uploads bzw. Upload parallel zu DELETE → nichts geht verloren, keine verwaisten Dateien. ✅ (`parallel_uploads_lose_nothing`, `upload_racing_a_delete_leaves_no_orphans`)
+67. Teilnehmer entfernt ORGANIZER/ATTENDEE aus seiner Kopie (oder macht sich selbst zum Organisator und lädt Dritte ein) und behält bzw. verteilt so den Anhang des Organisators weiter, auch nach dessen DELETE → Zugriff endet sofort, Dritte bekommen nichts, die Datei belastet den Organisator nicht mehr (Fund aus dem internen Review). ✅ (`a_detached_attendee_copy_loses_access`, `an_attendee_cannot_reshare_the_organizer_attachment`, Store-Tests)
+68. Entfernen eines Anhangs bzw. Absage, deren Zustellung scheitert (Byte-Budget, Quota) → Zugriff endet trotzdem. ✅ (`removal_revokes_access_even_if_the_update_is_not_delivered`, `organizer_changes_revoke_access_without_a_delivery`)
+69. Langsame Upload-Bodies (1 Byte, dann nichts) eines Benutzers blockieren Uploads anderer → nur eigene 2 Slots belegt, sonst sofort 503. ✅ (`slow_uploads_of_one_user_do_not_block_others`)
+
 ### Release (M7)
 60. Gesamter Autorisierungs-Matrix-Test grün. Fuzzing-Langlauf ohne Funde. `cargo audit` sauber. Header-Check (CSP, HSTS, nosniff, frame-ancestors, Referrer-Policy) auf allen UI- und API-Antworten.
 

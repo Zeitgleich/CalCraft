@@ -7,19 +7,17 @@ use std::{
 
 use axum::{
     Router,
-    extract::{DefaultBodyLimit, State},
+    body::Body,
+    extract::{DefaultBodyLimit, Request, State},
     http::{
         StatusCode,
-        header::{LOCATION, RETRY_AFTER},
+        header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION, RETRY_AFTER},
     },
-    middleware,
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{any, get},
 };
-use tower_http::{
-    catch_panic::CatchPanicLayer, limit::RequestBodyLimitLayer, timeout::TimeoutLayer,
-    trace::TraceLayer,
-};
+use tower_http::{catch_panic::CatchPanicLayer, timeout::TimeoutLayer, trace::TraceLayer};
 
 use calcraft_store::{Readiness, Store};
 
@@ -47,6 +45,9 @@ pub struct AppState {
     /// Scheduling between users, if enabled (`[scheduling] enabled`);
     /// [`router`] sets it from the configuration.
     pub scheduling: Option<Arc<crate::scheduling::Scheduling>>,
+    /// Managed attachments, if enabled (`[attachments] enabled`); [`router`]
+    /// sets it from the configuration.
+    pub attachments: Option<Arc<crate::attachments::Attachments>>,
     /// Largest accepted vCard; [`router`] sets it from `storage.max_vcard_bytes`.
     pub max_vcard_bytes: usize,
     /// Bounds concurrent recurrence checks of calendar-query (CPU work on
@@ -69,6 +70,7 @@ impl AppState {
             #[cfg(feature = "subscriptions")]
             subscriptions: None,
             scheduling: None,
+            attachments: None,
             max_vcard_bytes: crate::config::DEFAULT_MAX_VCARD_BYTES,
             expansion: Arc::new(tokio::sync::Semaphore::new(expansion_permits())),
             readiness: Arc::new(ReadinessCache::new(READINESS_TTL)),
@@ -89,6 +91,15 @@ pub fn router(config: &Config, mut state: AppState) -> Router {
             &config.scheduling,
         )));
     }
+    if config.attachments.enabled && state.attachments.is_none() {
+        state.attachments = Some(Arc::new(crate::attachments::Attachments::new(
+            &config.attachments,
+        )));
+    }
+    let body_limit = BodyLimit {
+        default: config.server.max_body_bytes,
+        upload: state.attachments.as_ref().map(|a| a.config.max_bytes),
+    };
     let web_ui = config.web_ui.enabled && cfg!(feature = "web-ui");
     let app = Router::new()
         // GET / shows the web UI; DAV clients configured with the bare
@@ -130,7 +141,7 @@ pub fn router(config: &Config, mut state: AppState) -> Router {
     let limiter = limits::Limiter::new(&config.server);
     app.fallback(not_found)
         .layer(DefaultBodyLimit::disable())
-        .layer(RequestBodyLimitLayer::new(config.server.max_body_bytes))
+        .layer(middleware::from_fn_with_state(body_limit, limit_body))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             config.server.request_timeout(),
@@ -141,7 +152,8 @@ pub fn router(config: &Config, mut state: AppState) -> Router {
             limits::enforce,
         ))
         // Spans record the path only: query strings can carry secrets
-        // (OIDC code and state).
+        // (OIDC code and state). Attachment downloads without their
+        // managed id.
         .layer(TraceLayer::new_for_http().make_span_with(
             |request: &axum::http::Request<axum::body::Body>| {
                 // Set by `limits::resolve_client`, which runs first.
@@ -149,10 +161,16 @@ pub fn router(config: &Config, mut state: AppState) -> Router {
                     .extensions()
                     .get::<ClientIp>()
                     .map(|client| client.ip);
+                let path = request.uri().path();
+                let path = if path.starts_with(crate::attachments::ATTACHMENTS_PATH) {
+                    crate::attachments::ATTACHMENTS_PATH
+                } else {
+                    path
+                };
                 tracing::debug_span!(
                     "request",
                     method = %request.method(),
-                    path = %request.uri().path(),
+                    path = %path,
                     client = client.map(tracing::field::display),
                 )
             },
@@ -165,6 +183,52 @@ pub fn router(config: &Config, mut state: AppState) -> Router {
             config.security.hsts,
             security::headers,
         ))
+}
+
+/// Request body limits: `server.max_body_bytes`, and `attachments.max_bytes`
+/// for attachment uploads only.
+#[derive(Debug, Clone, Copy)]
+struct BodyLimit {
+    default: usize,
+    upload: Option<usize>,
+}
+
+/// Limits the request body like `tower_http`'s `RequestBodyLimitLayer`
+/// (413 for a larger `Content-Length`, a length-limited body otherwise),
+/// with the larger limit for attachment uploads. Those are checked against
+/// `attachments.max_bytes` by their handler, which answers with the
+/// `CALDAV:max-attachment-size` precondition (RFC 8607 §3.7).
+async fn limit_body(State(limit): State<BodyLimit>, request: Request, next: Next) -> Response {
+    let upload = limit.upload.filter(|_| {
+        crate::attachments::is_upload(
+            request.method(),
+            request.uri().path(),
+            request.uri().query(),
+        )
+    });
+    let max = match upload {
+        Some(upload) => limit.default.max(upload),
+        None => {
+            let length = request
+                .headers()
+                .get(CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok()?.parse::<usize>().ok());
+            match length {
+                Some(length) if length > limit.default => {
+                    return (
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        [(CONTENT_TYPE, "text/plain; charset=utf-8")],
+                        "length limit exceeded",
+                    )
+                        .into_response();
+                }
+                Some(length) => length,
+                None => limit.default,
+            }
+        }
+    };
+    let request = request.map(|body| Body::new(http_body_util::Limited::new(body, max)));
+    next.run(request).await
 }
 
 async fn health() -> &'static str {

@@ -271,6 +271,7 @@ async fn properties_count_towards_the_quota() {
         index_version: 0,
         etag: "\"e\"",
         content: content.as_bytes(),
+        attachments: &[],
     };
     let err = store
         .put_item(cal.id, "u.ics", &item, &crate::Precondition::None)

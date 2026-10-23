@@ -267,6 +267,7 @@ async fn queries_page_through_many_candidates() {
                     index_version: calcraft_ical::INDEX_VERSION,
                     etag: "\"e\"",
                     content: content.as_bytes(),
+                    attachments: &[],
                 },
                 &Precondition::None,
             )
@@ -319,6 +320,7 @@ async fn upgrade_reindexes_old_rows() {
                 index_version: 0,
                 etag: "\"old\"",
                 content: content.as_bytes(),
+                attachments: &[],
             },
             &Precondition::None,
         )

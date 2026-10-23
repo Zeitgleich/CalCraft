@@ -58,6 +58,7 @@ async fn put(store: &Store, collection_id: i64, name: &str) -> Result<PutOutcome
         index_version: 0,
         etag: "\"1\"",
         content: b"BEGIN:VCALENDAR",
+        attachments: &[],
     };
     store
         .put_item(collection_id, name, &item, &Precondition::None)

@@ -422,7 +422,8 @@ impl Store {
                 let used = items
                     .saturating_add(crate::trash::trash_bytes(&mut *tx, owner_id).await?)
                     .saturating_add(crate::properties::owner_bytes(&mut *tx, owner_id).await?)
-                    .saturating_add(inbox_bytes(&mut *tx, owner_id).await?);
+                    .saturating_add(inbox_bytes(&mut *tx, owner_id).await?)
+                    .saturating_add(crate::attachments::owner_bytes(&mut *tx, owner_id).await?);
                 let size = i64::try_from(message.content.len()).unwrap_or(i64::MAX);
                 if used.saturating_add(size) > self.settings.quota_bytes() {
                     return Err(StoreError::Limit("storage quota exceeded"));

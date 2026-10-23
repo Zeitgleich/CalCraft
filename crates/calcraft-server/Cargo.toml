@@ -31,7 +31,6 @@ migrate = ["https-client", "dep:zeroize"]
 # `migrate`; not
 # useful alone.
 https-client = [
-    "dep:http-body-util",
     "dep:hyper-util",
     "dep:hyper-rustls",
     "dep:rustls",
@@ -55,7 +54,9 @@ figment.workspace = true
 futures-core = { workspace = true, optional = true }
 getrandom.workspace = true
 hmac.workspace = true
-http-body-util = { workspace = true, optional = true }
+# No new crate (axum depends on it): the request body limit with a larger
+# limit for attachment uploads, and the outbound HTTPS client.
+http-body-util.workspace = true
 hyper-util = { workspace = true, optional = true, features = ["client-legacy", "http1", "tokio"] }
 hyper-rustls = { workspace = true, optional = true }
 ring = { workspace = true, optional = true }
@@ -74,7 +75,7 @@ zeroize = { workspace = true, optional = true }
 
 [dev-dependencies]
 calcraft-store = { workspace = true, features = ["test-hooks"] }
-http-body-util.workspace = true
+http-body-util = { workspace = true, features = ["channel"] }
 serde_json.workspace = true
 tower.workspace = true
 

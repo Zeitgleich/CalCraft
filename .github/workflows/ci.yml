@@ -204,7 +204,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for target in ical_object dav_xml recurrence import itip; do
+          for target in ical_object dav_xml recurrence import itip attach; do
             # Checked-in seeds (fuzz/seeds/<target>) start the corpus.
             mkdir -p "fuzz/corpus/$target"
             if [ -d "fuzz/seeds/$target" ]; then cp fuzz/seeds/"$target"/* "fuzz/corpus/$target/"; fi

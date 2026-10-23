@@ -57,6 +57,10 @@ pub struct NewItem<'a> {
     pub index_version: i64,
     pub etag: &'a str,
     pub content: &'a [u8],
+    /// Managed ids (RFC 8607) the content references. The store records a
+    /// reference only for those the object may reference (see
+    /// `attachments::set_item_refs`) and ignores the others.
+    pub attachments: &'a [String],
 }
 
 /// A candidate of a time-range query.
@@ -144,6 +148,12 @@ pub struct ScheduleTag<'a> {
     /// unchanged, so an older delivery can never overwrite a newer one
     /// ([`StoreError::Superseded`]).
     pub requires: Option<(i64, &'a str, &'a str)>,
+    /// The write is an attendee's change of their copy of an invitation
+    /// (same organizer, still a scheduling object): references to the
+    /// organizer's attachments that the copy got by delivery may stay, as
+    /// long as the organizer's object still references them. Every other
+    /// write drops references to attachments of other users.
+    pub keep_delivered: bool,
 }
 
 impl Precondition {
@@ -585,20 +595,24 @@ impl Store {
                         return Err(StoreError::PreconditionFailed);
                     }
                 }
+                let mut guard_id = None;
                 if let Some((guard_collection, guard_name, guard_tag)) = schedule.requires {
-                    let current: Option<String> = sqlx::query(
-                        "SELECT schedule_tag FROM items WHERE collection_id = ? AND name = ?",
+                    let guard = sqlx::query(
+                        "SELECT id, schedule_tag FROM items WHERE collection_id = ? AND name = ?",
                     )
                     .bind(guard_collection)
                     .bind(guard_name)
                     .fetch_optional(&mut *tx)
-                    .await?
-                    .map(|row| row.try_get::<Option<String>, _>("schedule_tag"))
-                    .transpose()?
-                    .flatten();
+                    .await?;
+                    let current: Option<String> = guard
+                        .as_ref()
+                        .map(|row| row.try_get::<Option<String>, _>("schedule_tag"))
+                        .transpose()?
+                        .flatten();
                     if current.as_deref() != Some(guard_tag) {
                         return Err(StoreError::Superseded);
                     }
+                    guard_id = guard.map(|row| row.try_get::<i64, _>("id")).transpose()?;
                 }
 
                 let conflict: Option<String> =
@@ -644,7 +658,8 @@ impl Store {
                     .try_get::<i64, _>("used")?
                     .saturating_add(crate::trash::trash_bytes(&mut *tx, owner_id).await?)
                     .saturating_add(crate::properties::owner_bytes(&mut *tx, owner_id).await?)
-                    .saturating_add(crate::scheduling::inbox_bytes(&mut *tx, owner_id).await?);
+                    .saturating_add(crate::scheduling::inbox_bytes(&mut *tx, owner_id).await?)
+                    .saturating_add(crate::attachments::owner_bytes(&mut *tx, owner_id).await?);
                 let size = i64::try_from(item.content.len()).unwrap_or(i64::MAX);
                 if used.saturating_add(size) > self.settings.quota_bytes() {
                     return Err(StoreError::Limit("storage quota exceeded"));
@@ -658,7 +673,9 @@ impl Store {
                 .await?
                 .try_get("sync_revision")?;
 
-                sqlx::query(
+                // An update keeps the row (and its id, which the attachment
+                // references point to).
+                let item_id: i64 = sqlx::query(
                     "INSERT INTO items (collection_id, name, uid, etag, component, range_start, range_end, \
                        recurring, index_version, content, revision, schedule_tag) \
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
@@ -668,7 +685,8 @@ impl Store {
                        recurring = excluded.recurring, index_version = excluded.index_version, \
                        content = excluded.content, revision = excluded.revision, \
                        schedule_tag = excluded.schedule_tag, \
-                       modified_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+                       modified_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+                     RETURNING id",
                 )
                 .bind(collection_id)
                 .bind(name)
@@ -682,7 +700,17 @@ impl Store {
                 .bind(item.content)
                 .bind(revision)
                 .bind(schedule.set)
-                .execute(&mut *tx)
+                .fetch_one(&mut *tx)
+                .await?
+                .try_get("id")?;
+                crate::attachments::set_item_refs(
+                    &mut tx,
+                    item_id,
+                    owner_id,
+                    item.attachments,
+                    guard_id,
+                    schedule.keep_delivered && schedule.set.is_some(),
+                )
                 .await?;
                 record_change(&mut tx, collection_id, revision, name, false).await?;
                 tx.commit().await?;
@@ -817,8 +845,8 @@ impl Store {
                 }
 
                 let Some(item) = sqlx::query(
-                    "SELECT uid, etag, component, range_start, range_end, recurring, index_version, \
-                       content, schedule_tag FROM items WHERE collection_id = ? AND name = ?",
+                    "SELECT id, uid, etag, component, range_start, range_end, recurring, index_version, \
+                       content FROM items WHERE collection_id = ? AND name = ?",
                 )
                 .bind(source_collection)
                 .bind(source_name)
@@ -835,7 +863,7 @@ impl Store {
                 let recurring: bool = item.try_get("recurring")?;
                 let index_version: i64 = item.try_get("index_version")?;
                 let content: Vec<u8> = item.try_get("content")?;
-                let schedule_tag: Option<String> = item.try_get("schedule_tag")?;
+                let source_id: i64 = item.try_get("id")?;
                 check(source_precondition, Some(&etag))?;
 
                 if kind == CollectionKind::Calendar.as_str() {
@@ -905,7 +933,9 @@ impl Store {
                     let used = used
                         .saturating_add(crate::trash::trash_bytes(&mut *tx, owner_id).await?)
                         .saturating_add(crate::properties::owner_bytes(&mut *tx, owner_id).await?)
-                        .saturating_add(crate::scheduling::inbox_bytes(&mut *tx, owner_id).await?);
+                        .saturating_add(crate::scheduling::inbox_bytes(&mut *tx, owner_id).await?)
+                        // Shared with the copy, so counted once.
+                        .saturating_add(crate::attachments::owner_bytes(&mut *tx, owner_id).await?);
                     let size = i64::try_from(content.len()).unwrap_or(i64::MAX);
                     if used.saturating_add(size) > self.settings.quota_bytes() {
                         return Err(StoreError::Limit("storage quota exceeded"));
@@ -913,18 +943,49 @@ impl Store {
                 }
 
                 if remove_source {
-                    // Removed first: within one collection the UID must stay unique.
-                    sqlx::query("DELETE FROM items WHERE collection_id = ? AND name = ?")
-                        .bind(source_collection)
-                        .bind(source_name)
-                        .execute(&mut *tx)
-                        .await?;
+                    // The row itself moves, so it keeps its id and with it its
+                    // attachment references. A replaced destination goes first:
+                    // its references (and attachments nobody else references)
+                    // go with it.
+                    if existing {
+                        sqlx::query("DELETE FROM items WHERE collection_id = ? AND name = ?")
+                            .bind(destination_collection)
+                            .bind(destination_name)
+                            .execute(&mut *tx)
+                            .await?;
+                    }
                     let revision = bump_revision(&mut tx, source_collection).await?;
                     record_change(&mut tx, source_collection, revision, source_name, true).await?;
+                    let revision = bump_revision(&mut tx, destination_collection).await?;
+                    sqlx::query(
+                        "UPDATE items SET collection_id = ?, name = ?, revision = ?, \
+                           modified_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+                         WHERE collection_id = ? AND name = ?",
+                    )
+                    .bind(destination_collection)
+                    .bind(destination_name)
+                    .bind(revision)
+                    .bind(source_collection)
+                    .bind(source_name)
+                    .execute(&mut *tx)
+                    .await?;
+                    record_change(
+                        &mut tx,
+                        destination_collection,
+                        revision,
+                        destination_name,
+                        false,
+                    )
+                    .await?;
+                    tx.commit().await?;
+                    return Ok(Some(TransferOutcome {
+                        created: !existing,
+                        etag,
+                    }));
                 }
 
                 let revision = bump_revision(&mut tx, destination_collection).await?;
-                sqlx::query(
+                let copy_id: i64 = sqlx::query(
                     "INSERT INTO items (collection_id, name, uid, etag, component, range_start, range_end, \
                        recurring, index_version, content, revision, schedule_tag) \
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
@@ -934,7 +995,8 @@ impl Store {
                        recurring = excluded.recurring, index_version = excluded.index_version, \
                        content = excluded.content, revision = excluded.revision, \
                        schedule_tag = excluded.schedule_tag, \
-                       modified_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+                       modified_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+                     RETURNING id",
                 )
                 .bind(destination_collection)
                 .bind(destination_name)
@@ -947,10 +1009,14 @@ impl Store {
                 .bind(index_version)
                 .bind(&content)
                 .bind(revision)
-                // A moved scheduling object stays one; a copy is a plain object.
-                .bind(schedule_tag.filter(|_| remove_source))
-                .execute(&mut *tx)
-                .await?;
+                // A moved scheduling object stays one (above); a copy is a
+                // plain object.
+                .bind(None::<String>)
+                .fetch_one(&mut *tx)
+                .await?
+                .try_get("id")?;
+                // The copy shares the owner's attachments (no extra quota).
+                crate::attachments::copy_refs(&mut tx, source_id, copy_id, owner_id).await?;
                 record_change(
                     &mut tx,
                     destination_collection,

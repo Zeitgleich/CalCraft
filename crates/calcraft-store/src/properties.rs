@@ -177,7 +177,8 @@ async fn check_limits(
         let used = items
             .saturating_add(crate::trash::trash_bytes(&mut **tx, owner_id).await?)
             .saturating_add(owner_bytes(&mut **tx, owner_id).await?)
-            .saturating_add(crate::scheduling::inbox_bytes(&mut **tx, owner_id).await?);
+            .saturating_add(crate::scheduling::inbox_bytes(&mut **tx, owner_id).await?)
+            .saturating_add(crate::attachments::owner_bytes(&mut **tx, owner_id).await?);
         if used.saturating_add(after - before) > quota_bytes {
             return Err(StoreError::Limit("storage quota exceeded"));
         }

@@ -6,7 +6,7 @@
 //! the id of a collection obtained here.
 
 use calcraft_core::{CollectionKind, Slug, Username};
-use calcraft_store::{Collection, StoreError, User};
+use calcraft_store::{AttachmentMeta, Collection, StoreError, User};
 
 use crate::app::{AppState, DAV_ROOT};
 
@@ -29,10 +29,14 @@ pub enum Resource {
     InboxItem(String),
     /// The user's scheduling outbox (RFC 6638 §2.1); only with scheduling on.
     Outbox,
+    /// A managed attachment (RFC 8607) the user may read; only with
+    /// attachments on. Attachments the user may not read do not resolve.
+    Attachment(AttachmentMeta),
 }
 
 /// Path below `/dav/` after splitting, still unvalidated against the user.
 enum Target {
+    Attachment(String),
     Root,
     Principal(Username),
     Home(CollectionKind, Username),
@@ -97,6 +101,11 @@ fn parse_target(path: &str) -> Option<Target> {
             Some(Target::InboxItem(user.parse().ok()?, name))
         }
         ["scheduling", ..] => None,
+        // Exactly the form the server issues: no decoding, no variants.
+        ["attachments", id] => {
+            calcraft_store::valid_managed_id(id).then(|| Target::Attachment((*id).to_owned()))
+        }
+        ["attachments", ..] => None,
         [home, user] => Some(Target::Home(kind(home)?, user.parse().ok()?)),
         [home, user, slug] => Some(Target::Collection(
             kind(home)?,
@@ -148,6 +157,14 @@ pub async fn resolve(
             (scheduling && own(&owner)).then_some(Resource::InboxItem(name))
         }
         Some(Target::Collection(..) | Target::Item(..)) => None,
+        // Readable means: own, or referenced by one of the user's objects
+        // (an invitation). Anything else looks like a missing path.
+        Some(Target::Attachment(id)) if state.attachments.is_some() => state
+            .store
+            .readable_attachment(&id, user.id)
+            .await?
+            .map(Resource::Attachment),
+        Some(Target::Attachment(_)) => None,
     })
 }
 
@@ -290,7 +307,12 @@ pub fn href_of(resource: &Resource, user: &Username) -> String {
         // Valid item names need no escaping.
         Resource::InboxItem(name) => format!("{}{name}", inbox_href(user)),
         Resource::Outbox => outbox_href(user),
+        Resource::Attachment(meta) => attachment_href(&meta.managed_id),
     }
+}
+
+pub fn attachment_href(managed_id: &str) -> String {
+    format!("{DAV_ROOT}attachments/{managed_id}")
 }
 
 #[cfg(test)]

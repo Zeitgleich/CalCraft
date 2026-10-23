@@ -41,6 +41,7 @@ async fn put(store: &Store, collection: i64, name: &str, uid: &str, body: &str) 
                 index_version: 0,
                 etag: &format!("\"{uid}-{}\"", body.len()),
                 content: body.as_bytes(),
+                attachments: &[],
             },
             &Precondition::None,
         )
@@ -616,6 +617,7 @@ async fn the_trash_counts_towards_the_quota() {
                 index_version: 0,
                 etag: "\"c\"",
                 content: b"x",
+                attachments: &[],
             },
             &Precondition::None,
         )

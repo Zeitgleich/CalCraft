@@ -423,6 +423,33 @@ size of a delivered copy, inbox size; deliveries count towards the
 recipient's quota. Every user can refuse invitations (*Settings*). Details, status codes and deviations from the RFC:
 [docs/scheduling.md](docs/scheduling.md).
 
+### Attachments (managed attachments)
+
+CalDAV managed attachments (RFC 8607), **off by default**: clients upload a
+file to an event (`POST …?action=attachment-add`), the server stores it in
+the database and adds an `ATTACH` with a download URL below
+`/dav/attachments/`. Invitations carry it to the attendees, who can download
+but not change it.
+
+```toml
+[attachments]
+enabled = true
+# Scheme and host of the download URLs (never taken from the Host header).
+base_url = "https://cal.example.org"
+# max_bytes = 10485760         # per attachment, only uploads may be this large
+# max_per_object = 20
+# max_bytes_per_user = 268435456
+```
+
+Downloads need the DAV credentials and are allowed for the uploader and for
+users whose own events reference the attachment (an invitation); everything
+else is `404`. Files are always sent as downloads (`Content-Disposition:
+attachment`, `nosniff`, a sandboxing CSP, only harmless media types), file
+names are sanitised, a managed id of somebody else in a PUT is refused.
+Attachments count towards the uploader's quota, stay with an object in the
+trash and go when nothing references them any more. Details and deviations
+from the RFC: [docs/attachments.md](docs/attachments.md).
+
 ### Import and export
 
 Calendars can be exported and imported as iCalendar (`ics`), jCal (`jcal`), xCal
@@ -569,12 +596,18 @@ Integration suites of `calcraft-server` (`crates/calcraft-server/tests/`):
   runs nightly on Linux),
   `failures.rs` (read-only database, full disk, aborted uploads).
 - **Logs:** `log_secrets.rs` checks that passwords, tokens, TOTP and
-  recovery codes, cookies, calendar/contact contents and scheduling
-  messages and addresses never reach the logs.
+  recovery codes, cookies, calendar/contact contents, scheduling
+  messages and addresses and attachments (names, contents, ids) never
+  reach the logs.
 - **Scheduling:** `scheduling.rs` (invitations, replies, cancellations,
   recurrence, Schedule-Tag, free/busy, limits, quota, disabled users,
   organizer spoofing, attendee tampering, UID hijacking, concurrent
   replies); the authorization matrix covers inboxes, outboxes and POST.
+- **Attachments:** `attachments.rs` (add, update, remove, recurrence
+  instances, size and count limits, quota with trash, download headers and
+  hostile file names, foreign managed ids in PUTs, attendee access and its
+  end, garbage collection, MOVE/COPY, backup/restore, parallel uploads);
+  the authorization matrix covers the download URLs and attachment POSTs.
 - **Subscriptions:** `subscriptions.rs` (subscription calendars are
   read-only for every DAV client), `subscription_logs.rs` (feed URLs never
   reach the logs); the SSRF rules and fetches against a local server are
@@ -585,8 +618,8 @@ Integration suites of `calcraft-server` (`crates/calcraft-server/tests/`):
 
 Further checks:
 
-- **Fuzzing** (`fuzz/`, cargo-fuzz): 5 targets (`ical_object`, `dav_xml`,
-  `recurrence`, `import`, `itip`). CI runs each of them for 60 s on every change
+- **Fuzzing** (`fuzz/`, cargo-fuzz): 6 targets (`ical_object`, `dav_xml`,
+  `recurrence`, `import`, `itip`, `attach`). CI runs each of them for 60 s on every change
   and for 20 min nightly.
 - **CI** on Linux, macOS and Windows: `cargo fmt`, Clippy, all tests with
   all features and DAV-only, wasm build of the web UI, a client
@@ -629,6 +662,10 @@ German):
   session cookies, a required CSRF header on state-changing API requests,
   plus `X-Frame-Options`, `Referrer-Policy` and optional HSTS
   (`security.hsts`).
+- **Attachments:** off by default; downloads only for the uploader and
+  users whose events reference the file (never derived from event
+  content), always as downloads with `nosniff` and a sandboxing CSP, never
+  rendered on the server's origin (see *Attachments*).
 - **Calendar subscriptions:** off by default; the server fetches feeds only
   from public addresses it resolved and checked itself, pinned against DNS
   rebinding, with every redirect checked again (see *Calendar subscriptions*).

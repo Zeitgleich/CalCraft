@@ -185,6 +185,24 @@ max_delivered_bytes_per_hour = 16777216
 # Largest calendar copy delivered to an attendee (4 KiB to 1 MiB).
 max_delivered_object_bytes = 262144
 
+[attachments]
+# CalDAV managed attachments (RFC 8607): files uploaded to events and served
+# below /dav/attachments/ to the uploader and to attendees of invitations that
+# carry them. Off by default. See docs/attachments.md.
+enabled = false
+# Scheme and host clients reach the server at, without a path. The download
+# URLs in events are built from it (never from the Host header). Required when
+# enabled.
+# base_url = "https://cal.example.org"
+# Largest attachment in bytes (1 KiB to 100 MiB). Only uploads may be this
+# large; server.max_body_bytes still applies to all other requests.
+max_bytes = 10485760
+# Managed attachments per calendar object, all instances together (1-100).
+max_per_object = 20
+# Bytes of attachments one user may own (at least max_bytes). Attachments also
+# count towards the storage quota.
+max_bytes_per_user = 268435456
+
 [logging]
 # Filter syntax of tracing-subscriber; RUST_LOG takes precedence.
 level = "info"

@@ -1,7 +1,7 @@
 //! GET, HEAD, PUT and DELETE of calendar objects (RFC 4791 §5.3.2).
 
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::Request,
     http::{
         HeaderMap, StatusCode,
@@ -135,6 +135,8 @@ pub(crate) struct Validated {
     pub range_start: Option<i64>,
     pub range_end: Option<i64>,
     pub recurring: bool,
+    /// Managed attachments (RFC 8607) the content references.
+    pub managed_ids: Vec<String>,
 }
 
 /// Why an object was not accepted by [`check_object`].
@@ -200,6 +202,7 @@ pub(crate) fn check_object(
                 range_start: object.range.start,
                 range_end: object.range.end,
                 recurring: object.recurring,
+                managed_ids: object.managed_ids,
             })
         }
         CollectionKind::Addressbook => {
@@ -210,6 +213,7 @@ pub(crate) fn check_object(
                 range_start: None,
                 range_end: None,
                 recurring: false,
+                managed_ids: Vec::new(),
             })
         }
     }
@@ -267,11 +271,73 @@ pub async fn put(ctx: Ctx<'_>, resource: Resource, request: Request) -> Response
         Ok(body) => body,
         Err(_) => return dav_error(StatusCode::FORBIDDEN, &too_large),
     };
-    let validated = match validate(&collection, &body, max_vcard_bytes) {
+    let if_tag = if kind == CollectionKind::Calendar && ctx.state.scheduling.is_some() {
+        match super::scheduling::if_schedule_tag(&headers) {
+            Ok(tag) => tag,
+            Err(response) => return response,
+        }
+    } else {
+        None
+    };
+    store_body(ctx, &collection, &name, body, precondition, if_tag).await
+}
+
+/// Validates and stores the body of an object: a PUT, or the object an
+/// attachment POST built (`dav/attachments.rs`). Managed attachments are
+/// checked and their `ATTACH` properties rewritten to the server's form;
+/// if that changed the object, the response has no ETag (RFC 4791
+/// §5.3.4).
+pub(super) async fn store_body(
+    ctx: Ctx<'_>,
+    collection: &Collection,
+    name: &str,
+    body: Bytes,
+    precondition: Precondition,
+    if_tag: Option<String>,
+) -> Response {
+    let max_vcard_bytes = ctx.state.max_vcard_bytes;
+    let validated = match validate(collection, &body, max_vcard_bytes) {
         Ok(validated) => validated,
         Err(condition) => return dav_error(StatusCode::FORBIDDEN, condition),
     };
+    let (body, validated, rewritten) = match super::attachments::check_object_attachments(
+        ctx, collection, name, &body, &validated,
+    )
+    .await
+    {
+        Ok(None) => (body, validated, false),
+        Ok(Some(canonical)) => match validate(collection, &canonical, max_vcard_bytes) {
+            Ok(again) => (canonical, again, true),
+            Err(condition) => return dav_error(StatusCode::FORBIDDEN, condition),
+        },
+        Err(response) => return response,
+    };
+    let mut response = store_validated(
+        ctx,
+        collection,
+        name,
+        body,
+        &validated,
+        precondition,
+        if_tag,
+    )
+    .await;
+    if rewritten {
+        response.headers_mut().remove(ETAG);
+    }
+    response
+}
 
+async fn store_validated(
+    ctx: Ctx<'_>,
+    collection: &Collection,
+    name: &str,
+    body: Bytes,
+    validated: &Validated,
+    precondition: Precondition,
+    if_tag: Option<String>,
+) -> Response {
+    let kind = collection.kind;
     let etag = etag(&body);
     let item = NewItem {
         uid: &validated.uid,
@@ -282,20 +348,17 @@ pub async fn put(ctx: Ctx<'_>, resource: Resource, request: Request) -> Response
         index_version: INDEX_VERSION,
         etag: &etag,
         content: &body,
+        attachments: &validated.managed_ids,
     };
     if kind == CollectionKind::Calendar
         && let Some(scheduling) = &ctx.state.scheduling
     {
-        let if_tag = match super::scheduling::if_schedule_tag(&headers) {
-            Ok(tag) => tag,
-            Err(response) => return response,
-        };
         let body = body.clone();
         return super::scheduling::put(
             ctx,
             scheduling,
-            &collection,
-            &name,
+            collection,
+            name,
             body,
             item,
             precondition,
@@ -306,7 +369,7 @@ pub async fn put(ctx: Ctx<'_>, resource: Resource, request: Request) -> Response
     match ctx
         .state
         .store
-        .put_item(collection.id, &name, &item, &precondition)
+        .put_item(collection.id, name, &item, &precondition)
         .await
     {
         Ok(outcome) => {
@@ -317,7 +380,7 @@ pub async fn put(ctx: Ctx<'_>, resource: Resource, request: Request) -> Response
             (status, [(ETAG, etag)]).into_response()
         }
         Err(StoreError::UidConflict(other)) => {
-            let href = item_href(&collection, &ctx.user.username, &other);
+            let href = item_href(collection, &ctx.user.username, &other);
             let prefix = ns(kind);
             dav_error(
                 StatusCode::FORBIDDEN,

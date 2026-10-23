@@ -4,6 +4,7 @@
 //! another user's resources are answered with 404, so that account names
 //! cannot be probed. Resolution and the ownership check live in [`paths`].
 
+mod attachments;
 mod collections;
 mod copymove;
 mod objects;
@@ -41,16 +42,17 @@ pub use scheduling::SCHEDULE_TAG;
 pub const ALLOWED_METHODS: &str = "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, REPORT, MKCALENDAR, MKCOL, COPY, MOVE, POST";
 /// DAV compliance classes.
 const DAV_CLASSES: &str = "1, 3, calendar-access, addressbook, extended-mkcol";
-/// DAV compliance classes with scheduling enabled (RFC 6638 §2).
-const DAV_CLASSES_SCHEDULING: &str =
-    "1, 3, calendar-access, addressbook, extended-mkcol, calendar-auto-schedule";
+/// Compliance class with scheduling enabled (RFC 6638 §2).
+const CLASS_SCHEDULING: &str = ", calendar-auto-schedule";
+/// Compliance class with managed attachments enabled (RFC 8607 §6.1).
+const CLASS_ATTACHMENTS: &str = ", calendar-managed-attachments";
 const WWW_AUTHENTICATE_VALUE: &str = "Basic realm=\"CalCraft\", charset=\"UTF-8\"";
 const XML_CONTENT_TYPE: &str = "application/xml; charset=utf-8";
 
 /// Entry point for every request below `/dav`.
 pub async fn handle(State(state): State<AppState>, request: Request) -> Response {
     if request.method() == Method::OPTIONS {
-        return options(state.scheduling.is_some());
+        return options(state.scheduling.is_some(), state.attachments.is_some());
     }
 
     let header = request
@@ -79,6 +81,14 @@ pub async fn handle(State(state): State<AppState>, request: Request) -> Response
         state: &state,
         user: &user,
     };
+    // Attachments are only downloaded; nothing else applies to them.
+    if let (Resource::Attachment(meta), Some(managed)) = (&resource, &state.attachments) {
+        return match request.method().as_str() {
+            "GET" => attachments::get(ctx, managed, meta, request.headers(), true).await,
+            "HEAD" => attachments::get(ctx, managed, meta, request.headers(), false).await,
+            _ => method_not_allowed(),
+        };
+    }
     match request.method().as_str() {
         "PROPFIND" => propfind::handle(ctx, resource, request).await,
         "PROPPATCH" => collections::proppatch(ctx, resource, request).await,
@@ -91,9 +101,14 @@ pub async fn handle(State(state): State<AppState>, request: Request) -> Response
         "DELETE" => objects::delete(ctx, resource, request).await,
         "COPY" => copymove::handle(ctx, resource, request, copymove::Mode::Copy).await,
         "MOVE" => copymove::handle(ctx, resource, request, copymove::Mode::Move).await,
-        "POST" => match (&resource, &state.scheduling) {
-            (Resource::Outbox, Some(scheduling)) => {
+        "POST" => match (resource, &state.scheduling, &state.attachments) {
+            (Resource::Outbox, Some(scheduling), _) => {
                 scheduling::post(ctx, scheduling, request).await
+            }
+            (Resource::Item(collection, name), _, Some(managed))
+                if attachments::is_attachment_post(request.uri().query()) =>
+            {
+                attachments::post(ctx, managed, collection, name, request).await
             }
             _ => method_not_allowed(),
         },
@@ -108,15 +123,17 @@ struct Ctx<'a> {
     user: &'a calcraft_store::User,
 }
 
-fn options(scheduling: bool) -> Response {
-    let classes = if scheduling {
-        DAV_CLASSES_SCHEDULING
-    } else {
-        DAV_CLASSES
-    };
+fn options(scheduling: bool, attachments: bool) -> Response {
+    let mut classes = DAV_CLASSES.to_owned();
+    if scheduling {
+        classes.push_str(CLASS_SCHEDULING);
+    }
+    if attachments {
+        classes.push_str(CLASS_ATTACHMENTS);
+    }
     (
         StatusCode::OK,
-        [("dav", classes), (ALLOW.as_str(), ALLOWED_METHODS)],
+        [("dav", classes.as_str()), (ALLOW.as_str(), ALLOWED_METHODS)],
     )
         .into_response()
 }

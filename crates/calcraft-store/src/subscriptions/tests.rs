@@ -326,6 +326,7 @@ async fn read_only_collections_refuse_every_write() {
         index_version: 0,
         etag: "\"x\"",
         content: b"BEGIN:VCALENDAR",
+        attachments: &[],
     };
     assert!(matches!(
         store

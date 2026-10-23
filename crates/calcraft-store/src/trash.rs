@@ -324,7 +324,7 @@ impl Store {
                 let mut tx = self.writer.begin_with("BEGIN IMMEDIATE").await?;
                 crate::items::ensure_writable(&mut tx, collection_id).await?;
                 let Some(row) = sqlx::query(
-                    "SELECT i.etag, c.owner_id FROM items i JOIN collections c ON c.id = i.collection_id \
+                    "SELECT i.id, i.etag, c.owner_id FROM items i JOIN collections c ON c.id = i.collection_id \
                      WHERE i.collection_id = ? AND i.name = ?",
                 )
                 .bind(collection_id)
@@ -338,8 +338,9 @@ impl Store {
                 check(precondition, Some(&etag))?;
                 let summary = summary.filter(|_| etag == before.etag);
                 let owner_id: i64 = row.try_get("owner_id")?;
+                let item_id: i64 = row.try_get("id")?;
                 if make_room(&mut tx, &self.settings, owner_id, 1).await? {
-                    sqlx::query(
+                    let entry: i64 = sqlx::query(
                         "INSERT INTO trash (public_id, owner_id, entry_kind, collection_kind, \
                            collection_slug, collection_id, name, uid, etag, component, range_start, \
                            range_end, content, modified_at, summary, size, deleted_at) \
@@ -347,14 +348,17 @@ impl Store {
                            i.collection_id, i.name, i.uid, i.etag, i.component, i.range_start, \
                            i.range_end, i.content, i.modified_at, ?, length(i.content), ? \
                          FROM items i JOIN collections c ON c.id = i.collection_id \
-                         WHERE i.collection_id = ? AND i.name = ?",
+                         WHERE i.collection_id = ? AND i.name = ? \
+                         RETURNING id",
                     )
                     .bind(summary)
                     .bind(now)
                     .bind(collection_id)
                     .bind(name)
-                    .execute(&mut *tx)
-                    .await?;
+                    .fetch_one(&mut *tx)
+                    .await?
+                    .try_get("id")?;
+                    crate::attachments::refs_to_trash(&mut tx, item_id, entry, owner_id).await?;
                 }
                 sqlx::query("DELETE FROM items WHERE collection_id = ? AND name = ?")
                     .bind(collection_id)
@@ -458,6 +462,13 @@ impl Store {
                     .bind(now)
                     .bind(collection_id)
                     .execute(&mut *tx)
+                    .await?;
+                    crate::attachments::collection_refs_to_trash(
+                        &mut tx,
+                        collection_id,
+                        entry,
+                        owner_id,
+                    )
                     .await?;
                     // Objects deleted from it earlier follow the collection.
                     sqlx::query(
@@ -800,9 +811,10 @@ async fn restore_item(
     .await?
     .try_get("sync_revision")?;
     let etag: String = entry.try_get("etag")?;
-    sqlx::query(
+    let item_id: i64 = sqlx::query(
         "INSERT INTO items (collection_id, name, uid, etag, component, range_start, range_end, content, revision, modified_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')))",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))) \
+         RETURNING id",
     )
     .bind(collection_id)
     .bind(&name)
@@ -814,8 +826,10 @@ async fn restore_item(
     .bind(entry.try_get::<Vec<u8>, _>("content")?)
     .bind(revision)
     .bind(entry.try_get::<Option<String>, _>("modified_at")?)
-    .execute(&mut **tx)
-    .await?;
+    .fetch_one(&mut **tx)
+    .await?
+    .try_get("id")?;
+    crate::attachments::refs_from_trash(tx, entry.try_get("id")?, item_id).await?;
     record_change(tx, collection_id, revision, &name, false).await?;
     Ok(RestoredEntry {
         kind: TrashEntryKind::Item,
@@ -884,6 +898,7 @@ async fn restore_collection(
     .await?
     .rows_affected();
     if restored > 0 {
+        crate::attachments::collection_refs_from_trash(tx, entry_id, collection_id).await?;
         sqlx::query(
             "INSERT INTO changes (collection_id, name, revision, deleted) \
              SELECT collection_id, name, revision, 0 FROM items WHERE collection_id = ?",

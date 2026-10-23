@@ -412,6 +412,10 @@ impl<'a> Writer<'a> {
             index_version: INDEX_VERSION,
             etag: &etag,
             content: &bytes,
+            // Only the user's own managed attachments get a reference;
+            // anything else in the file (another user's or another server's
+            // managed ids) stays plain text and grants nothing.
+            attachments: &validated.managed_ids,
         };
         match self
             .store
