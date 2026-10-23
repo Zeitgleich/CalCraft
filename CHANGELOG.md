@@ -7,6 +7,17 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 
 ## [Unreleased]
 
+## [0.1.0-alpha.4] – 2026-10-23
+
+Fourth pre-release, for testing only – not for production use (open points:
+[docs/produktionsreife.md](docs/produktionsreife.md)). New: sharing of
+calendars and address books between users (on by default, acceptance
+required; Apple Calendar "Share" supported) and public read-only links
+(off by default). Upgrading applies the database migration `0013_sharing`
+(a pre-migration backup is taken by default). New configuration sections
+`[sharing]` (`enabled = true`) and `[publish]` (`enabled = false`, needs
+`base_url`).
+
 ### Added
 
 - Sharing of calendars and address books with other users of the server

@@ -9,7 +9,7 @@
 
 Self-hosted CalDAV/CardDAV server written in Rust, with an optional web interface.
 
-> **Status:** pre-release, 0.1.0-alpha.3. Not ready for production use;
+> **Status:** pre-release, 0.1.0-alpha.4. Not ready for production use;
 > what is still missing is tracked in [docs/produktionsreife.md](docs/produktionsreife.md) (German).
 
 ## Goals
@@ -585,20 +585,20 @@ e.g. `CALCRAFT_SERVER__BIND=0.0.0.0:5232`.
 
 ## Tests
 
-Numbers as of 2026-10-23 (version 0.1.0-alpha.3); they are not updated
+Numbers as of 2026-10-23 (version 0.1.0-alpha.4); they are not updated
 automatically.
 
-`cargo test --workspace --all-features` runs **655 tests** (1 of them
-ignored by default, see below): 427 unit tests in the crates' `src/` and
-228 integration tests in `tests/` directories. There are no doc tests.
+`cargo test --workspace --all-features` runs **701 tests** (1 of them
+ignored by default, see below): 456 unit tests in the crates' `src/` and
+245 integration tests in `tests/` directories. There are no doc tests.
 
 | Crate | Unit | Integration |
 |---|---:|---:|
 | calcraft-core | 6 | – |
-| calcraft-dav | 34 | – |
+| calcraft-dav | 38 | – |
 | calcraft-ical | 106 | 12 |
-| calcraft-server | 155 | 216 |
-| calcraft-store | 103 | – |
+| calcraft-server | 165 | 233 |
+| calcraft-store | 118 | – |
 | calcraft-ui (host tests) | 21 | – |
 | calcraft-web | 2 | – |
 
@@ -611,7 +611,7 @@ Integration suites of `calcraft-server` (`crates/calcraft-server/tests/`):
   from `api::ROUTES`. It checks exact status codes, byte-identical answers
   for foreign and nonexistent resources, that marker strings from the other
   user's data never leak, and that the other user's data is unchanged after
-  every write. One run sends about 69 400 requests and makes over 267 000
+  every write. One run sends about 84 600 requests and makes over 326 000
   counted assertions. A DAV method or REST route without a matrix entry
   makes it fail.
 - **Protocols:** `dav.rs`, `caldav.rs`, `carddav_sync.rs`,

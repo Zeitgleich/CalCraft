@@ -1,6 +1,6 @@
 # Produktionsreife – Anforderungen, Ist-Stand und Fahrplan
 
-Stand: 23.10.2026, Vorabversion 0.1.0-alpha.3: `main` mit M5a (OIDC), M6 (Import/Export, Webcal-Abos mit SSRF-Schutz, `calcraft migrate`), Phase-2-Limits und -Robustheit, Release-Pipeline, Update-Hinweis, CodeQL/Coverage, neuer Web-UI und den Phase-3-Punkten Papierkorb, `MOVE`/`COPY`, CardDAV-Fotos/-Gruppen sowie RRULE-Expansion mit Zeitzonen, Kalender-Reihenfolge/Dead Properties, systemd-Dienst (`Type=notify`), `/readyz` mit Schreibzustand sowie CalDAV-Scheduling zwischen lokalen Nutzern (RFC 6638, Stufe A) und Managed Attachments (RFC 8607), beide standardmäßig aus.
+Stand: 23.10.2026, Vorabversion 0.1.0-alpha.4: `main` mit M5a (OIDC), M6 (Import/Export, Webcal-Abos mit SSRF-Schutz, `calcraft migrate`), Phase-2-Limits und -Robustheit, Release-Pipeline, Update-Hinweis, CodeQL/Coverage, neuer Web-UI und den Phase-3-Punkten Papierkorb, `MOVE`/`COPY`, CardDAV-Fotos/-Gruppen sowie RRULE-Expansion mit Zeitzonen, Kalender-Reihenfolge/Dead Properties, systemd-Dienst (`Type=notify`), `/readyz` mit Schreibzustand sowie CalDAV-Scheduling zwischen lokalen Nutzern (RFC 6638, Stufe A) und Managed Attachments (RFC 8607), beide standardmäßig aus, und M5b-Freigaben (an Benutzer, öffentliche Nur-Lese-Links).
 Dieses Dokument ist die Grundlage für die Freigabe einer stabilen Version.
 Ein Punkt gilt erst als **erledigt**, wenn es einen automatisierten Test
 (oder einen dokumentierten, wiederholbaren manuellen Nachweis) dafür gibt.
@@ -89,8 +89,8 @@ laufen parallel, weil sie für den Pilotbetrieb gebraucht werden.
 - [ ] `CALDAV:expand`/`limit-recurrence-set`, Floating-Zeiten über `calendar-timezone`, Zeitzonen-Datenbank für `TZID`s ohne VTIMEZONE
 - [x] Papierkorb (Soft-Delete mit Wiederherstellung, `tests/trash.rs`)
 - [x] CardDAV: Fotos (Limit konfigurierbar), Apple- und vCard-4.0-Gruppen, Tests (`tests/carddav_photos.rs`)
-- [ ] Freigaben/ACL (M5b)
-- [ ] 👤 Reale Clients: Apple Kalender/Kontakte (macOS, iOS), Thunderbird, DAVx⁵, GNOME – Testprotokoll in `docs/compat/`
+- [x] Freigaben an Benutzer und öffentliche Links (M5b, `docs/sharing.md`); Gruppen offen
+- [ ] 👤 Reale Clients: Apple Kalender/Kontakte (macOS, iOS), Thunderbird, DAVx⁵, GNOME – Testprotokoll in `docs/compat/` (Apple Kalender: [`docs/compat/apple-calendar.md`](compat/apple-calendar.md), läuft)
 - [ ] Serientermine, Offlinebetrieb und Konflikte mit realen Clients
 - [ ] Langzeit-/Lasttest: mehrere Benutzer, große Kalender (≥ 50 000 Objekte)
 
