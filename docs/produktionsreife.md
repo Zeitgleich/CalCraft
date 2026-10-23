@@ -1,6 +1,6 @@
 # Produktionsreife – Anforderungen, Ist-Stand und Fahrplan
 
-Stand: 22.10.2026, Vorabversion 0.1.0-alpha.2: `main` mit M5a (OIDC), M6 (Import/Export, Webcal-Abos mit SSRF-Schutz, `calcraft migrate`), Phase-2-Limits und -Robustheit, Release-Pipeline, Update-Hinweis, CodeQL/Coverage, neuer Web-UI und den Phase-3-Punkten Papierkorb, `MOVE`/`COPY`, CardDAV-Fotos/-Gruppen sowie RRULE-Expansion mit Zeitzonen, Kalender-Reihenfolge/Dead Properties, systemd-Dienst (`Type=notify`) und `/readyz` mit Schreibzustand.
+Stand: 23.10.2026, Vorabversion 0.1.0-alpha.3: `main` mit M5a (OIDC), M6 (Import/Export, Webcal-Abos mit SSRF-Schutz, `calcraft migrate`), Phase-2-Limits und -Robustheit, Release-Pipeline, Update-Hinweis, CodeQL/Coverage, neuer Web-UI und den Phase-3-Punkten Papierkorb, `MOVE`/`COPY`, CardDAV-Fotos/-Gruppen sowie RRULE-Expansion mit Zeitzonen, Kalender-Reihenfolge/Dead Properties, systemd-Dienst (`Type=notify`), `/readyz` mit Schreibzustand sowie CalDAV-Scheduling zwischen lokalen Nutzern (RFC 6638, Stufe A) und Managed Attachments (RFC 8607), beide standardmäßig aus.
 Dieses Dokument ist die Grundlage für die Freigabe einer stabilen Version.
 Ein Punkt gilt erst als **erledigt**, wenn es einen automatisierten Test
 (oder einen dokumentierten, wiederholbaren manuellen Nachweis) dafür gibt.

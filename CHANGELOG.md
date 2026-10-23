@@ -7,6 +7,16 @@ follow [Semantic Versioning](https://semver.org/). Release process:
 
 ## [Unreleased]
 
+## [0.1.0-alpha.3] – 2026-10-23
+
+Third pre-release, for testing only – not for production use (open points:
+[docs/produktionsreife.md](docs/produktionsreife.md)). New: CalDAV scheduling
+between users of the same server (RFC 6638, stage A) and managed attachments
+(RFC 8607), both off by default. Upgrading applies the database migrations
+`0011_scheduling` and `0012_attachments` (a pre-migration backup is taken by
+default). New configuration sections `[scheduling]` and `[attachments]`
+(`enabled = false`; attachments also need `base_url`).
+
 ### Added
 
 - CalDAV scheduling (RFC 6638), stage A: between users of the same server,
